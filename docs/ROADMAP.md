@@ -110,8 +110,11 @@ Open for v0.9.x:
 - [ ] GPU compute base encoders (wgpu, `gpu` cargo feature, on by default; `src/gpu/`). Each kernel
   writes exactly the CPU encoder's blocks (tests compare every effort, block for block); `GpuMode::Auto`
   uses one only where it beats the CPU, `--gpu` forces it. Done: BC4/BC5 (`bc4.wgsl`; the CPU stays
-  the default, since 20 AVX2 threads take 1-3 ms for a 1.6 MP BC5 vs 14 ms on an Intel Arc iGPU).
-  Next: BC1, BC7 (fast path and mode 6), then WebGPU in the web demo when the browser has it.
+  the default, since 20 AVX2 threads take 1-3 ms for a 1.6 MP BC5 vs 14 ms on an Intel Arc iGPU);
+  BC1 efforts 0-1 (`bc1.wgsl`, after making the CPU line fit and refits exact integer arithmetic;
+  CPU default again: 9 vs 71 ms for 16 MP at effort 0). Next: BC1 efforts 2+ (needs per-lane
+  cluster-fit pruning and exact split scoring), BC7 (mode 6, then the fast path up to effort 8,
+  where the GPU should win), then WebGPU in the web demo when the browser has it.
 
 ## v1.2: "output B": latent-space supercompression + transcoder
 

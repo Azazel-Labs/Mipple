@@ -425,13 +425,18 @@ fn main() -> Result<()> {
             println!("  BC texture sampling: {}", if i.bc_textures { "yes" } else { "no" });
             for f in Format::ALL {
                 println!(
-                    "  {f}: {}",
+                    "  {f}: {}{}",
                     if !gpu.encodes(f) {
                         "CPU (no GPU encoder yet)"
                     } else if Gpu::preferred(f, mipple::BlockOpts::default()) {
                         "GPU"
                     } else {
                         "CPU by default (faster); GPU encoder with --gpu"
+                    },
+                    if gpu.encodes(f) && !Gpu::has_kernel(f, mipple::BlockOpts::from(9u8)) {
+                        " (efforts 0-1)"
+                    } else {
+                        ""
                     }
                 );
             }
@@ -541,6 +546,9 @@ fn encode(a: EncodeArgs) -> Result<()> {
         None if a.cpu => println!("  base encode: CPU (--cpu)"),
         None if !Gpu::built() => println!("  base encode: CPU (built without the gpu feature)"),
         None if !Gpu::has_encoder(a.format) => println!("  base encode: CPU (no GPU {} encoder yet)", a.format),
+        None if !Gpu::has_kernel(a.format, opts.block_opts()) => {
+            println!("  base encode: CPU (the GPU {} encoder covers efforts 0-1)", a.format);
+        }
         None if !a.gpu && !Gpu::preferred(a.format, opts.block_opts()) => {
             println!(
                 "  base encode: CPU (faster than the GPU {} encoder; --gpu forces it)",

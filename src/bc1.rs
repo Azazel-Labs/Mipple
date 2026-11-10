@@ -149,7 +149,7 @@ fn finalize(q0: [i32; 3], q1: [i32; 3], px: &Block, w: &[u32; 4]) -> ([u8; 8], u
 }
 
 /// For each 8-bit value, the (hi, lo) quantized endpoint pair whose 2/3 interpolant hits it.
-type MatchTable = [(u8, u8); 256];
+pub(crate) type MatchTable = [(u8, u8); 256];
 
 /// Optimal single-color endpoint pair for every 8-bit value: the pair whose 1/3 interpolant is
 /// nearest the value, ties broken by the closer endpoints, then the first (a, b). Built at
@@ -201,7 +201,7 @@ static MATCH5: MatchTable = build_match(32, false);
 static MATCH6: MatchTable = build_match(64, true);
 
 /// Optimal single-color tables for 5-bit and 6-bit channels.
-fn single_color_tables() -> (&'static MatchTable, &'static MatchTable) {
+pub(crate) fn single_color_tables() -> (&'static MatchTable, &'static MatchTable) {
     (&MATCH5, &MATCH6)
 }
 

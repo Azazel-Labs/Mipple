@@ -1401,15 +1401,16 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, row_order: bool) -> ([u8; 64], [
     (out, solid)
 }
 
-/// Power-of-two scale 2^-s per lane, with s the least shift (at most 15) that brings the
-/// non-negative integer `m` (below 2^24) under 2^(bits + 1): the largest s with m >= 2^(bits + s),
-/// found by halving steps. Exact: every product is a power-of-two scaling.
+/// Power-of-two scale 2^-s per lane, with s the least shift that brings the non-negative
+/// integer `m` (below 2^24) under 2^(bits + 1): the largest s with m >= 2^(bits + s), or 0
+/// (i.e. max(0, floor(log2 m) - bits)), found by halving steps. Exact: every product is a
+/// power-of-two scaling.
 #[inline(always)]
 fn shrink<V: SimdF32>(m: V, bits: i32) -> V {
     let mut ms = m;
     let mut scale = V::splat(1.0);
-    for k in [8, 4, 2, 1] {
-        let small = ms.simd_lt(V::splat((1u32 << (bits + k)) as f32));
+    for k in [16, 8, 4, 2, 1] {
+        let small = ms.simd_lt(V::splat((1u64 << (bits + k)) as f32));
         let f = V::splat(1.0 / (1u32 << k) as f32);
         ms = V::select(small, ms, ms * f);
         scale = V::select(small, scale, scale * f);

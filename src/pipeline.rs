@@ -252,7 +252,7 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     let mut report = EncodeReport::default();
     let mut levels = Vec::with_capacity(levels_in.len());
     // GPU base encoding only where the device has an encoder for this format; RDO stays on the CPU.
-    let use_gpu = crate::gpu::Gpu::has_encoder(opts.format)
+    let use_gpu = crate::gpu::Gpu::has_kernel(opts.format, opts.block_opts())
         && match opts.gpu {
             GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.block_opts()),
             GpuMode::On => true,
@@ -262,7 +262,6 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         .then(crate::gpu::Gpu::shared)
         .flatten()
         .filter(|g| g.encodes(opts.format));
-    report.gpu = gpu.map(|g| g.info().name.clone());
     let rdo_params = RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
         ..opts.rdo
@@ -270,6 +269,9 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     for level in levels_in {
         let t0 = Instant::now();
         let on_gpu = gpu.and_then(|g| g.encode_surface(level, opts.format, opts.block_opts()));
+        if on_gpu.is_some() {
+            report.gpu = gpu.map(|g| g.info().name.clone());
+        }
         if !rdo_params.enabled() && (on_gpu.is_some() || direct(opts.format, opts.block_opts())) {
             // Straight to raw bytes: no source blocks, no 16-byte slots.
             let data = on_gpu.unwrap_or_else(|| encode_surface_raw(level, opts.format, opts.block_opts()));

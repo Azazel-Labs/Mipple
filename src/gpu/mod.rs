@@ -8,6 +8,10 @@
 //! use the CPU. Without the feature, or on wasm32 for now, [`Gpu::shared`] is always `None`.
 //!
 //! Kernels:
+//! - `bc1.wgsl`: BC1 efforts 0 and 1 (the line fit and least-squares refits of
+//!   `crate::bc1::batch`, which the CPU defines in exact integers). Higher efforts use the CPU.
+//!   The CPU encoder is faster here too (4096 x 4096, 20 AVX2 threads vs an Intel Arc iGPU:
+//!   9 vs 71 ms at effort 0, 18 vs 97 ms at effort 1).
 //! - `bc4.wgsl`: BC4 and BC5, every effort (a port of `crate::bc4::batch`). The CPU encoder is
 //!   faster: it is memory-bound at a few ms per megapixel on a desktop CPU, under the GPU's
 //!   upload, dispatch and readback alone (1024 x 1553 BC5, 20 threads vs an Intel Arc iGPU:
@@ -18,7 +22,7 @@ use crate::surface::Surface;
 use std::sync::OnceLock;
 
 /// Formats with a GPU encoder. Each one is added with its compute kernel.
-const ENCODERS: &[Format] = &[Format::Bc4, Format::Bc5];
+const ENCODERS: &[Format] = &[Format::Bc1, Format::Bc4, Format::Bc5];
 
 /// What an adapter is and what it supports.
 #[derive(Clone, Debug)]
@@ -70,12 +74,17 @@ impl Gpu {
         Self::built() && ENCODERS.contains(&format)
     }
 
+    /// Whether this build has a GPU kernel for `format` at `opts` (BC1's covers efforts 0-1).
+    pub fn has_kernel(format: Format, opts: BlockOpts) -> bool {
+        Self::has_encoder(format) && covers(format, opts)
+    }
+
     /// Whether [`crate::pipeline::GpuMode::Auto`] picks the GPU encoder for `format` at `opts`:
     /// only where it beats the CPU encoder (see the kernel list in the module docs).
     pub fn preferred(format: Format, opts: BlockOpts) -> bool {
         let _ = opts;
         match format {
-            Format::Bc4 | Format::Bc5 => false,
+            Format::Bc1 | Format::Bc4 | Format::Bc5 => false,
             _ => Self::has_encoder(format),
         }
     }
@@ -98,12 +107,13 @@ impl Gpu {
     /// same blocks as the CPU encoder. `None` when [`Gpu::encodes`] is false for `format`, when
     /// the surface exceeds the device's buffer limits, or when the device fails.
     pub fn encode_surface(&self, surface: &Surface, format: Format, opts: BlockOpts) -> Option<Vec<u8>> {
-        if !self.encodes(format) || surface.width == 0 || surface.height == 0 {
+        if !self.encodes(format) || !covers(format, opts) || surface.width == 0 || surface.height == 0 {
             return None;
         }
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         {
             match format {
+                Format::Bc1 => self.dev.bc1(surface, opts.effort),
                 Format::Bc4 => self.dev.bc4(surface, 1, opts.effort),
                 Format::Bc5 => self.dev.bc4(surface, 2, opts.effort),
                 _ => None,
@@ -115,6 +125,11 @@ impl Gpu {
             None
         }
     }
+}
+
+/// Whether the format's kernel covers `opts` (every effort, except BC1 efforts 0-1 only).
+fn covers(format: Format, opts: BlockOpts) -> bool {
+    format != Format::Bc1 || opts.effort <= 1
 }
 
 #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
@@ -134,6 +149,7 @@ mod imp {
     pub(super) struct Device {
         device: wgpu::Device,
         queue: wgpu::Queue,
+        bc1: OnceLock<wgpu::ComputePipeline>,
         bc4: OnceLock<wgpu::ComputePipeline>,
     }
 
@@ -179,6 +195,7 @@ mod imp {
             dev: Device {
                 device,
                 queue,
+                bc1: OnceLock::new(),
                 bc4: OnceLock::new(),
             },
         })
@@ -198,6 +215,41 @@ mod imp {
                 compilation_options: Default::default(),
                 cache: None,
             })
+        }
+
+        /// BC1 blocks of `surface` at effort 0 or 1.
+        pub(super) fn bc1(&self, surface: &Surface, effort: u8) -> Option<Vec<u8>> {
+            let pipeline = self.bc1.get_or_init(|| {
+                // The single-color tables as WGSL constants: (hi, lo) levels as hi | lo << 8.
+                let (t5, t6) = crate::bc1::single_color_tables();
+                let table = |name: &str, t: &crate::bc1::MatchTable| {
+                    let v: Vec<String> = t
+                        .iter()
+                        .map(|&(a, b)| format!("{}u", u32::from(a) | u32::from(b) << 8))
+                        .collect();
+                    format!(
+                        "const {name} = array<u32, 256>({});
+",
+                        v.join(", ")
+                    )
+                };
+                let source = table("MATCH5", t5) + &table("MATCH6", t6) + include_str!("bc1.wgsl");
+                self.pipeline("bc1", &source)
+            });
+            let params = |first: u32, count: u32| {
+                [
+                    surface.width,
+                    surface.height,
+                    surface.blocks_x(),
+                    count,
+                    u32::from(effort),
+                    first,
+                    0,
+                    0,
+                ]
+            };
+            let words = self.run(pipeline, surface, surface.block_count() as u32, 2, params)?;
+            Some(words.iter().flat_map(|w| w.to_le_bytes()).collect())
         }
 
         /// BC4 (`channels == 1`) or BC5 (`channels == 2`) blocks of `surface`.
@@ -359,6 +411,45 @@ mod tests {
                 out.push((name.into(), surf));
             }
         }
+        // Block kinds the photos rarely cover: solid colors (all 256 values per channel),
+        // two colors, full-range gray ramps (the widest axis), pure noise, 0/255 extremes.
+        let mut seed = 0x9e37_79b9u32;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let (sw, sh) = (128u32, 96u32);
+        let mut kinds = Surface::new(sw, sh);
+        for by in 0..sh / 4 {
+            for bx in 0..sw / 4 {
+                let k = (by * (sw / 4) + bx) as usize;
+                let (c0, c1) = (rnd().to_le_bytes(), rnd().to_le_bytes());
+                for i in 0..16u32 {
+                    let r = rnd().to_le_bytes();
+                    let p = match k % 6 {
+                        0 => [(k / 6 % 256) as u8, (k * 7 % 256) as u8, (k * 13 % 256) as u8, 255],
+                        1 => {
+                            if r[0] & 1 == 0 {
+                                c0
+                            } else {
+                                c1
+                            }
+                        }
+                        2 => {
+                            let v = (i * 17) as u8;
+                            [v, v, v, 255]
+                        }
+                        3 => r,
+                        4 => [r[0], r[1], r[2], 255].map(|v| if v & 0x80 != 0 { 255 } else { 0 }),
+                        _ => [c0[0].wrapping_add(r[0] & 3), c0[1].wrapping_add(r[1] & 3), c0[2], r[3]],
+                    };
+                    kinds.set(bx * 4 + (i & 3), by * 4 + i / 4, p);
+                }
+            }
+        }
+        out.push(("block kinds".into(), kinds));
         out.push((
             "bricks 61x37".into(),
             Surface {
@@ -380,10 +471,11 @@ mod tests {
         };
         let mut bad = Vec::new();
         for format in ENCODERS.iter().copied().filter(|&f| gpu.encodes(f)) {
-            for effort in 0..=9u8 {
+            for effort in (0..=9u8).filter(|&e| covers(format, BlockOpts::from(e))) {
                 for (name, surf) in surfaces() {
                     let opts = BlockOpts::from(effort);
                     let cpu = match format {
+                        Format::Bc1 => crate::bc1::encode_surface(&surf, effort),
                         Format::Bc4 => crate::bc4::encode_surface(&surf, 1, effort),
                         Format::Bc5 => crate::bc4::encode_surface(&surf, 2, effort),
                         _ => unreachable!(),
@@ -429,6 +521,7 @@ mod tests {
             for lambda in [0.0, 1.0] {
                 let mut opts = EncodeOptions::new(format);
                 opts.rdo.lambda = lambda;
+                opts.effort = 1; // covered by every kernel
                 opts.gpu = GpuMode::On;
                 let (on, report) = encode(&surf, &opts);
                 assert!(report.gpu.is_some(), "{format}: GPU not used");
