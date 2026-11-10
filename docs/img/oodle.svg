@@ -81,29 +81,29 @@
 <line class="grid" x1="534" x2="936" y1="182.9" y2="182.9" stroke-width="1"/>
 <text class="mute num" x="528" y="186.9" font-size="11" text-anchor="end">2.5</text>
 <text class="mute" x="528" y="166" font-size="11" text-anchor="start">bits/texel</text>
-<path class="f0" d="M546.2,340 V193.6 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 10: 2.394 bits/texel</title></path>
-<path class="f1" d="M572.2,340 V187.1 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 10: 2.497 bits/texel</title></path>
+<path class="f0" d="M546.2,340 V195.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 10: 2.372 bits/texel</title></path>
+<path class="f1" d="M572.2,340 V187.3 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 10: 2.494 bits/texel</title></path>
 <path class="f2" d="M598.2,340 V185.9 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>Oodle Texture 2.9.16, Oodle λ 10: 2.517 bits/texel</title></path>
-<text class="good num" x="584.2" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -4.9%</text>
-<text class="good num" x="584.2" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -0.8%</text>
+<text class="good num" x="584.2" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -5.7%</text>
+<text class="good num" x="584.2" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -0.9%</text>
 <text class="mute num" x="584.2" y="356" font-size="11" text-anchor="middle">λ 10</text>
-<path class="f0" d="M646.8,340 V214.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 20: 2.070 bits/texel</title></path>
-<path class="f1" d="M672.8,340 V204.8 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 20: 2.216 bits/texel</title></path>
+<path class="f0" d="M646.8,340 V214.7 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 20: 2.058 bits/texel</title></path>
+<path class="f1" d="M672.8,340 V204.9 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 20: 2.213 bits/texel</title></path>
 <path class="f2" d="M698.8,340 V202.6 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>Oodle Texture 2.9.16, Oodle λ 20: 2.251 bits/texel</title></path>
-<text class="good num" x="684.8" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -8.0%</text>
-<text class="good num" x="684.8" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -1.5%</text>
+<text class="good num" x="684.8" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -8.6%</text>
+<text class="good num" x="684.8" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -1.7%</text>
 <text class="mute num" x="684.8" y="356" font-size="11" text-anchor="middle">λ 20</text>
-<path class="f0" d="M747.2,340 V225.2 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 30: 1.891 bits/texel</title></path>
-<path class="f1" d="M773.2,340 V213.6 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 30: 2.076 bits/texel</title></path>
+<path class="f0" d="M747.2,340 V225.7 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 30: 1.884 bits/texel</title></path>
+<path class="f1" d="M773.2,340 V213.7 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 30: 2.074 bits/texel</title></path>
 <path class="f2" d="M799.2,340 V210.3 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>Oodle Texture 2.9.16, Oodle λ 30: 2.128 bits/texel</title></path>
-<text class="good num" x="785.2" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -11.1%</text>
-<text class="good num" x="785.2" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -2.4%</text>
+<text class="good num" x="785.2" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -11.5%</text>
+<text class="good num" x="785.2" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -2.5%</text>
 <text class="mute num" x="785.2" y="356" font-size="11" text-anchor="middle">λ 30</text>
-<path class="f0" d="M847.8,340 V233.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 40: 1.767 bits/texel</title></path>
-<path class="f1" d="M873.8,340 V219.5 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 40: 1.981 bits/texel</title></path>
+<path class="f0" d="M847.8,340 V233.3 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's RMSE, Oodle λ 40: 1.762 bits/texel</title></path>
+<path class="f1" d="M873.8,340 V219.6 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>mipple at Oodle's SSIM, Oodle λ 40: 1.980 bits/texel</title></path>
 <path class="f2" d="M899.8,340 V215.4 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V340 z"><title>Oodle Texture 2.9.16, Oodle λ 40: 2.046 bits/texel</title></path>
-<text class="good num" x="885.8" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -13.6%</text>
-<text class="good num" x="885.8" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -3.2%</text>
+<text class="good num" x="885.8" y="140" font-size="11" font-weight="600" text-anchor="middle">RMSE -13.9%</text>
+<text class="good num" x="885.8" y="155" font-size="11" font-weight="600" text-anchor="middle">SSIM -3.3%</text>
 <text class="mute num" x="885.8" y="356" font-size="11" text-anchor="middle">λ 40</text>
 <line class="axis" x1="534" x2="936" y1="340" y2="340" stroke-width="1"/>
 <text class="ink" x="24" y="406" font-size="15" font-weight="600">BC5<tspan class="ink2" font-weight="400" font-size="13">  normal maps (two channels)</tspan></text>
@@ -118,29 +118,29 @@
 <line class="grid" x1="56" x2="458" y1="481.6" y2="481.6" stroke-width="1"/>
 <text class="mute num" x="50" y="485.6" font-size="11" text-anchor="end">4</text>
 <text class="mute" x="50" y="452" font-size="11" text-anchor="start">bits/texel</text>
-<path class="f0" d="M68.2,626 V485.4 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 10: 4.006 bits/texel</title></path>
-<path class="f1" d="M94.2,626 V475.3 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 10: 4.284 bits/texel</title></path>
+<path class="f0" d="M68.2,626 V487.5 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 10: 3.948 bits/texel</title></path>
+<path class="f1" d="M94.2,626 V475.6 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 10: 4.276 bits/texel</title></path>
 <path class="f2" d="M120.2,626 V471.9 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>Oodle Texture 2.9.16, Oodle λ 10: 4.379 bits/texel</title></path>
-<text class="good num" x="106.2" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -8.5%</text>
-<text class="good num" x="106.2" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -2.2%</text>
+<text class="good num" x="106.2" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -9.8%</text>
+<text class="good num" x="106.2" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -2.4%</text>
 <text class="mute num" x="106.2" y="642" font-size="11" text-anchor="middle">λ 10</text>
-<path class="f0" d="M168.8,626 V504.2 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 20: 3.485 bits/texel</title></path>
-<path class="f1" d="M194.8,626 V489.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 20: 3.905 bits/texel</title></path>
+<path class="f0" d="M168.8,626 V505.3 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 20: 3.454 bits/texel</title></path>
+<path class="f1" d="M194.8,626 V489.1 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 20: 3.901 bits/texel</title></path>
 <path class="f2" d="M220.8,626 V483.9 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>Oodle Texture 2.9.16, Oodle λ 20: 4.048 bits/texel</title></path>
-<text class="good num" x="206.8" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -13.9%</text>
-<text class="good num" x="206.8" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -3.5%</text>
+<text class="good num" x="206.8" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -14.7%</text>
+<text class="good num" x="206.8" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -3.6%</text>
 <text class="mute num" x="206.8" y="642" font-size="11" text-anchor="middle">λ 20</text>
-<path class="f0" d="M269.2,626 V515.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 30: 3.185 bits/texel</title></path>
-<path class="f1" d="M295.2,626 V496.4 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 30: 3.700 bits/texel</title></path>
+<path class="f0" d="M269.2,626 V515.8 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 30: 3.164 bits/texel</title></path>
+<path class="f1" d="M295.2,626 V496.5 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 30: 3.697 bits/texel</title></path>
 <path class="f2" d="M321.2,626 V490.9 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>Oodle Texture 2.9.16, Oodle λ 30: 3.852 bits/texel</title></path>
-<text class="good num" x="307.2" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -17.3%</text>
-<text class="good num" x="307.2" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -3.9%</text>
+<text class="good num" x="307.2" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -17.9%</text>
+<text class="good num" x="307.2" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -4.0%</text>
 <text class="mute num" x="307.2" y="642" font-size="11" text-anchor="middle">λ 30</text>
-<path class="f0" d="M369.8,626 V522.5 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 40: 2.979 bits/texel</title></path>
-<path class="f1" d="M395.8,626 V501.7 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 40: 3.554 bits/texel</title></path>
+<path class="f0" d="M369.8,626 V523.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's RMSE, Oodle λ 40: 2.964 bits/texel</title></path>
+<path class="f1" d="M395.8,626 V501.8 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>mipple at Oodle's SSIM, Oodle λ 40: 3.551 bits/texel</title></path>
 <path class="f2" d="M421.8,626 V496.0 a4,4 0 0 1 4,-4 h16.0 a4,4 0 0 1 4,4 V626 z"><title>Oodle Texture 2.9.16, Oodle λ 40: 3.710 bits/texel</title></path>
-<text class="good num" x="407.8" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -19.7%</text>
-<text class="good num" x="407.8" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -4.2%</text>
+<text class="good num" x="407.8" y="426" font-size="11" font-weight="600" text-anchor="middle">RMSE -20.1%</text>
+<text class="good num" x="407.8" y="441" font-size="11" font-weight="600" text-anchor="middle">SSIM -4.3%</text>
 <text class="mute num" x="407.8" y="642" font-size="11" text-anchor="middle">λ 40</text>
 <line class="axis" x1="56" x2="458" y1="626" y2="626" stroke-width="1"/>
 <text class="ink" x="502" y="406" font-size="15" font-weight="600">BC7<tspan class="ink2" font-weight="400" font-size="13">  high-quality RGB(A)</tspan></text>

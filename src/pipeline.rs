@@ -80,6 +80,12 @@ impl EncodeOptions {
         }
     }
 
+    /// The per-block settings of the base encoding, on the CPU or the GPU: [`Self::block_opts`]
+    /// with BC4/BC5's effort floor under RDO ([`base_block_opts`]).
+    pub fn base_opts(&self) -> BlockOpts {
+        base_block_opts(self.format, self.block_opts(), rdo_params(self).enabled())
+    }
+
     /// Whether alpha is treated as transparency ([`Self::alpha`]): only for formats that keep
     /// alpha (BC7) and never for normal maps.
     pub fn alpha_transparency(&self) -> bool {
@@ -151,8 +157,22 @@ pub fn encode_base(surface: &Surface, format: Format, opts: impl Into<BlockOpts>
     (src, enc)
 }
 
-/// BC7 plain-search effort floor for RDO's base encodings (see [`encode`]).
+/// Effort floor for RDO's base encodings: BC7's plain search ([`rdo_bases`]) and BC4/BC5
+/// ([`base_block_opts`]).
 pub const RDO_BASE_EFFORT: u8 = 8;
+
+/// `bo` for a BC4/BC5 base that RDO starts from: effort [`RDO_BASE_EFFORT`] or more (endpoint
+/// window radius 4 instead of 1 at the default effort). RDO keeps most of the accuracy it adds,
+/// and the base costs little next to RDO.
+pub fn base_block_opts(format: Format, bo: BlockOpts, rdo: bool) -> BlockOpts {
+    match format {
+        Format::Bc4 | Format::Bc5 if rdo => BlockOpts {
+            effort: bo.effort.max(RDO_BASE_EFFORT),
+            ..bo
+        },
+        _ => bo,
+    }
+}
 
 /// One surface's starting point for RDO, made as [`encode`] makes it: the base encoding and the
 /// alternate bases each block may start from (BC7 only). `src` is `surface.blocks()`, or empty when
@@ -164,6 +184,7 @@ pub fn rdo_bases(
     bo: BlockOpts,
     rdo: bool,
 ) -> (Vec<[u8; 16]>, Vec<Vec<[u8; 16]>>) {
+    let bo = base_block_opts(format, bo, rdo);
     // BC7 RDO: the plain search at RDO_BASE_EFFORT or more, as the base or (entropy-reduced
     // base) the second base. Its cost is small next to RDO's, and RDO keeps much of the
     // quality it adds (Kodak subset vs Oodle 2.9.16 on Zstd-19, λ 10-40 at equal RMSE:
@@ -310,7 +331,7 @@ fn rdo_params(opts: &EncodeOptions) -> RdoParams {
 /// only the CPU makes. Other formats' RDO starts from the GPU's base.
 pub fn gpu_eligible(opts: &EncodeOptions) -> bool {
     let bc7_rdo = opts.format == Format::Bc7 && rdo_params(opts).enabled();
-    !bc7_rdo && crate::gpu::Gpu::has_kernel(opts.format, opts.block_opts())
+    !bc7_rdo && crate::gpu::Gpu::has_kernel(opts.format, opts.base_opts())
 }
 
 /// Encodes a surface (and optionally its mip chain).
@@ -318,7 +339,7 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     let levels = prepare(surface, opts);
     let use_gpu = gpu_eligible(opts)
         && match opts.gpu {
-            GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.block_opts()),
+            GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.base_opts()),
             GpuMode::On => true,
             GpuMode::Off => false,
         };
@@ -329,7 +350,7 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     // Every level in one submission, so the GPU is waited on once per texture.
     let bases = gpu.and_then(|g| {
         let refs: Vec<&Surface> = levels.iter().map(|l| &**l).collect();
-        g.encode_surfaces(&refs, opts.format, opts.block_opts())
+        g.encode_surfaces(&refs, opts.format, opts.base_opts())
     });
     let name = bases.as_ref().and(gpu).map(|g| g.info().name.as_str());
     let mut bases = bases.unwrap_or_default().into_iter();

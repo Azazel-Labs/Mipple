@@ -58,25 +58,25 @@
 <rect class="f1" x="330.0" y="245.0" width="298.9" height="14" rx="3"><title>bc7enc_rdo: 20.0% fewer bits (BD-rate on Kodak (PSNR), Zstd-19; Deflate-9 18.4%)</title></rect>
 <text class="ink num" x="634.9" y="256.5" font-size="12"><tspan font-weight="600">20.0%</tspan><tspan class="mute"></tspan></text>
 <text class="ink2" x="318" y="288.0" font-size="13" text-anchor="end">Oodle Texture 2.9.16 · equal RMSE</text>
-<rect class="f2" x="330.0" y="277.0" width="140.4" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal RMSE: 9.4% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's RMSE, both Zstd-19)</title></rect>
-<path class="wh" d="M402.5,280.0 v8 M402.5,284.0 H533.5 M533.5,280.0 v8" fill="none" stroke-width="1.5"/>
-<text class="ink num" x="539.5" y="288.5" font-size="12"><tspan font-weight="600">9.4%</tspan><tspan class="mute">  4.9 to 13.6</tspan></text>
+<rect class="f2" x="330.0" y="277.0" width="148.0" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal RMSE: 9.9% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's RMSE, both Zstd-19)</title></rect>
+<path class="wh" d="M415.7,280.0 v8 M415.7,284.0 H537.5 M537.5,280.0 v8" fill="none" stroke-width="1.5"/>
+<text class="ink num" x="543.5" y="288.5" font-size="12"><tspan font-weight="600">9.9%</tspan><tspan class="mute">  5.7 to 13.9</tspan></text>
 <text class="ink2" x="318" y="320.0" font-size="13" text-anchor="end">Oodle Texture 2.9.16 · equal SSIM</text>
-<rect class="f2" x="330.0" y="309.0" width="29.5" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal SSIM: 2.0% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's SSIM, both Zstd-19)</title></rect>
-<path class="wh" d="M341.7,312.0 v8 M341.7,316.0 H377.4 M377.4,312.0 v8" fill="none" stroke-width="1.5"/>
-<text class="ink num" x="383.4" y="320.5" font-size="12"><tspan font-weight="600">2.0%</tspan><tspan class="mute">  0.8 to 3.2</tspan></text>
+<rect class="f2" x="330.0" y="309.0" width="31.1" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal SSIM: 2.1% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's SSIM, both Zstd-19)</title></rect>
+<path class="wh" d="M343.2,312.0 v8 M343.2,316.0 H378.5 M378.5,312.0 v8" fill="none" stroke-width="1.5"/>
+<text class="ink num" x="384.5" y="320.5" font-size="12"><tspan font-weight="600">2.1%</tspan><tspan class="mute">  0.9 to 3.3</tspan></text>
 <text class="ink" x="24" y="365.0" font-size="15" font-weight="600">BC5</text>
 <text class="ink2" x="318" y="364.0" font-size="13" text-anchor="end">bc7enc_rdo</text>
 <rect class="f1" x="330.0" y="353.0" width="388.9" height="14" rx="3"><title>bc7enc_rdo: 26.1% fewer bits (BD-rate on Kodak (PSNR), Zstd-19; Deflate-9 23.8%)</title></rect>
 <text class="ink num" x="724.9" y="364.5" font-size="12"><tspan font-weight="600">26.1%</tspan><tspan class="mute"></tspan></text>
 <text class="ink2" x="318" y="396.0" font-size="13" text-anchor="end">Oodle Texture 2.9.16 · equal RMSE</text>
-<rect class="f2" x="330.0" y="385.0" width="221.6" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal RMSE: 14.9% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's RMSE, both Zstd-19)</title></rect>
-<path class="wh" d="M456.9,388.0 v8 M456.9,392.0 H624.0 M624.0,388.0 v8" fill="none" stroke-width="1.5"/>
-<text class="ink num" x="630.0" y="396.5" font-size="12"><tspan font-weight="600">14.9%</tspan><tspan class="mute">  8.5 to 19.7</tspan></text>
+<rect class="f2" x="330.0" y="385.0" width="233.0" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal RMSE: 15.6% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's RMSE, both Zstd-19)</title></rect>
+<path class="wh" d="M476.7,388.0 v8 M476.7,392.0 H630.1 M630.1,388.0 v8" fill="none" stroke-width="1.5"/>
+<text class="ink num" x="636.1" y="396.5" font-size="12"><tspan font-weight="600">15.6%</tspan><tspan class="mute">  9.8 to 20.1</tspan></text>
 <text class="ink2" x="318" y="428.0" font-size="13" text-anchor="end">Oodle Texture 2.9.16 · equal SSIM</text>
-<rect class="f2" x="330.0" y="417.0" width="51.6" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal SSIM: 3.5% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's SSIM, both Zstd-19)</title></rect>
-<path class="wh" d="M362.2,420.0 v8 M362.2,424.0 H393.0 M393.0,420.0 v8" fill="none" stroke-width="1.5"/>
-<text class="ink num" x="399.0" y="428.5" font-size="12"><tspan font-weight="600">3.5%</tspan><tspan class="mute">  2.2 to 4.2</tspan></text>
+<rect class="f2" x="330.0" y="417.0" width="53.3" height="14" rx="3"><title>Oodle Texture 2.9.16 · equal SSIM: 3.6% fewer bits (Kodak (24 images), mean over Oodle λ 10, 20, 30, 40 at Oodle's SSIM, both Zstd-19)</title></rect>
+<path class="wh" d="M365.0,420.0 v8 M365.0,424.0 H394.1 M394.1,420.0 v8" fill="none" stroke-width="1.5"/>
+<text class="ink num" x="400.1" y="428.5" font-size="12"><tspan font-weight="600">3.6%</tspan><tspan class="mute">  2.4 to 4.3</tspan></text>
 <text class="ink" x="24" y="473.0" font-size="15" font-weight="600">BC7</text>
 <text class="ink2" x="318" y="472.0" font-size="13" text-anchor="end">bc7enc_rdo (bc7e)</text>
 <rect class="f1" x="330.0" y="461.0" width="470.0" height="14" rx="3"><title>bc7enc_rdo (bc7e): 31.5% fewer bits (BD-rate on Kodak (PSNR), Zstd-19; Deflate-9 29.2%)</title></rect>

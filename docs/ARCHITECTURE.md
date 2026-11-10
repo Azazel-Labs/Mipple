@@ -140,6 +140,11 @@ flag (`RdoParams::reduce_entropy`) so its endpoint refits keep the restricted le
 
 ## RDO (`src/rdo.rs`)
 
+RDO starts from a base encoding made at effort `RDO_BASE_EFFORT` (8) or more (`src/pipeline.rs`): for BC7
+the plain search (as the base, or as a second base next to the entropy-reduced one, plus a mode-6-only base),
+for BC4/BC5 the base itself (endpoint window radius 4; `base_block_opts`, which the GPU path uses too). RDO
+keeps most of the accuracy a better base adds, and the base costs little next to RDO.
+
 For each block in storage order:
 
 1. Score the base encoding: `J = smooth · SSE / 16 + λ · bits`, where `bits` comes from `LzModel`.

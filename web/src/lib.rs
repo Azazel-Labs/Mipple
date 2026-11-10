@@ -392,7 +392,7 @@ fn sample_blocks(level: &Surface, n: u32) -> Surface {
 /// exact by construction and tested on native drivers; this guards against a browser's shader
 /// compiler that is not.
 fn gpu_agrees(sample: &Surface, got: &[u8], opts: &EncodeOptions) -> bool {
-    let (_, cpu) = pipeline::encode_base(sample, opts.format, opts.block_opts());
+    let (_, cpu) = pipeline::encode_base(sample, opts.format, opts.base_opts());
     got == pipeline::flatten(opts.format, &cpu)
 }
 
@@ -411,9 +411,7 @@ async fn gpu_bases(
     let sample = sample_blocks(levels.first()?, 256);
     let mut batch: Vec<&Surface> = vec![&sample];
     batch.extend(levels.iter().map(|l| &**l));
-    let mut out = gpu
-        .encode_surfaces_async(&batch, opts.format, opts.block_opts())
-        .await?;
+    let mut out = gpu.encode_surfaces_async(&batch, opts.format, opts.base_opts()).await?;
     let bases = out.split_off(1);
     if !gpu_agrees(&sample, &out[0], opts) {
         GPU.set(GpuState::Disabled);

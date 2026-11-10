@@ -56,8 +56,8 @@ Shipped:
 - [x] **vs Oodle Texture 2.9.16 (Unreal Engine 5.8), true source:** `scripts/ue_oodle/` gets Oodle's real blocks
   out of a stock UE cook (bit-exact, no engine source) and scores them on Zstd-19 next to a mipple sweep
   (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −9.6% to
-  −8.8% / −5.7% to −4.0%, BC4 −13.6% to −4.9% / −3.2% to −0.8%, BC7 −1.5% to −0.6% / −3.1% to −0.3%, BC5
-  −19.7% to −8.5% / −4.2% to −2.2% (λ 1: +2.6% / −0.3%).
+  −8.8% / −5.7% to −4.0%, BC4 −13.9% to −5.7% / −3.3% to −0.9%, BC7 −1.5% to −0.6% / −3.1% to −0.3%, BC5
+  −20.1% to −9.8% / −4.3% to −2.4%; ahead at every λ in every format, λ 0-1 included.
 - [x] **Learned BC7 ranker** (`src/ranker/bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
   the 1024-block far search, then 16 blocks from anywhere in the 64 KiB chunk, picked by a two-key prefilter
   (decoded value SAD and least-squares refit residual) and a small MLP. Kodak-24 BD-rate −0.22% at 0.86× the
