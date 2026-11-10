@@ -3,8 +3,8 @@ name: Release
 # After CI passes on a push to main, tag vX.Y.Z and publish a release with binaries. X.Y come from
 # Cargo.toml (edit it to change major/minor); Z is the next patch after the highest vX.Y.* tag, or
 # the Cargo.toml patch if that is higher. The build stamps that version into Cargo.toml (not
-# committed) so `mipple --version` matches the tag, then publishes that version to crates.io
-# (secret CARGO_REGISTRY_TOKEN). A commit that already has a tag is skipped.
+# committed) so `mipple --version` matches the tag. The first release of a new major version also
+# goes to crates.io (secret CARGO_REGISTRY_TOKEN). A commit that already has a tag is skipped.
 on:
   workflow_run:
     workflows: [CI]
@@ -110,32 +110,35 @@ jobs:
       - name: Release
         run: gh release create "v$VERSION" dist/* --target "$SHA" --title "mipple $VERSION" --generate-notes
 
-  # The same stamped version on crates.io, once the GitHub release exists. A version that is
-  # already there (a re-run) is skipped: crates.io versions are permanent.
+  # crates.io gets only the first release of each major version (the X of a new X.Y.Z): the
+  # GitHub releases above carry every patch. A version already there (a re-run) is skipped, since
+  # crates.io versions are permanent.
   crates:
     needs: [meta, publish]
     runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - id: gate
+        run: |
+          latest=$(curl -s -A "mipple-release (github.com/${{ github.repository }})" \
+            https://crates.io/api/v1/crates/mipple | jq -r '.crate.max_version // empty')
+          go=false
+          if [ -z "$latest" ] || [ "${VERSION%%.*}" -gt "${latest%%.*}" ]; then go=true; fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          echo "crates.io has ${latest:-nothing}; $VERSION: publish=$go"
+      - if: steps.gate.outputs.go == 'true'
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: crates
-          cache-on-failure: true
-      - name: Stamp version
-        run: |
-          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
-          perl -0pi -e 's/(name = "mipple"\r?\nversion = )"[^"]*"/$1"$ENV{VERSION}"/' Cargo.lock
+      - if: steps.gate.outputs.go == 'true'
+        uses: dtolnay/rust-toolchain@stable
       - name: Publish
+        if: steps.gate.outputs.go == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' -A "mipple-release (github.com/${{ github.repository }})" \
-            "https://crates.io/api/v1/crates/mipple/$VERSION")
-          if [ "$code" = 200 ]; then echo "mipple $VERSION is already on crates.io"; exit 0; fi
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
+          perl -0pi -e 's/(name = "mipple"\r?\nversion = )"[^"]*"/$1"$ENV{VERSION}"/' Cargo.lock
           # --allow-dirty: the stamped version is not committed.
           cargo publish --locked --allow-dirty -p mipple
