@@ -387,7 +387,7 @@ function showResult(r, s) {
   const parts = [
     `${s.format.toUpperCase()}${!s.normal && s.format !== "bc4" && s.format !== "bc5" ? " sRGB" : ""}`,
     `${r.levels} level${r.levels > 1 ? "s" : ""}`,
-    `base ${fmtMs(r.baseMs)} + RDO ${fmtMs(r.rdoMs)}, ${fmtMs(r.totalMs)} with Zstd and metrics on one thread`,
+    `base ${fmtMs(r.baseMs)}${r.gpu ? ` on the GPU (${r.gpu})` : ""} + RDO ${fmtMs(r.rdoMs)}, ${fmtMs(r.totalMs)} with Zstd and metrics on one thread`,
   ];
   if (img.sourceWidth !== img.width || img.sourceHeight !== img.height) {
     parts.push(`downscaled from ${img.sourceWidth}×${img.sourceHeight}; the CLI needs the resized copy to match`);

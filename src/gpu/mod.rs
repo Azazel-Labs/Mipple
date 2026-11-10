@@ -5,7 +5,16 @@
 //! them block for block), so the backend only changes speed. [`crate::pipeline::encode`] uses a
 //! GPU encoder by default where it is the faster one ([`Gpu::preferred`]), everywhere with
 //! [`crate::pipeline::GpuMode::On`]; formats without one, and hardware without compute shaders,
-//! use the CPU. Without the feature, or on wasm32 for now, [`Gpu::shared`] is always `None`.
+//! use the CPU. Without the feature [`Gpu::shared`] is always `None`.
+//!
+//! In the browser (wasm32 with WebGPU) nothing may block, so [`Gpu::shared`] is `None` there too:
+//! the caller opens a device with [`Gpu::open_async`], runs [`Gpu::encode_surfaces_async`] on the
+//! levels of [`crate::pipeline::prepare`], and hands the blocks to
+//! [`crate::pipeline::encode_prepared`]. Native code runs the same async path to completion.
+//!
+//! A batch of surfaces (a whole mip chain) is one submission with one readback, so an encode waits
+//! on the device once, not once per level: in a browser each wait is a trip through the event loop
+//! (about 4 ms), which made a 10-level chain cost 40 ms before any kernel time.
 //!
 //! Kernels:
 //! - `bc1.wgsl`: BC1 efforts 0 and 1 (the line fit and least-squares refits of
@@ -28,6 +37,7 @@
 
 use crate::format::{BlockOpts, Format};
 use crate::surface::Surface;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 
 /// Formats with a GPU encoder. Each one is added with its compute kernel.
@@ -53,25 +63,47 @@ pub struct GpuInfo {
 /// An open GPU device.
 pub struct Gpu {
     info: GpuInfo,
-    #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+    #[cfg(feature = "gpu")]
     dev: imp::Device,
 }
 
 impl Gpu {
     /// The process-wide device, opened on first use. `None` without the `gpu` feature, without a
     /// usable adapter, or if the device fails to open.
+    /// Always `None` on wasm32, where opening a device cannot block (use [`Gpu::open_async`]).
     pub fn shared() -> Option<&'static Gpu> {
-        static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
-        GPU.get_or_init(Gpu::open).as_ref()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
+            GPU.get_or_init(Gpu::open).as_ref()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
 
-    /// Opens the highest-performance adapter, or returns `None` (see [`Gpu::shared`]).
+    /// Opens the highest-performance adapter, or returns `None` (see [`Gpu::shared`]). Blocks
+    /// until the device is ready, so it is `None` on wasm32.
     pub fn open() -> Option<Gpu> {
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         {
-            imp::open()
+            pollster::block_on(imp::open())
         }
         #[cfg(not(all(feature = "gpu", not(target_arch = "wasm32"))))]
+        {
+            None
+        }
+    }
+
+    /// Opens the highest-performance adapter without blocking: the way in on wasm32, where it
+    /// finds the browser's WebGPU adapter (`None` when the browser has none).
+    pub async fn open_async() -> Option<Gpu> {
+        #[cfg(feature = "gpu")]
+        {
+            imp::open().await
+        }
+        #[cfg(not(feature = "gpu"))]
         {
             None
         }
@@ -108,7 +140,7 @@ impl Gpu {
 
     /// Whether this build includes the GPU backend at all.
     pub const fn built() -> bool {
-        cfg!(all(feature = "gpu", not(target_arch = "wasm32")))
+        cfg!(feature = "gpu")
     }
 
     pub fn info(&self) -> &GpuInfo {
@@ -122,23 +154,61 @@ impl Gpu {
 
     /// Base-encodes `surface` into raw blocks (`format.block_bytes()` each, raster order), the
     /// same blocks as the CPU encoder. `None` when [`Gpu::encodes`] is false for `format`, when
-    /// the surface exceeds the device's buffer limits, or when the device fails.
+    /// the surface exceeds the device's buffer limits, or when the device fails. Blocks until the
+    /// device is done, so on wasm32 it is always `None` (use [`Gpu::encode_surface_async`]).
     pub fn encode_surface(&self, surface: &Surface, format: Format, opts: BlockOpts) -> Option<Vec<u8>> {
-        if !self.encodes(format) || !covers(format, opts) || surface.width == 0 || surface.height == 0 {
-            return None;
-        }
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         {
-            match format {
-                Format::Bc1 => self.dev.bc1(surface, opts.effort),
-                Format::Bc4 => self.dev.bc4(surface, 1, opts.effort),
-                Format::Bc5 => self.dev.bc4(surface, 2, opts.effort),
-                Format::Bc7 => self.dev.bc7(surface, opts),
-            }
+            pollster::block_on(self.encode_surface_async(surface, format, opts))
         }
         #[cfg(not(all(feature = "gpu", not(target_arch = "wasm32"))))]
         {
-            let _ = opts;
+            let _ = (surface, format, opts);
+            None
+        }
+    }
+
+    /// [`Gpu::encode_surface`] without blocking: the readback resolves when the device finishes.
+    pub async fn encode_surface_async(&self, surface: &Surface, format: Format, opts: BlockOpts) -> Option<Vec<u8>> {
+        self.encode_surfaces_async(&[surface], format, opts).await?.pop()
+    }
+
+    /// [`Gpu::encode_surface`] of several surfaces (a mip chain, say) in one submission with one
+    /// readback, so the device is waited on once rather than once per surface. `None` if any one
+    /// cannot be encoded.
+    pub fn encode_surfaces(&self, surfaces: &[&Surface], format: Format, opts: BlockOpts) -> Option<Vec<Vec<u8>>> {
+        #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+        {
+            pollster::block_on(self.encode_surfaces_async(surfaces, format, opts))
+        }
+        #[cfg(not(all(feature = "gpu", not(target_arch = "wasm32"))))]
+        {
+            let _ = (surfaces, format, opts);
+            None
+        }
+    }
+
+    /// [`Gpu::encode_surfaces`] without blocking.
+    pub async fn encode_surfaces_async(
+        &self,
+        surfaces: &[&Surface],
+        format: Format,
+        opts: BlockOpts,
+    ) -> Option<Vec<Vec<u8>>> {
+        if !self.encodes(format) || !covers(format, opts) || surfaces.iter().any(|s| s.width == 0 || s.height == 0) {
+            return None;
+        }
+        #[cfg(feature = "gpu")]
+        {
+            match format {
+                Format::Bc1 => self.dev.bc1(surfaces, opts.effort).await,
+                Format::Bc4 => self.dev.bc4(surfaces, 1, opts.effort).await,
+                Format::Bc5 => self.dev.bc4(surfaces, 2, opts.effort).await,
+                Format::Bc7 => self.dev.bc7(surfaces, opts).await,
+            }
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
             None
         }
     }
@@ -155,7 +225,7 @@ fn covers(format: Format, opts: BlockOpts) -> bool {
     }
 }
 
-#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+#[cfg(feature = "gpu")]
 mod imp {
     use super::{Gpu, GpuInfo};
     use crate::format::{BlockOpts, Format};
@@ -178,30 +248,34 @@ mod imp {
         bc7: OnceLock<wgpu::ComputePipeline>,
     }
 
-    pub(super) fn open() -> Option<Gpu> {
+    pub(super) async fn open() -> Option<Gpu> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .ok()?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await
+            .ok()?;
         let a = adapter.get_info();
         let compute = adapter
             .get_downlevel_capabilities()
             .flags
             .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS);
         let bc_textures = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("mipple"),
-            required_features: if bc_textures {
-                wgpu::Features::TEXTURE_COMPRESSION_BC
-            } else {
-                wgpu::Features::empty()
-            },
-            required_limits: adapter.limits(),
-            ..Default::default()
-        }))
-        .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("mipple"),
+                required_features: if bc_textures {
+                    wgpu::Features::TEXTURE_COMPRESSION_BC
+                } else {
+                    wgpu::Features::empty()
+                },
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
         let driver = [a.driver.as_str(), a.driver_info.as_str()]
             .iter()
             .filter(|s| !s.is_empty())
@@ -243,8 +317,8 @@ mod imp {
             })
         }
 
-        /// BC1 blocks of `surface` at effort 0 or 1.
-        pub(super) fn bc1(&self, surface: &Surface, effort: u8) -> Option<Vec<u8>> {
+        /// BC1 blocks of each surface at effort 0 or 1.
+        pub(super) async fn bc1(&self, surfaces: &[&Surface], effort: u8) -> Option<Vec<Vec<u8>>> {
             let pipeline = self.bc1.get_or_init(|| {
                 // The single-color tables as WGSL constants: (hi, lo) levels as hi | lo << 8.
                 let (t5, t6) = crate::bc1::single_color_tables();
@@ -262,7 +336,7 @@ mod imp {
                 let source = table("MATCH5", t5) + &table("MATCH6", t6) + include_str!("bc1.wgsl");
                 self.pipeline("bc1", &source)
             });
-            let params = |first: u32, count: u32| {
+            let params = |surface: &Surface, first: u32, count: u32| {
                 [
                     surface.width,
                     surface.height,
@@ -274,16 +348,14 @@ mod imp {
                     0,
                 ]
             };
-            let words = self.run(pipeline, surface, surface.block_count() as u32, 2, params)?;
-            Some(words.iter().flat_map(|w| w.to_le_bytes()).collect())
+            self.run(pipeline, surfaces, 1, 2, params).await
         }
 
-        /// BC4 (`channels == 1`) or BC5 (`channels == 2`) blocks of `surface`.
-        pub(super) fn bc4(&self, surface: &Surface, channels: u32, effort: u8) -> Option<Vec<u8>> {
+        /// BC4 (`channels == 1`) or BC5 (`channels == 2`) blocks of each surface.
+        pub(super) async fn bc4(&self, surfaces: &[&Surface], channels: u32, effort: u8) -> Option<Vec<Vec<u8>>> {
             let pipeline = self.bc4.get_or_init(|| self.pipeline("bc4", include_str!("bc4.wgsl")));
             let radius = crate::bc4::batch::RADIUS[effort.min(9) as usize];
-            let blocks = surface.block_count() as u32;
-            let params = |first: u32, count: u32| {
+            let params = |surface: &Surface, first: u32, count: u32| {
                 [
                     surface.width,
                     surface.height,
@@ -295,13 +367,12 @@ mod imp {
                     first,
                 ]
             };
-            let words = self.run(pipeline, surface, blocks * channels, 2, params)?;
-            Some(words.iter().flat_map(|w| w.to_le_bytes()).collect())
+            self.run(pipeline, surfaces, channels, 2, params).await
         }
 
-        /// BC7 blocks of `surface` at `opts` (efforts 0-5: mode 6, its refits, mode 1). Blocks with alpha are re-encoded
-        /// on the CPU by the scalar encoder, as the CPU's fast encoder does.
-        pub(super) fn bc7(&self, surface: &Surface, opts: BlockOpts) -> Option<Vec<u8>> {
+        /// BC7 blocks of each surface at `opts` (efforts 0-5: mode 6, its refits, mode 1). Blocks with
+        /// alpha are re-encoded on the CPU by the scalar encoder, as the CPU's fast encoder does.
+        pub(super) async fn bc7(&self, surfaces: &[&Surface], opts: BlockOpts) -> Option<Vec<Vec<u8>>> {
             use rayon::prelude::*;
             let cfg = crate::bc7::fast_cfg(opts)?;
             let pipeline = self.bc7.get_or_init(|| {
@@ -329,7 +400,7 @@ mod imp {
             } else {
                 0
             };
-            let params = |first: u32, count: u32| {
+            let params = |surface: &Surface, first: u32, count: u32| {
                 [
                     surface.width,
                     surface.height,
@@ -346,117 +417,175 @@ mod imp {
                     cfg.busy_err as u32,
                 ]
             };
-            let words = self.run(pipeline, surface, surface.block_count() as u32, 4, params)?;
-            let mut out: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            let bw = surface.blocks_x();
+            let mut outs = self.run(pipeline, surfaces, 1, 4, params).await?;
             let wts = Format::Bc7.error_weights();
-            out.par_chunks_mut(16).enumerate().for_each(|(i, o)| {
-                let b = surface.read_block(i as u32 % bw, i as u32 / bw);
-                if b.iter().any(|p| p[3] != 255) {
-                    o.copy_from_slice(&crate::bc7::encode(&b, &wts, opts));
-                }
-            });
-            Some(out)
+            for (out, surface) in outs.iter_mut().zip(surfaces) {
+                let bw = surface.blocks_x();
+                out.par_chunks_mut(16).enumerate().for_each(|(i, o)| {
+                    let b = surface.read_block(i as u32 % bw, i as u32 / bw);
+                    if b.iter().any(|p| p[3] != 255) {
+                        o.copy_from_slice(&crate::bc7::encode(&b, &wts, opts));
+                    }
+                });
+            }
+            Some(outs)
         }
 
-        /// Runs a kernel over `count` invocations, each writing `words_per` output words, with
-        /// the surface's RGBA8 texels at binding 1 and the output at binding 2. `params(first, n)`
-        /// is the uniform (binding 0) of the dispatch covering invocations `first..first + n`.
-        fn run(
+        /// Runs a kernel over every surface in one submission and reads all the output back at
+        /// once. Surface `k` gets `per_block * blocks` invocations, each writing `words_per` output
+        /// words, with its RGBA8 texels at binding 1 and its output at binding 2; `params(surface,
+        /// first, n)` is the uniform (binding 0) of the dispatch covering invocations
+        /// `first..first + n`. Returns each surface's output bytes.
+        async fn run(
             &self,
             pipeline: &wgpu::ComputePipeline,
-            surface: &Surface,
-            count: u32,
+            surfaces: &[&Surface],
+            per_block: u32,
             words_per: u32,
-            params: impl Fn(u32, u32) -> [u32; 8],
-        ) -> Option<Vec<u32>> {
-            let limits = self.device.limits();
-            let px_bytes = surface.pixels.as_flattened();
-            let out_bytes = u64::from(count) * u64::from(words_per) * 4;
+            params: impl Fn(&Surface, u32, u32) -> [u32; 8],
+        ) -> Option<Vec<Vec<u8>>> {
+            let device = &self.device;
+            let limits = device.limits();
             let max_binding = limits.max_storage_buffer_binding_size;
-            if px_bytes.len() as u64 > max_binding || out_bytes > max_binding || out_bytes > limits.max_buffer_size {
+            let counts: Vec<u32> = surfaces.iter().map(|s| s.block_count() as u32 * per_block).collect();
+            let sizes: Vec<u64> = counts
+                .iter()
+                .map(|&c| u64::from(c) * u64::from(words_per) * 4)
+                .collect();
+            let total: u64 = sizes.iter().sum();
+            if surfaces
+                .iter()
+                .any(|s| s.pixels.as_flattened().len() as u64 > max_binding)
+                || sizes.iter().any(|&n| n > max_binding)
+                || total > limits.max_buffer_size
+            {
                 return None;
             }
-            let device = &self.device;
-            let px = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("texels"),
-                contents: px_bytes,
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            let out = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("blocks"),
-                size: out_bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("readback"),
-                size: out_bytes,
+                size: total,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let layout = pipeline.get_bind_group_layout(0);
             let max_groups = limits.max_compute_workgroups_per_dimension;
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encode") });
-            let mut first = 0;
-            while first < count {
-                let n = (count - first).min(CHUNK);
-                let p = params(first, n);
-                let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("params"),
-                    contents: &p.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),
-                    usage: wgpu::BufferUsages::UNIFORM,
+            let mut offset = 0;
+            for ((surface, &count), &size) in surfaces.iter().zip(&counts).zip(&sizes) {
+                let px = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("texels"),
+                    contents: surface.pixels.as_flattened(),
+                    usage: wgpu::BufferUsages::STORAGE,
                 });
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: uniform.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: px.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: out.as_entire_binding(),
-                        },
-                    ],
+                let out = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("blocks"),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
                 });
-                // Kernels flatten (x, y) as gid.x + gid.y * num_workgroups.x * 64.
-                let groups = n.div_ceil(GROUP);
-                let (gx, gy) = if groups <= max_groups {
-                    (groups, 1)
-                } else {
-                    (max_groups, groups.div_ceil(max_groups))
-                };
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: None,
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.dispatch_workgroups(gx, gy, 1);
-                drop(pass);
-                first += n;
+                let mut first = 0;
+                while first < count {
+                    let n = (count - first).min(CHUNK);
+                    let p = params(surface, first, n);
+                    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("params"),
+                        contents: &p.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: px.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: out.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    // Kernels flatten (x, y) as gid.x + gid.y * num_workgroups.x * 64.
+                    let groups = n.div_ceil(GROUP);
+                    let (gx, gy) = if groups <= max_groups {
+                        (groups, 1)
+                    } else {
+                        (max_groups, groups.div_ceil(max_groups))
+                    };
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: None,
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.dispatch_workgroups(gx, gy, 1);
+                    drop(pass);
+                    first += n;
+                }
+                encoder.copy_buffer_to_buffer(&out, 0, &readback, offset, size);
+                offset += size;
             }
-            encoder.copy_buffer_to_buffer(&out, 0, &readback, 0, out_bytes);
             self.queue.submit([encoder.finish()]);
             let slice = readback.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
-            });
+            let mapped = Mapped::default();
+            let done = mapped.clone();
+            slice.map_async(wgpu::MapMode::Read, move |r| done.set(r.is_ok()));
+            // Native: waits for the GPU, which runs the callback. WebGPU: returns at once, and the
+            // browser runs the callback when the readback is ready.
             device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-            rx.recv().ok()?.ok()?;
-            let words = {
+            if !mapped.await {
+                return None;
+            }
+            let outs = {
                 let view = slice.get_mapped_range().ok()?;
-                view.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect()
+                let mut rest: &[u8] = &view;
+                sizes
+                    .iter()
+                    .map(|&n| {
+                        let (head, tail) = rest.split_at(n as usize);
+                        rest = tail;
+                        head.to_vec()
+                    })
+                    .collect()
             };
             readback.unmap();
-            Some(words)
+            Some(outs)
+        }
+    }
+
+    /// Resolves to whether a buffer mapped, once `map_async` calls back. A oneshot channel that
+    /// works on both sides: a native callback runs inside `device.poll`, a WebGPU one later, from
+    /// the browser's event loop.
+    #[derive(Clone, Default)]
+    struct Mapped(std::sync::Arc<std::sync::Mutex<(Option<bool>, Option<std::task::Waker>)>>);
+
+    impl Mapped {
+        fn set(&self, ok: bool) {
+            let mut s = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.0 = Some(ok);
+            if let Some(w) = s.1.take() {
+                w.wake();
+            }
+        }
+    }
+
+    impl std::future::Future for Mapped {
+        type Output = bool;
+
+        fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<bool> {
+            let mut s = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match s.0 {
+                Some(ok) => std::task::Poll::Ready(ok),
+                None => {
+                    s.1 = Some(cx.waker().clone());
+                    std::task::Poll::Pending
+                }
+            }
         }
     }
 }
@@ -475,6 +604,32 @@ mod tests {
         for format in Format::ALL {
             let out = gpu.encode_surface(&surf, format, BlockOpts::from(0u8));
             assert_eq!(out.is_some(), gpu.encodes(format), "{format}");
+        }
+    }
+
+    /// A batch of surfaces of different sizes (one submission, one readback) gives each the blocks
+    /// it gets alone, in order, for every format.
+    #[test]
+    fn a_batch_matches_single_encodes() {
+        let Some(gpu) = Gpu::shared() else {
+            return;
+        };
+        let all = surfaces();
+        let batch: Vec<&Surface> = all.iter().map(|(_, s)| s).collect();
+        for (format, effort) in [(Format::Bc1, 1u8), (Format::Bc4, 5), (Format::Bc5, 3), (Format::Bc7, 3)] {
+            let opts = BlockOpts::from(effort);
+            if !gpu.encodes(format) || !covers(format, opts) {
+                continue;
+            }
+            let got = gpu.encode_surfaces(&batch, format, opts).expect("batch");
+            assert_eq!(got.len(), batch.len());
+            for ((name, surf), got) in all.iter().zip(&got) {
+                assert_eq!(
+                    Some(got),
+                    gpu.encode_surface(surf, format, opts).as_ref(),
+                    "{format} {name}"
+                );
+            }
         }
     }
 

@@ -18,8 +18,11 @@ workspace = true
 anyhow = "1.0.104"
 # The same decoders as `mipple encode`, so a dropped PNG/JPEG/TGA gives the CLI's pixels.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga"] }
-mipple = { path = "..", default-features = false }
+# `gpu`: base blocks on the browser's WebGPU adapter when it has one (the same blocks as the CPU).
+mipple = { path = "..", default-features = false, features = ["gpu"] }
 wasm-bindgen = "0.2.104"
+wasm-bindgen-futures = "0.4.79"
+web-time = "1.1.0"
 
 [package.metadata.wasm-pack.profile.release]
 # The build uses SIMD128 (web/README.md), so wasm-opt must allow its features. -Os is the smallest

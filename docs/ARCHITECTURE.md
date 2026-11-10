@@ -34,7 +34,7 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | `src/ranker/` | Learned rankers (small MLPs, CC0 Poly Haven training) for the localized RD search: `bc4.rs`, `bc5.rs`, `bc7.rs` |
 | `src/prep.rs` | Lossless field-split transform of BC blocks into per-field streams for the downstream LZ, with its inverse |
 | `src/pipeline.rs` | Encode/decode a whole texture (mips → blocks → RDO → `EncodedTexture`) |
-| `src/gpu/` | Optional wgpu backend: adapter probe, kernel dispatch and readback (`mod.rs`); WGSL ports of the CPU encoders that write the same blocks (`bc1.wgsl`: BC1 efforts 0-1; `bc4.wgsl`: BC4/BC5; `bc7.wgsl`: BC7 efforts 0-5, mode 6 with refits and mode 1 on estimated or ranked partitions, ±1 endpoint refinement) |
+| `src/gpu/` | Optional wgpu backend (native, and WebGPU on wasm32): adapter probe, kernel dispatch and readback, one submission and one readback per batch of surfaces, async underneath for the browser (`mod.rs`); WGSL ports of the CPU encoders that write the same blocks (`bc1.wgsl`: BC1 efforts 0-1; `bc4.wgsl`: BC4/BC5; `bc7.wgsl`: BC7 efforts 0-5, mode 6 with refits and mode 1 on estimated or ranked partitions, ±1 endpoint refinement) |
 | `src/ktx2.rs` | KTX2 writer/reader (DFD, key/value data, smallest-mip-first layout, Zstd scheme 2) |
 | `src/dds.rs` | DDS reader (legacy FourCC + DX10) and DX10 writer, for scoring other encoders' output |
 | `src/metrics.rs` | PSNR, luma PSNR, SSIM, normal-map angular error |

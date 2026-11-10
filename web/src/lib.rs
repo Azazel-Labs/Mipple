@@ -1,20 +1,29 @@
 //! mipple in the browser: the WebAssembly side of the demo page in `web/www`.
 //!
 //! The page decodes an image ([`decode_image`]), then calls [`encode`] from a Web Worker whenever
-//! a control changes. [`encode`] goes through [`mipple::pipeline::encode`] and
+//! a control changes. [`encode`] runs [`mipple::pipeline::encode`]'s stages and
 //! [`mipple::ktx2::write`] with the options `mipple encode` derives from its flags, so the .ktx2
 //! the page offers is byte-identical to the CLI's for the command [`Settings::command`] prints.
 //!
 //! wasm32-unknown-unknown has no threads: rayon runs every parallel loop on the calling thread.
 //! Output does not depend on the thread count (RDO chunks are fixed in bytes), only the time does.
+//!
+//! When the browser has WebGPU, base blocks come from mipple's GPU kernels where one covers the
+//! settings ([`mipple::pipeline::gpu_eligible`]): the same blocks as the CPU encoder, much sooner
+//! than one wasm thread makes them. Each encode first checks a sample of blocks against the CPU
+//! and stays on the CPU for good if a browser's shader compiler ever disagrees.
 
 use anyhow::{Context, Result, ensure};
 use mipple::format::{DEFAULT_EFFORT, MAX_EFFORT};
+use mipple::gpu::Gpu;
 use mipple::ktx2::{self, PrepMode};
 use mipple::metrics::normal_from_rg;
 use mipple::pipeline::{self, EncodeOptions};
 use mipple::{EntropyMode, Format, RdoParams, Surface, bench};
+use std::borrow::Cow;
+use std::cell::Cell;
 use wasm_bindgen::prelude::*;
+use web_time::Instant;
 
 /// Zstd level `mipple encode` uses by default.
 const DEFAULT_ZSTD: i32 = 19;
@@ -122,6 +131,9 @@ pub struct Settings {
     pub mips: bool,
     /// `--normal`: tangent-space normal map (linear, renormalized mips, Z rebuilt for display).
     pub normal: bool,
+    /// Base-encode on the GPU when the browser has WebGPU and a kernel covers the settings. The
+    /// output is the same either way.
+    pub gpu: bool,
 }
 
 #[wasm_bindgen]
@@ -193,6 +205,7 @@ impl Settings {
             zstd: DEFAULT_ZSTD,
             mips: true,
             normal: false,
+            gpu: true,
         })
     }
 
@@ -276,6 +289,7 @@ pub struct Encoded {
     /// Blocks, all levels.
     #[wasm_bindgen(readonly)]
     pub blocks: usize,
+    gpu: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -294,14 +308,57 @@ impl Encoded {
     pub fn take_decoded(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.decoded_view)
     }
+
+    /// The WebGPU adapter that made the base blocks, or `undefined` when the CPU did.
+    #[wasm_bindgen(getter)]
+    pub fn gpu(&self) -> Option<String> {
+        self.gpu.clone()
+    }
 }
 
-/// Encodes row-major RGBA8 pixels with `settings`.
+/// The worker's GPU: not looked for yet, absent, open, or switched off after disagreeing with
+/// the CPU. Opened once per worker and kept for its lifetime.
+#[derive(Clone, Copy)]
+enum GpuState {
+    Unopened,
+    Missing,
+    Ready(&'static Gpu),
+    Disabled,
+}
+
+thread_local! {
+    static GPU: Cell<GpuState> = const { Cell::new(GpuState::Unopened) };
+}
+
+/// The GPU, opened on first use. `None` without WebGPU, without an adapter, or once disabled.
+async fn gpu() -> Option<&'static Gpu> {
+    if let GpuState::Unopened = GPU.get() {
+        let state = match Gpu::open_async().await {
+            Some(g) => GpuState::Ready(Box::leak(Box::new(g))),
+            None => GpuState::Missing,
+        };
+        GPU.set(state);
+    }
+    match GPU.get() {
+        GpuState::Ready(g) => Some(g),
+        _ => None,
+    }
+}
+
+/// Opens the browser's WebGPU adapter ahead of the first encode and returns its name, or
+/// `undefined` when there is none (the encoder then runs on the CPU).
+#[wasm_bindgen(js_name = initGpu)]
+pub async fn init_gpu() -> Option<String> {
+    gpu().await.map(gpu_name)
+}
+
+/// Encodes row-major RGBA8 pixels with `settings` (consumed). Resolves when the encode is done.
 #[wasm_bindgen]
-pub fn encode(rgba: &[u8], width: u32, height: u32, settings: &Settings) -> Result<Encoded, JsError> {
-    surface_from_rgba(rgba, width, height)
-        .and_then(|s| run(&s, settings))
-        .map_err(|e| js_error(&e))
+pub async fn encode(rgba: Vec<u8>, width: u32, height: u32, settings: Settings) -> Result<Encoded, JsError> {
+    let surface = surface_from_rgba(&rgba, width, height).map_err(|e| js_error(&e))?;
+    drop(rgba);
+    let gpu = if settings.gpu { gpu().await } else { None };
+    run(&surface, &settings, gpu).await.map_err(|e| js_error(&e))
 }
 
 fn surface_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Surface> {
@@ -317,9 +374,73 @@ fn surface_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Surface> {
     })
 }
 
-fn run(surface: &Surface, s: &Settings) -> Result<Encoded> {
+/// Up to `n` blocks of `level` spread over it, as one surface: what [`gpu_agrees`] encodes twice.
+fn sample_blocks(level: &Surface, n: u32) -> Surface {
+    let (bw, bh) = (level.blocks_x(), level.height.div_ceil(4));
+    let total = bw * bh;
+    let side = n.min(total).isqrt().max(1);
+    let mut out = Surface::new(side * 4, side * 4);
+    for i in 0..side * side {
+        let j = (u64::from(i) * u64::from(total) / u64::from(side * side)) as u32;
+        let b = level.read_block(j % bw, j / bw);
+        out.write_block(i % side, i / side, &b);
+    }
+    out
+}
+
+/// Whether the GPU encodes a sample of `level`'s blocks exactly as the CPU does. The kernels are
+/// exact by construction and tested on native drivers; this guards against a browser's shader
+/// compiler that is not.
+fn gpu_agrees(sample: &Surface, got: &[u8], opts: &EncodeOptions) -> bool {
+    let (_, cpu) = pipeline::encode_base(sample, opts.format, opts.block_opts());
+    got == pipeline::flatten(opts.format, &cpu)
+}
+
+/// The GPU's base blocks for each of `levels`, or `None` to encode on the CPU (no kernel for these
+/// settings, a level too large for the device, or a failed check, which disables the GPU).
+async fn gpu_bases(
+    gpu: &'static Gpu,
+    levels: &[Cow<'_, Surface>],
+    opts: &EncodeOptions,
+) -> Option<Vec<Option<Vec<u8>>>> {
+    if !pipeline::gpu_eligible(opts) || !gpu.encodes(opts.format) {
+        return None;
+    }
+    // The check sample and every level go in one submission with one readback: each wait on the
+    // device costs a round trip through the browser's event loop.
+    let sample = sample_blocks(levels.first()?, 256);
+    let mut batch: Vec<&Surface> = vec![&sample];
+    batch.extend(levels.iter().map(|l| &**l));
+    let mut out = gpu
+        .encode_surfaces_async(&batch, opts.format, opts.block_opts())
+        .await?;
+    let bases = out.split_off(1);
+    if !gpu_agrees(&sample, &out[0], opts) {
+        GPU.set(GpuState::Disabled);
+        return None;
+    }
+    Some(bases.into_iter().map(Some).collect())
+}
+
+/// The adapter's name for the report (WebGPU does not expose one, so it may be empty).
+fn gpu_name(gpu: &Gpu) -> String {
+    let name = &gpu.info().name;
+    if name.is_empty() { "WebGPU".into() } else { name.clone() }
+}
+
+async fn run(surface: &Surface, s: &Settings, gpu: Option<&'static Gpu>) -> Result<Encoded> {
     let opts = s.options();
-    let (tex, report) = pipeline::encode(surface, &opts);
+    let levels = pipeline::prepare(surface, &opts);
+    let t0 = Instant::now();
+    let bases = match gpu {
+        Some(g) => gpu_bases(g, &levels, &opts).await,
+        None => None,
+    };
+    let gpu_secs = t0.elapsed().as_secs_f64();
+    let name = bases.as_ref().and(gpu).map(gpu_name);
+    let (tex, mut report) = pipeline::encode_prepared(&levels, &opts, name.as_deref(), bases.unwrap_or_default());
+    report.base_secs += gpu_secs;
+    drop(levels);
     let zstd = (s.zstd > 0).then_some(s.zstd);
     let ktx2 = ktx2::write(&tex, zstd, Some(&s.sc_params(&opts)), PrepMode::Off)?;
     let header = ktx2::read_header(&ktx2)?;
@@ -345,6 +466,7 @@ fn run(surface: &Surface, s: &Settings) -> Result<Encoded> {
         rdo_ms: report.rdo_secs * 1e3,
         rdo_changed: report.rdo.changed,
         blocks: report.rdo.blocks,
+        gpu: report.gpu,
         ktx2,
     })
 }
@@ -368,6 +490,16 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs a future that completes without waiting, as every encode does on the host (native GPU
+    /// readback blocks inside `device.poll`).
+    fn now<F: std::future::Future>(f: F) -> F::Output {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::pin::pin!(f).poll(&mut cx) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!("encode waited on the host"),
+        }
+    }
 
     /// Level 0 PSNR straight from the library, to check [`run`]'s.
     fn psnr_of(src: &Surface, s: &Settings) -> f64 {
@@ -397,13 +529,33 @@ mod tests {
             let mut s = Settings::parse(f, "auto").unwrap();
             s.lambda = 1.0;
             s.mips = false;
-            let e = run(&src, &s).unwrap();
+            let e = now(run(&src, &s, None)).unwrap();
             assert_eq!((e.width, e.height, e.levels), (36, 20, 1));
             assert_eq!(e.raw_bytes, 9 * 5 * s.format.block_bytes());
             assert!(e.stored_bytes < e.file_bytes);
             assert_eq!(e.decoded_view.len(), 36 * 20 * 4);
             assert!((e.psnr - psnr_of(&src, &s)).abs() < 1e-9);
             assert_eq!(ktx2::read(&e.ktx2).unwrap().levels[0].data.len(), e.raw_bytes);
+        }
+    }
+
+    /// The GPU path (sample check, GPU bases, CPU finish) writes the CPU's file, on the host's GPU.
+    /// Skips without one.
+    #[test]
+    fn gpu_bases_match_the_cpu() {
+        let Some(gpu) = Gpu::shared() else {
+            return;
+        };
+        let src = gradient(72, 40);
+        for (f, effort, lambda) in [("bc1", 1, 0.0), ("bc4", 5, 0.0), ("bc5", 2, 1.0), ("bc7", 3, 0.0)] {
+            let mut s = Settings::parse(f, "off").unwrap();
+            s.effort = effort;
+            s.lambda = lambda;
+            let on = now(run(&src, &s, Some(gpu))).unwrap();
+            let off = now(run(&src, &s, None)).unwrap();
+            assert!(on.gpu.is_some(), "{f}: the GPU made no blocks");
+            assert_eq!(off.gpu, None);
+            assert_eq!(on.ktx2, off.ktx2, "{f} e{effort} λ{lambda}");
         }
     }
 

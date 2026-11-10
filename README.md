@@ -128,7 +128,8 @@ mask (`synth::cutout`), files are 54% smaller without RDO and 72-78% smaller at 
 GPU compute encoders (wgpu) write exactly the CPU encoder's blocks, so the backend only changes speed. By default
 each format runs wherever it is faster (`mipple gpu` lists them); `--gpu` forces the GPU for every format that has
 a kernel and `--cpu` forces the CPU. BC4/BC5 (every effort), BC1 (efforts 0-1) and BC7 (efforts 0-5) have GPU kernels, but the
-AVX2 encoder is faster at a few ms per megapixel. Cargo features: `cli` (the `mipple` binary) and `gpu` (wgpu), both on by default;
+AVX2 encoder is faster at a few ms per megapixel. In the web demo, where the CPU is one wasm thread, the same kernels run on
+WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Cargo features: `cli` (the `mipple` binary) and `gpu` (wgpu), both on by default;
 `default-features = false` builds the library alone.
 `--entropy` picks BC7 entropy-reduced base encoding: `auto` (default: on for λ ≥ 1), `on`, or `off` (v0.2 behaviour).
 

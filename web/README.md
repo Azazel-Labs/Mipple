@@ -7,6 +7,10 @@ numbers `mipple score` prints), the encode time, the equivalent `mipple encode` 
 `.ktx2` download. That command run through the native CLI gives a byte-identical file.
 
 Everything runs in the visitor's browser, in a Web Worker on one thread. Nothing is uploaded.
+When the browser has WebGPU, the base blocks come from mipple's GPU kernels (the same blocks as the
+CPU encoder: each encode checks a 256-block sample against the CPU and drops to the CPU for good on
+a mismatch). Every mip level goes in one submission with one readback. The first GPU encode
+compiles the shaders, which takes 1-3 s once. RDO, Zstd and the metrics stay on the CPU.
 
 ## Build
 

@@ -668,6 +668,8 @@ dependencies = [
  "image",
  "mipple",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]

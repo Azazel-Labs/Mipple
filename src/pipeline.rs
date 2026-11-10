@@ -7,6 +7,7 @@ use crate::mips::{self, MipAlpha, MipFilter};
 use crate::rdo::{self, RdoParams, RdoStats};
 use crate::surface::{Block, Surface};
 use rayon::prelude::*;
+use std::borrow::Cow;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::time::Instant;
 // `std::time::Instant::now` panics on wasm32-unknown-unknown (the browser demo in web/).
@@ -266,42 +267,56 @@ pub fn flatten(format: Format, blocks: &[[u8; 16]]) -> Vec<u8> {
     out
 }
 
-/// Encodes a surface (and optionally its mip chain).
-pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
-    // With alpha as transparency, the top level's hidden colour is bled (the mips bleed their
-    // own) and each level's colour beyond the visible texels' ring is freed before encoding.
+/// The surfaces [`encode`] base-encodes, top level first: the mip chain (or the surface alone).
+/// With alpha as transparency, the top level's hidden colour is bled (the mips bleed their own)
+/// and each level's colour beyond the visible texels' ring is freed. [`encode_prepared`] encodes
+/// them.
+pub fn prepare<'a>(surface: &'a Surface, opts: &EncodeOptions) -> Vec<Cow<'a, Surface>> {
     let transparency = opts.alpha_transparency() && surface.has_alpha();
-    let bled;
-    let surface = if transparency {
+    let top = if transparency {
         let mut s = surface.clone();
         alpha::bleed(&mut s);
-        bled = s;
-        &bled
+        Cow::Owned(s)
     } else {
-        surface
+        Cow::Borrowed(surface)
     };
-    let chain = if opts.mips {
-        mips::chain_with(surface, opts.mip_filter(), opts.mip_alpha())
+    let levels = if opts.mips {
+        mips::chain_with(&top, opts.mip_filter(), opts.mip_alpha())
+            .into_iter()
+            .map(Cow::Owned)
+            .collect()
     } else {
-        Vec::new()
+        vec![top]
     };
-    let levels_in: Vec<&Surface> = if opts.mips {
-        chain.iter().collect()
-    } else {
-        vec![surface]
-    };
-    let w = opts.format.error_weights();
-    let mut report = EncodeReport::default();
-    let mut levels = Vec::with_capacity(levels_in.len());
-    let rdo_params = RdoParams {
+    if !transparency {
+        return levels;
+    }
+    levels
+        .into_iter()
+        .map(|l| alpha::hide(&l).map_or(l, Cow::Owned))
+        .collect()
+}
+
+/// RDO settings for `opts`: entropy reduction is on when the base encoding asks for it.
+fn rdo_params(opts: &EncodeOptions) -> RdoParams {
+    RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
         ..opts.rdo
-    };
-    // GPU base encoding only where the device has an encoder for this format; RDO stays on the CPU.
-    // BC7 RDO starts from a higher-effort base and alternate bases, which the GPU does not make.
-    let bc7_rdo = opts.format == Format::Bc7 && rdo_params.enabled();
-    let use_gpu = !bc7_rdo
-        && crate::gpu::Gpu::has_kernel(opts.format, opts.block_opts())
+    }
+}
+
+/// Whether a GPU kernel can make the base blocks for `opts`: the format has one at this effort,
+/// and the encode is not BC7 RDO, which starts from a higher-effort base and alternate bases that
+/// only the CPU makes. Other formats' RDO starts from the GPU's base.
+pub fn gpu_eligible(opts: &EncodeOptions) -> bool {
+    let bc7_rdo = opts.format == Format::Bc7 && rdo_params(opts).enabled();
+    !bc7_rdo && crate::gpu::Gpu::has_kernel(opts.format, opts.block_opts())
+}
+
+/// Encodes a surface (and optionally its mip chain).
+pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
+    let levels = prepare(surface, opts);
+    let use_gpu = gpu_eligible(opts)
         && match opts.gpu {
             GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.block_opts()),
             GpuMode::On => true,
@@ -311,13 +326,51 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         .then(crate::gpu::Gpu::shared)
         .flatten()
         .filter(|g| g.encodes(opts.format));
-    for level in levels_in {
-        let hidden = if transparency { alpha::hide(level) } else { None };
-        let level = hidden.as_ref().unwrap_or(level);
+    // Every level in one submission, so the GPU is waited on once per texture.
+    let bases = gpu.and_then(|g| {
+        let refs: Vec<&Surface> = levels.iter().map(|l| &**l).collect();
+        g.encode_surfaces(&refs, opts.format, opts.block_opts())
+    });
+    let name = bases.as_ref().and(gpu).map(|g| g.info().name.as_str());
+    let mut bases = bases.unwrap_or_default().into_iter();
+    encode_with(&levels, opts, name, |_, _| bases.next())
+}
+
+/// [`encode`] of [`prepare`]'s levels with base blocks the caller already made, one entry per level
+/// (raw blocks as [`crate::gpu::Gpu::encode_surfaces_async`] returns them; `None` encodes that level
+/// on the CPU). This is the browser's way in: it cannot wait for the GPU inside [`encode`]. `gpu`
+/// names the adapter for the report. The bases are ignored unless [`gpu_eligible`] holds, and the
+/// result is the same as [`encode`]'s, since every GPU kernel writes the CPU's blocks.
+pub fn encode_prepared(
+    levels: &[Cow<Surface>],
+    opts: &EncodeOptions,
+    gpu: Option<&str>,
+    mut bases: Vec<Option<Vec<u8>>>,
+) -> (EncodedTexture, EncodeReport) {
+    let eligible = gpu_eligible(opts);
+    encode_with(levels, opts, gpu, |i, _| {
+        bases.get_mut(i).and_then(Option::take).filter(|_| eligible)
+    })
+}
+
+/// Encodes `levels`, taking each level's base blocks from `base(index, level)` when it returns
+/// them (a GPU encode) and from the CPU otherwise, then running RDO.
+fn encode_with(
+    levels_in: &[Cow<Surface>],
+    opts: &EncodeOptions,
+    gpu: Option<&str>,
+    mut base: impl FnMut(usize, &Surface) -> Option<Vec<u8>>,
+) -> (EncodedTexture, EncodeReport) {
+    let w = opts.format.error_weights();
+    let mut report = EncodeReport::default();
+    let mut levels = Vec::with_capacity(levels_in.len());
+    let rdo_params = rdo_params(opts);
+    for (i, level) in levels_in.iter().enumerate() {
+        let level: &Surface = level;
         let t0 = Instant::now();
-        let on_gpu = gpu.and_then(|g| g.encode_surface(level, opts.format, opts.block_opts()));
+        let on_gpu = base(i, level);
         if on_gpu.is_some() {
-            report.gpu = gpu.map(|g| g.info().name.clone());
+            report.gpu = gpu.map(str::to_owned);
         }
         if !rdo_params.enabled() && (on_gpu.is_some() || direct(opts.format, opts.block_opts())) {
             // Straight to raw bytes: no source blocks, no 16-byte slots.
@@ -375,11 +428,12 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
             data: flatten(opts.format, &blocks),
         });
     }
+    let (width, height) = levels_in.first().map_or((0, 0), |l| (l.width, l.height));
     let tex = EncodedTexture {
         format: opts.format,
         srgb: opts.srgb && opts.format.supports_srgb(),
-        width: surface.width,
-        height: surface.height,
+        width,
+        height,
         levels,
     };
     (tex, report)

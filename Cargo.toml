@@ -52,7 +52,7 @@ required-features = ["cli"]
 default = ["cli", "gpu"]
 # The `mipple` command-line tool. Library users can turn it off (`default-features = false`).
 cli = ["dep:clap"]
-# GPU base encoders over wgpu (native targets), the default path; formats without a GPU encoder
+# GPU base encoders over wgpu (native, and WebGPU on wasm32), the default path; formats without a GPU encoder
 # yet, and machines without a usable GPU, use the CPU encoders.
 gpu = ["dep:wgpu", "dep:pollster"]
 
@@ -66,10 +66,12 @@ flate2 = "1.1.11"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga"] }
 rayon = "1.12.0"
 zstd = "0.14.3"
+# On wasm32 wgpu drives the browser's WebGPU (its default `webgpu` feature).
+wgpu = { version = "30.0.1", optional = true }
 
+# Blocking on the GPU (native only: the browser path is async).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { version = "1.0.1", optional = true }
-wgpu = { version = "30.0.1", optional = true }
 
 # The encode report's timers: std::time::Instant panics in the browser (web/ builds the demo).
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

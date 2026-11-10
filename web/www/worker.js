@@ -1,6 +1,6 @@
 // Runs mipple (WebAssembly) off the main thread. The page terminates and respawns this worker to
-// cancel a stale encode, so it holds no state beyond the instantiated module.
-import init, { Settings, decodeImage, encode, fitImage } from "./pkg/mipple_web.js";
+// cancel a stale encode, so it holds no state beyond the instantiated module and its WebGPU device.
+import init, { Settings, decodeImage, encode, fitImage, initGpu } from "./pkg/mipple_web.js";
 
 let ready = null;
 
@@ -17,7 +17,7 @@ function imageMessage(img) {
   return [msg, [rgba.buffer]];
 }
 
-function runEncode({ rgba, width, height, settings: o }) {
+async function runEncode({ rgba, width, height, settings: o }) {
   const s = new Settings(o.format, o.entropy);
   s.effort = o.effort;
   s.lambda = o.lambda;
@@ -28,14 +28,11 @@ function runEncode({ rgba, width, height, settings: o }) {
   s.zstd = o.zstd;
   s.mips = o.mips;
   s.normal = o.normal;
+  s.gpu = o.gpu ?? true;
   const command = s.command(o.inputName);
   const t0 = performance.now();
-  let e;
-  try {
-    e = encode(rgba, width, height, s);
-  } finally {
-    s.free();
-  }
+  // encode consumes the settings.
+  const e = await encode(rgba, width, height, s);
   const totalMs = performance.now() - t0;
   const ktx2 = e.take_ktx2();
   const original = e.take_original();
@@ -57,6 +54,7 @@ function runEncode({ rgba, width, height, settings: o }) {
     rdoMs: e.rdo_ms,
     rdoChanged: e.rdo_changed,
     blocks: e.blocks,
+    gpu: e.gpu ?? null,
     ktx2,
     original,
     decoded,
@@ -69,9 +67,10 @@ self.onmessage = async ({ data }) => {
   const { id, type } = data;
   try {
     if (type === "init") {
-      ready ??= init({ module_or_path: data.module });
-      await ready;
-      self.postMessage({ id, ok: true, result: {} });
+      // The WebGPU device opens with the module, so the first encode does not wait for it.
+      ready ??= init({ module_or_path: data.module }).then(() => initGpu());
+      const gpu = await ready;
+      self.postMessage({ id, ok: true, result: { gpu: gpu ?? null } });
       return;
     }
     await ready;
@@ -81,7 +80,7 @@ self.onmessage = async ({ data }) => {
     } else if (type === "fit") {
       out = imageMessage(fitImage(data.rgba, data.width, data.height, data.maxSize));
     } else if (type === "encode") {
-      out = runEncode(data);
+      out = await runEncode(data);
     } else {
       throw new Error(`unknown request ${type}`);
     }

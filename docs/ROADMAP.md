@@ -120,10 +120,14 @@ Open for v0.9.x:
   (mode 1 on the best line-fit-ranked partition), after making the partition ranking exact
   (scatter matrices cut to 10 bits, a 5-bit power step, floored estimates; -0.004 dB on Kodak,
   ~15% slower ranking on the CPU). BC7 efforts 4-5: subset refits on the ranked candidates and ±1
-  endpoint/p-bit refinement of the mode-1 or mode-6 winner.
-  Next: BC7 modes 3/0/2/5 up to effort 8 (where the GPU should win) and the RDO
-  alternates, BC1 efforts 2+ (needs per-lane cluster-fit pruning and exact split scoring), then
-  WebGPU in the web demo when the browser has it.
+  endpoint/p-bit refinement of the mode-1 or mode-6 winner. WebGPU in the web demo: the same
+  kernels behind an async API (`Gpu::open_async`, `Gpu::encode_surfaces_async`), every mip level
+  and a 256-block spot check against the CPU in one submission with one readback (one wait on the
+  device per encode: 6-12 ms base for a 512² BC1/BC4/BC5/BC7 e0-2 mip chain in Chrome, 42 vs 902 ms
+  for BC7 e5 on one wasm thread).
+  Next: BC7 modes 3/0/2/5 up to effort 8 (where the GPU should win; a workgroup per block, a
+  thread per candidate) and the RDO alternates, BC1 efforts 2+ (needs per-lane cluster-fit pruning
+  and exact split scoring).
 
 ## v1.2: "output B": latent-space supercompression + transcoder
 
