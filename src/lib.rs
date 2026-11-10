@@ -35,6 +35,6 @@ pub mod surface;
 pub mod synth;
 
 pub use format::{BlockOpts, EntropyMode, Format};
-pub use pipeline::{EncodeOptions, EncodedTexture, Level};
+pub use pipeline::{EncodeOptions, EncodedTexture, GpuMode, Level};
 pub use rdo::RdoParams;
 pub use surface::{Block, Rgba, Surface};

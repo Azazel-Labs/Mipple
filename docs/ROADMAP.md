@@ -107,10 +107,11 @@ Open for v0.9.x:
 - [ ] **Cheaper chunk boundaries:** worth less than thought: a single chunk per Kodak image is only −0.86% BD-rate
   for BC5 and −0.54% for BC1 vs 16 KiB chunks. Seeding each chunk with the base encoder's preceding blocks is
   worse (+2.9%: they change under it).
-- [ ] GPU compute base encoders (wgpu, `gpu` cargo feature, on by default; `src/gpu.rs`). The adapter
-  probe, per-format CPU fallback and `mipple gpu` are in, and the GPU is the default base-encode path.
-  Formats get compute kernels one at a time, each checked against the CPU encoder; WebGPU in the web
-  demo when the browser has it.
+- [ ] GPU compute base encoders (wgpu, `gpu` cargo feature, on by default; `src/gpu/`). Each kernel
+  writes exactly the CPU encoder's blocks (tests compare every effort, block for block); `GpuMode::Auto`
+  uses one only where it beats the CPU, `--gpu` forces it. Done: BC4/BC5 (`bc4.wgsl`; the CPU stays
+  the default, since 20 AVX2 threads take 1-3 ms for a 1.6 MP BC5 vs 14 ms on an Intel Arc iGPU).
+  Next: BC1, BC7 (fast path and mode 6), then WebGPU in the web demo when the browser has it.
 
 ## v1.2: "output B": latent-space supercompression + transcoder
 

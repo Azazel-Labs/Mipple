@@ -118,9 +118,11 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 RDO knobs (on `encode`, `bench` and `check`): `--window`, `--max-back`, `--span-back`, `--chunk-bytes`, `--smooth-scale`,
 `--max-rms-ratio`, `--min-rms`.
-Base encoding runs on the GPU for every format that has a compute encoder there (see `mipple gpu`) and on the CPU
-for the rest, or when there is no usable GPU; `--cpu` forces the CPU. Cargo features: `cli` (the `mipple`
-binary) and `gpu` (wgpu), both on by default; `default-features = false` builds the library alone.
+GPU compute encoders (wgpu) write exactly the CPU encoder's blocks, so the backend only changes speed. By default
+each format runs wherever it is faster (`mipple gpu` lists them); `--gpu` forces the GPU for every format that has
+a kernel and `--cpu` forces the CPU. BC4/BC5 have GPU kernels, but the AVX2 encoder is faster at a few ms per
+megapixel. Cargo features: `cli` (the `mipple` binary) and `gpu` (wgpu), both on by default;
+`default-features = false` builds the library alone.
 `--entropy` picks BC7 entropy-reduced base encoding: `auto` (default: on for λ ≥ 1), `on`, or `off` (v0.2 behaviour).
 
 ## What's inside

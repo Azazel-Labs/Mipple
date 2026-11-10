@@ -185,10 +185,13 @@ struct EncodeArgs {
     /// Not standard KTX2: readers must undo it (mipple's does, flagged by the `mipple.prep` key).
     #[arg(long, value_enum, default_value_t = mipple::ktx2::PrepMode::Off)]
     prep: mipple::ktx2::PrepMode,
-    /// Base-encode on the CPU. By default the GPU encodes formats it has an encoder for (see
-    /// `mipple gpu`) and the CPU the rest.
-    #[arg(long)]
+    /// Base-encode on the CPU only. By default the GPU encodes the formats where its encoder is
+    /// faster (see `mipple gpu`); both write the same blocks.
+    #[arg(long, conflicts_with = "gpu")]
     cpu: bool,
+    /// Base-encode on the GPU for every format it has an encoder for, even where the CPU is faster.
+    #[arg(long)]
+    gpu: bool,
     #[command(flatten)]
     rdo: RdoArgs,
 }
@@ -423,10 +426,12 @@ fn main() -> Result<()> {
             for f in Format::ALL {
                 println!(
                     "  {f}: {}",
-                    if gpu.encodes(f) {
+                    if !gpu.encodes(f) {
+                        "CPU (no GPU encoder yet)"
+                    } else if Gpu::preferred(f, mipple::BlockOpts::default()) {
                         "GPU"
                     } else {
-                        "CPU (no GPU encoder yet)"
+                        "CPU by default (faster); GPU encoder with --gpu"
                     }
                 );
             }
@@ -459,7 +464,13 @@ fn encode(a: EncodeArgs) -> Result<()> {
         a.format.default_srgb()
     };
     opts.mips = !a.no_mips;
-    opts.gpu = !a.cpu;
+    opts.gpu = if a.cpu {
+        mipple::GpuMode::Off
+    } else if a.gpu {
+        mipple::GpuMode::On
+    } else {
+        mipple::GpuMode::Auto
+    };
     opts.rdo = a.rdo.params(a.lambda);
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
 
@@ -530,6 +541,12 @@ fn encode(a: EncodeArgs) -> Result<()> {
         None if a.cpu => println!("  base encode: CPU (--cpu)"),
         None if !Gpu::built() => println!("  base encode: CPU (built without the gpu feature)"),
         None if !Gpu::has_encoder(a.format) => println!("  base encode: CPU (no GPU {} encoder yet)", a.format),
+        None if !a.gpu && !Gpu::preferred(a.format, opts.block_opts()) => {
+            println!(
+                "  base encode: CPU (faster than the GPU {} encoder; --gpu forces it)",
+                a.format
+            );
+        }
         None => println!("  base encode: CPU (no usable GPU)"),
     }
     println!(

@@ -28,10 +28,23 @@ pub struct EncodeOptions {
     pub mips: bool,
     /// RDO settings (`lambda == 0` disables RDO).
     pub rdo: RdoParams,
-    /// Base-encode on the GPU (the default) where it has an encoder for the format
-    /// ([`crate::gpu`]); `false` forces the CPU. Formats without a GPU encoder, builds without the
-    /// `gpu` feature and machines without a usable GPU use the CPU either way.
-    pub gpu: bool,
+    /// Where base encoding runs: [`GpuMode::Auto`] (default) uses the GPU where its encoder is the
+    /// faster one ([`crate::gpu::Gpu::preferred`]). Formats without a GPU encoder, builds without
+    /// the `gpu` feature and machines without a usable GPU use the CPU in every mode.
+    pub gpu: GpuMode,
+}
+
+/// Where base encoding runs ([`EncodeOptions::gpu`]). Every GPU encoder writes the same blocks as
+/// the CPU encoder, so this only changes speed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuMode {
+    /// The GPU for formats whose GPU encoder is faster than the CPU's, else the CPU.
+    #[default]
+    Auto,
+    /// The GPU for every format it has an encoder for.
+    On,
+    /// The CPU only.
+    Off,
 }
 
 impl EncodeOptions {
@@ -44,7 +57,7 @@ impl EncodeOptions {
             entropy: EntropyMode::default(),
             mips: true,
             rdo: RdoParams::default(),
-            gpu: true,
+            gpu: GpuMode::Auto,
         }
     }
 
@@ -239,7 +252,13 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     let mut report = EncodeReport::default();
     let mut levels = Vec::with_capacity(levels_in.len());
     // GPU base encoding only where the device has an encoder for this format; RDO stays on the CPU.
-    let gpu = (opts.gpu && crate::gpu::Gpu::has_encoder(opts.format))
+    let use_gpu = crate::gpu::Gpu::has_encoder(opts.format)
+        && match opts.gpu {
+            GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.block_opts()),
+            GpuMode::On => true,
+            GpuMode::Off => false,
+        };
+    let gpu = use_gpu
         .then(crate::gpu::Gpu::shared)
         .flatten()
         .filter(|g| g.encodes(opts.format));

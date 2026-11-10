@@ -4,12 +4,10 @@
 //! `e0 > e1` selects 8-value mode; otherwise 6-value mode plus literal 0 and 255.
 //! BC5 is two BC4 blocks: red then green.
 
-mod batch;
+pub(crate) mod batch;
 
 pub use batch::{encode_batch, encode_channels8, encode_surface};
 
-#[cfg(test)]
-use crate::fit::{V4, ls_endpoints};
 use crate::surface::Block;
 
 /// Palette for an endpoint pair, using the truncating reference interpolation.
@@ -102,13 +100,41 @@ fn finalize(e0: u8, e1: u8, v: &[u8; 16]) -> ([u8; 8], u64) {
     (to_bytes(e0, e1, bits), err)
 }
 
-/// Interpolation weight (0 = e0, 1 = e1) for each 8-value-mode index.
-fn t8(k: u64) -> f32 {
-    match k {
-        0 => 0.0,
-        1 => 1.0,
-        k => (k - 1) as f32 / 7.0,
+/// Least-squares endpoints (e0, e1) of 8-value-mode texels from the sums of their steps toward e1
+/// (`j`: 0 = e0 .. 7 = e1, weight j / 7): `j` = Σj, `jj` = Σj², `jx` = Σj·x, `x` = Σx. Rounded half
+/// up and clamped to 0..=255, in exact integer arithmetic, so every encoder (SIMD lanes, the GPU
+/// kernel) gets the same endpoints. `None` when every step is equal.
+///
+/// The normal equations scaled by 49: [Σ(7-j)², Σj(7-j); Σj(7-j), Σj²] [e0; e1] =
+/// 7 [Σ(7-j)x; Σjx]. Every intermediate fits i32 (the largest, `2 * num + d`, stays below 2^29).
+pub(crate) fn ls_steps(j: i32, jj: i32, jx: i32, x: i32) -> Option<(i32, i32)> {
+    let s00 = 784 - 14 * j + jj; // Σ (7 - j)²
+    let s01 = 7 * j - jj; // Σ j (7 - j)
+    let s0x = 7 * x - jx; // Σ (7 - j) x
+    let d = s00 * jj - s01 * s01;
+    if d <= 0 {
+        return None;
     }
+    let round = |n: i32| if n <= 0 { 0 } else { ((2 * n + d) / (2 * d)).min(255) };
+    Some((round(7 * (jj * s0x - s01 * jx)), round(7 * (s00 * jx - s01 * s0x))))
+}
+
+/// [`ls_steps`] for 8-value-mode index bits (`bits`, 3 per texel) over values `v`.
+fn ls_bits(bits: u64, v: &[u8; 16]) -> Option<(i32, i32)> {
+    let (mut j, mut jj, mut jx, mut sx) = (0, 0, 0, 0);
+    for (i, &x) in v.iter().enumerate() {
+        // Step toward e1: index 0 is e0 (0), 1 is e1 (7), k >= 2 is step k - 1.
+        let s = match (bits >> (3 * i)) & 7 {
+            0 => 0,
+            1 => 7,
+            k => k as i32 - 1,
+        };
+        j += s;
+        jj += s * s;
+        jx += s * x as i32;
+        sx += x as i32;
+    }
+    ls_steps(j, jj, jx, sx)
 }
 
 /// Encodes 16 values. Effort 0 projects onto the min/max line, 1 adds a least-squares refit,
@@ -144,17 +170,15 @@ fn reference_channel(v: &[u8; 16], r: i32) -> [u8; 8] {
     }
 
     // Least-squares refit in 8-value mode.
-    let pts: Vec<V4> = v.iter().map(|&x| [x as f32, 0.0, 0.0, 0.0]).collect();
     for _ in 0..2 {
         if best.0[0] <= best.0[1] {
             break;
         }
         let bits = u64::from_le_bytes([best.0[2], best.0[3], best.0[4], best.0[5], best.0[6], best.0[7], 0, 0]);
-        let t: Vec<f32> = (0..16).map(|i| t8((bits >> (3 * i)) & 7)).collect();
-        let Some((a, b)) = ls_endpoints(&pts, &t, 1) else {
+        let Some((a, b)) = ls_bits(bits, v) else {
             break;
         };
-        let (a, b) = (a[0].round() as u8, b[0].round() as u8);
+        let (a, b) = (a as u8, b as u8);
         if a <= b {
             break;
         }
@@ -205,25 +229,8 @@ pub fn refit_channel(raw: &[u8], v: &[u8; 16]) -> Option<[u8; 8]> {
         return None;
     }
     let bits = u64::from_le_bytes([raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], 0, 0]);
-    // `fit::ls_endpoints` for one dimension, the same float operations in the same order
-    // (so the same result) without its allocations: RDO calls this millions of times.
-    let (mut aa, mut ab, mut bb, mut ax, mut bx) = (0f32, 0f32, 0f32, 0f32, 0f32);
-    for (i, &x) in v.iter().enumerate() {
-        let ti = t8((bits >> (3 * i)) & 7);
-        let si = 1.0 - ti;
-        aa += si * si;
-        ab += si * ti;
-        bb += ti * ti;
-        ax += si * x as f32;
-        bx += ti * x as f32;
-    }
-    let det = aa * bb - ab * ab;
-    if det.abs() < 1e-6 {
-        return None;
-    }
-    let a = ((bb * ax - ab * bx) / det).clamp(0.0, 255.0);
-    let b = ((aa * bx - ab * ax) / det).clamp(0.0, 255.0);
-    let (a, b) = (a.round() as u8, b.round() as u8);
+    let (a, b) = ls_bits(bits, v)?;
+    let (a, b) = (a as u8, b as u8);
     if a <= b {
         return None;
     }

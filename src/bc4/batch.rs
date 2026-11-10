@@ -11,7 +11,9 @@
 //! index wins). Index assignment tests all eight palette entries per texel, so lanes can sit in
 //! different modes.
 //!
-//! Every value is a small integer held exactly in `f32`, so both backends agree bit for bit.
+//! Every value is a small integer held exactly in `f32`, and the steps that are not (projection
+//! thresholds, least-squares fits) are defined in exact integer arithmetic, so the AVX2 and generic
+//! backends and the GPU kernel (`src/gpu/bc4.wgsl`) agree bit for bit.
 
 #[cfg(target_arch = "x86_64")]
 use crate::simd::Level;
@@ -19,11 +21,11 @@ use crate::simd::{LANES, SimdF32, SimdI32, f32x8, level};
 use crate::surface::{Block, Surface};
 
 /// Endpoint search radius of the exact encoder per effort (efforts 0-1 use [`proj8`] / [`fast8`]).
-pub(super) const RADIUS: [i32; 10] = [0, 0, 0, 0, 1, 1, 2, 3, 4, 4];
+pub(crate) const RADIUS: [i32; 10] = [0, 0, 0, 0, 1, 1, 2, 3, 4, 4];
 
-/// Projection threshold offset (in palette steps) of effort 0: the decoder truncates palette
-/// values, and a slightly lower rounding threshold tracks them better (+0.13 dB on Kodak).
-const PROJ_BIAS: f32 = -0.05;
+// Effort 0 rounds projections at 0.45 of a step rather than 0.5 (9/20, as `9 * span` over
+// `20 * span` in `proj8`): the decoder truncates palette values, and the lower threshold tracks
+// them better (+0.13 dB on Kodak).
 
 /// `floor` for non-negative lanes.
 #[inline(always)]
@@ -124,19 +126,41 @@ fn error<V: SimdF32>(x: &[V; 16], p: &[V; 8]) -> V {
     err
 }
 
-/// Interpolation weight toward e1 of each 8-value-mode palette index: 0 -> 0, 1 -> 1,
-/// k >= 2 -> (k - 1) / 7 (division, as the scalar reference).
+/// Step toward e1 (0..=7) of each 8-value-mode palette index: 0 -> 0, 1 -> 7, k >= 2 -> k - 1.
 #[inline(always)]
-fn weight8<V: SimdF32>(k: V) -> V {
+fn step8<V: SimdF32>(k: V) -> V {
     V::select(
         k.simd_lt(V::splat(0.5)),
         V::splat(0.0),
-        V::select(
-            k.simd_lt(V::splat(1.5)),
-            V::splat(1.0),
-            (k - V::splat(1.0)) / V::splat(7.0),
-        ),
+        V::select(k.simd_lt(V::splat(1.5)), V::splat(7.0), k - V::splat(1.0)),
     )
+}
+
+/// Least-squares endpoints per lane from each texel's step (0..=7), by [`super::ls_steps`]
+/// (exact integers); both 0 where the fit is degenerate. The sums are exact in `f32`.
+#[inline(always)]
+fn ls8<V: SimdF32>(x: &[V; 16], steps: &[V; 16]) -> (V, V) {
+    let zero = V::splat(0.0);
+    let (mut j, mut jj, mut jx, mut sx) = (zero, zero, zero, zero);
+    let mut i = 0;
+    while i < 16 {
+        j += steps[i];
+        jj += steps[i] * steps[i];
+        jx += steps[i] * x[i];
+        sx += x[i];
+        i += 1;
+    }
+    let (j, jj, jx, sx) = (j.to_array(), jj.to_array(), jx.to_array(), sx.to_array());
+    let (mut a, mut b) = ([0f32; LANES], [0f32; LANES]);
+    let mut l = 0;
+    while l < LANES {
+        if let Some((p, q)) = super::ls_steps(j[l] as i32, jj[l] as i32, jx[l] as i32, sx[l] as i32) {
+            a[l] = p as f32;
+            b[l] = q as f32;
+        }
+        l += 1;
+    }
+    (V::from_array(a), V::from_array(b))
 }
 
 /// 8-value-mode indices by projection onto the line from `a` (step 0) to `b` (step 7), and the
@@ -146,7 +170,11 @@ fn weight8<V: SimdF32>(k: V) -> V {
 fn project<V: SimdF32>(x: &[V; 16], a: V, b: V) -> ([V; 16], V, [V; 16]) {
     let zero = V::splat(0.0);
     let span = a - b;
-    let scale = V::select(zero.simd_lt(span), V::splat(7.0) / span.simd_max(V::splat(1.0)), zero);
+    // Step floor(clamp((a - x) * 7 / span + 0.5, 0, 7)), exactly: (14 (a - x) + span) / (2 span)
+    // in integers, clamped. The numerator is an exact integer and + 0.5 keeps the quotient at
+    // least 0.5 / (2 span) from any integer, far beyond the reciprocal's rounding error.
+    let inv = V::splat(1.0) / (span + span).simd_max(V::splat(1.0));
+    let pos = zero.simd_lt(span);
     let step = b - a;
     let a7 = a * V::splat(7.0) + V::splat(0.5);
     let inv7 = V::splat(1.0 / 7.0);
@@ -155,7 +183,8 @@ fn project<V: SimdF32>(x: &[V; 16], a: V, b: V) -> ([V; 16], V, [V; 16]) {
     let mut err = zero;
     let mut i = 0;
     while i < 16 {
-        let j = floor(((a - x[i]) * scale + V::splat(0.5)).simd_clamp(zero, V::splat(7.0)));
+        let n = (V::splat(14.0) * (a - x[i]) + span).simd_max(zero);
+        let j = V::select(pos, floor((n + V::splat(0.5)) * inv).simd_min(V::splat(7.0)), zero);
         steps[i] = j;
         // Palette value of step j: floor((7a + j(b - a)) / 7), as in `palette`.
         let d = x[i] - floor((a7 + j * step) * inv7);
@@ -176,7 +205,7 @@ fn project<V: SimdF32>(x: &[V; 16], a: V, b: V) -> ([V; 16], V, [V; 16]) {
 const STEP_INDEX: [u8; 16] = [0, 2, 3, 4, 5, 6, 7, 1, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// Effort 0: (e0, e1, index bits of texels 0-7, of texels 8-15). With min/max endpoints the
-/// projection already lies in `0.5 + PROJ_BIAS ..= 7.5 + PROJ_BIAS`, so it needs no clamp.
+/// projection already lies in `0.45 ..= 7.45`, so it needs no clamp.
 #[inline(always)]
 fn proj8<V: SimdF32>(x: &[V; 16]) -> (V, V, V::Int, V::Int) {
     let (mut lo, mut hi) = (x[0], x[0]);
@@ -186,18 +215,17 @@ fn proj8<V: SimdF32>(x: &[V; 16]) -> (V, V, V::Int, V::Int) {
         hi = hi.simd_max(x[i]);
         i += 1;
     }
-    let zero = V::splat(0.0);
     let span = hi - lo;
-    let scale = V::select(zero.simd_lt(span), V::splat(7.0) / span.simd_max(V::splat(1.0)), zero);
-    // (hi - x) * scale + round, with the per-block part folded (float error stays far below the
-    // 0.45 margin to either end of the step range).
-    let c = hi * scale + V::splat(0.5 + PROJ_BIAS);
-    let nscale = V::splat(0.0) - scale;
+    // Step floor((hi - x) * 7 / span + 0.45), exactly: (140 (hi - x) + 9 span) / (20 span) in
+    // integers. The numerator (+ 0.5) is exact in f32 and stays at least 0.5 / (20 span) from a
+    // multiple of the denominator, far beyond the reciprocal's rounding error.
+    let inv = V::splat(1.0) / (V::splat(20.0) * span).simd_max(V::splat(1.0));
+    let c = V::splat(140.0) * hi + V::splat(9.0) * span + V::splat(0.5);
     let (mut b0, mut b1) = (V::Int::splat(0), V::Int::splat(0));
     let mut i = 0;
     while i < 8 {
-        let j0 = x[i].mul_add(nscale, c).to_int_trunc();
-        let j1 = x[i + 8].mul_add(nscale, c).to_int_trunc();
+        let j0 = (x[i].mul_add(V::splat(-140.0), c) * inv).to_int_trunc();
+        let j1 = (x[i + 8].mul_add(V::splat(-140.0), c) * inv).to_int_trunc();
         b0 = b0 | (V::Int::lookup16(&STEP_INDEX, j0) << (3 * i as i32));
         b1 = b1 | (V::Int::lookup16(&STEP_INDEX, j1) << (3 * i as i32));
         i += 1;
@@ -217,28 +245,9 @@ fn fast8<V: SimdF32>(x: &[V; 16]) -> (V, V, [V; 16]) {
         i += 1;
     }
     let (idx, err, steps) = project(x, hi, lo);
-    // Least-squares refit from the indices (weight toward e1 = step / 7).
-    let (mut sw, mut sww, mut swx, mut sx) = (zero, zero, zero, zero);
-    let seventh = V::splat(1.0 / 7.0);
-    let mut i = 0;
-    while i < 16 {
-        let w = steps[i] * seventh;
-        sw += w;
-        sww = w.mul_add(w, sww);
-        swx = w.mul_add(x[i], swx);
-        sx += x[i];
-        i += 1;
-    }
-    let s00 = V::splat(16.0) - sw - sw + sww;
-    let s01 = sw - sww;
-    let (s0x, s1x) = (sx - swx, swx);
-    let det = s00 * sww - s01 * s01;
-    let ok_det = V::splat(1e-3).simd_lt(det);
-    let det = V::select(ok_det, det, V::splat(1.0));
-    let full = V::splat(255.0);
-    let a = floor(((sww * s0x - s01 * s1x) / det).simd_clamp(zero, full) + V::splat(0.5));
-    let b = floor(((s00 * s1x - s01 * s0x) / det).simd_clamp(zero, full) + V::splat(0.5));
-    let valid = ok_det & b.simd_lt(a) & zero.simd_lt(err);
+    // Least-squares refit from the steps (weight toward e1 = step / 7); 0, 0 when degenerate.
+    let (a, b) = ls8(x, &steps);
+    let valid = b.simd_lt(a) & zero.simd_lt(err);
     if !V::mask_any(valid) {
         return (hi, lo, idx);
     }
@@ -309,25 +318,14 @@ fn exact8<V: SimdF32>(x: &[V; 16], r: i32) -> (V, V, [V; 16]) {
     // Least-squares refits of 8-value-mode lanes from their indices (twice, as the reference).
     let mut it = 0;
     while it < 2 {
-        let (mut s00, mut s01, mut s11, mut s0x, mut s1x) = (zero, zero, zero, zero, zero);
+        let mut steps = [zero; 16];
         let mut i = 0;
         while i < 16 {
-            let w = weight8(best.idx[i]);
-            let u = V::splat(1.0) - w;
-            s00 += u * u;
-            s01 += u * w;
-            s11 += w * w;
-            s0x += u * x[i];
-            s1x += w * x[i];
+            steps[i] = step8(best.idx[i]);
             i += 1;
         }
-        let det = s00 * s11 - s01 * s01;
-        let ok_det = V::splat(1e-6).simd_lt(det.simd_max(zero - det));
-        let det = V::select(ok_det, det, V::splat(1.0));
-        let a = ((s11 * s0x - s01 * s1x) / det).simd_clamp(zero, full);
-        let b = ((s00 * s1x - s01 * s0x) / det).simd_clamp(zero, full);
-        let (a, b) = (floor(a + V::splat(0.5)), floor(b + V::splat(0.5)));
-        let valid = ok_det & mode8(best.a, best.b) & mode8(a, b) & zero.simd_lt(best.err);
+        let (a, b) = ls8(x, &steps);
+        let valid = mode8(best.a, best.b) & mode8(a, b) & zero.simd_lt(best.err);
         if !V::mask_any(valid) {
             break;
         }
