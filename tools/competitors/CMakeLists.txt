@@ -1,4 +1,4 @@
-# Builds bcn_harness (third-party BCn encoders behind one CLI) for scripts/head2head.py.
+# Builds bcn_harness (third-party BCn encoders behind one CLI) for scripts/compete.py.
 #
 #   cmake -S tools/competitors -B third_party/build-harness -DTP=<abs path to third_party> -DISPC=<ispc.exe>
 #   cmake --build third_party/build-harness --config Release

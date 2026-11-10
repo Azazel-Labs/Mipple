@@ -185,9 +185,9 @@
       ]
     },
     {
-      "label": "mipple: head-to-head vs bc7enc_rdo / bc7f (Kodak)",
+      "label": "mipple: compete vs bc7enc_rdo / bcn_harness (Kodak)",
       "type": "shell",
-      "command": "python3 scripts/head2head.py --corpus test-images/kodak --out bench-results/h2h-kodak --mipple target/release/mipple --bc7enc ${input:bc7encPath} --bc7f tools/bc7f/bc7f_encode",
+      "command": "python3 scripts/compete.py --corpus test-images/kodak --out bench-results/compete-kodak --mipple target/release/mipple --bc7enc ${input:bc7encPath} --harness ${input:harnessPath}",
       "dependsOn": "cargo build (release)",
       "problemMatcher": []
     }
@@ -198,6 +198,12 @@
       "type": "promptString",
       "description": "Path to the bc7enc_rdo binary (build: cmake + make in your bc7enc_rdo clone)",
       "default": "../bc7enc_rdo/build/bc7enc"
+    },
+    {
+      "id": "harnessPath",
+      "type": "promptString",
+      "description": "Path to the bcn_harness binary (build: tools/competitors/CMakeLists.txt); missing encoders are skipped",
+      "default": "third_party/build-harness/Release/bcn_harness"
     }
   ]
 }

@@ -1,5 +1,5 @@
 // bcn_harness: runs third-party BCn block encoders on a PNG and writes a DX10 DDS, so
-// `mipple score` and scripts/head2head.py can grade them exactly like mipple's own output.
+// `mipple score` and scripts/compete.py can grade them exactly like mipple's own output.
 //
 // Usage: bcn_harness <encoder> <in.png> <out.dds> [threads]
 //   encoder:

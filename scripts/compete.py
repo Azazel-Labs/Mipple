@@ -37,7 +37,7 @@ from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from head2head import bd_rate  # noqa: E402
+from bdrate import bd_rate  # noqa: E402
 
 SCORE_FIELDS = ["label", "image", "format", "width", "height", "psnr", "ssim", "normal_deg",
                 "raw_bytes", "zstd_bytes", "deflate_bytes", "zstd_bpt", "deflate_bpt", "secs"]

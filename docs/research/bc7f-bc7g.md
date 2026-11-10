@@ -36,7 +36,7 @@ bc7e level ~0.8 quality. It also serves as the real-time BC7 fallback when Basis
 
 Announced, not released. Geldreich describes it as bc7f's analytical techniques combined with SIMD, aiming
 for a few CPU threads to compete with GPU encoders. The wiki says it "is in the works" and will be open
-source. No code or numbers yet. `scripts/head2head.py` has a `--bc7g` hook for when it ships.
+source. No code or numbers yet. Add it to `scripts/compete.py` when it ships.
 
 ## What this means for mipple
 

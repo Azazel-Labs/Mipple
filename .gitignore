@@ -6,8 +6,10 @@
 /test-images/oodle/
 /test-images/polyhaven/
 /test-images/polyhaven-test/
-/tools/bc7f/bc7f_encode
 /bench-results/**/work/
+# Local `mipple bench` outputs (the VS Code bench tasks); published numbers live in docs/BENCHMARKS.md.
+/bench-results/kodak.*
+/bench-results/synthetic.*
 __pycache__/
 # Third-party encoders built locally for head-to-head benchmarks, never committed.
 /third_party/

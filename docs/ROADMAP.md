@@ -12,7 +12,7 @@ milestone in progress; every green push to main is released as the next patch (`
 
 ## v0.2 (pre-release): close the gap to the best open BCn RDO
 
-- [x] **Head-to-head harness** (`scripts/head2head.py` + `mipple score` + DDS I/O): mipple vs bc7enc_rdo on Kodak, BD-rate. Result: mipple −13.4% (Zstd) vs bc7enc_rdo's bc7enc.cpp base. See `docs/BENCHMARKS.md`.
+- [x] **Head-to-head harness** (`mipple score` + DDS I/O; now `scripts/compete.py`): mipple vs bc7enc_rdo on Kodak, BD-rate. Result: mipple −13.4% (Zstd) vs bc7enc_rdo's bc7enc.cpp base. See `docs/BENCHMARKS.md`.
 - [x] **bc7f partition pre-selection** at effort 1 (principal-axis split + popcount): 2.1× faster base encode, −0.18 dB, and a better RDO curve. (Superseded: effort 1 now ranks all 64 partitions with vectorized line fits.)
 - [x] **Re-run head-to-head with bc7e** (bc7enc_rdo built with ISPC) and **bc7f**: done in `scripts/compete.py`.
 - [x] **Fast regression check** (`mipple check`): synthetic 256² × 4 formats × 5 λ in ~30 s against a committed baseline; BD-rate, λ=0 PSNR/size and per-image gates; byte-identical count; CI step.
@@ -29,7 +29,7 @@ Shipped:
 - [x] **Multi-format head-to-head** (`scripts/compete.py`, `tools/competitors/`): bc7enc_rdo (bc7e, rgbcx, RDO),
   bc7f, Intel ISPC Texture Compressor, icbc, stb_dxt, Compressonator, texconv; core pinning for single-thread
   timings on hybrid CPUs.
-- [x] **Robust BD-rate** (Pareto front, piecewise-linear) in `mipple check`, `head2head.py` and `compete.py`.
+- [x] **Robust BD-rate** (Pareto front, piecewise-linear) in `mipple check` and `compete.py`.
 - [x] **SIMD layer** (`src/simd.rs`): `std::simd`-named types, portable and AVX2 backends, runtime dispatch.
 - [x] **BC1:** 3-color mode with black, SIMD cluster fit with a learned split order. Top-end quality matches
   rgbcx L18 / icbc 9. Batch encoder for every effort; effort 0 is faster than Intel ISPC and +0.34 dB.
@@ -87,7 +87,7 @@ Open for v0.9.x:
   24 chunks on 20 threads run as two uneven rounds). Tried: splitting each block's search over back distances
   across threads; no faster on a 155H, since per-block joins wait for the slowest core.
 - [ ] Add **Basis UASTC + RDO + Zstd** and **XUBC7** to the head-to-head (`basisu -unpack` to DDS, then score).
-  Add **bc7g** when released (`scripts/head2head.py --bc7g`). NVTT 3 needs a manual download.
+  Add **bc7g** to `scripts/compete.py` when released. NVTT 3 needs a manual download.
 
 ## v1.0: more formats
 

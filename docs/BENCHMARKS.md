@@ -439,8 +439,7 @@ rate model for the split layout is on the roadmap.
 ## v0.9: entropy-reduced BC7 base encoding
 
 v0.9 ports bc7enc's `-e` ("reduced entropy") into the BC7 base encoder, behind `--entropy off|on|auto`
-(default **auto** = on for λ ≥ 1). It was measured with `mipple check` only; the full Kodak head-to-head
-below is still the v0.2 run and was **not** repeated.
+(default **auto** = on for λ ≥ 1). It was measured with `mipple check`; the competitor tables above include it.
 
 What it does, per block:
 
@@ -530,104 +529,6 @@ Later changes:
 | Localized BC5 search (`--local` 16: nearest 128 + 16 network-ranked + row above) | PASS: BD-rate BC5 −1.05%, others identical, total time 1.08× (synthetic; Kodak-24: BC5 −0.76%, 1.02×); synthetic baseline updated |
 | Field-swap refinement for BC7 (`--refine-back` 256, mode-6 halves scored without a decode) | PASS: BD-rate BC7 −1.13% Zstd / −0.87% Deflate, BC1/BC4/BC5 identical, total time 1.07× (synthetic; Kodak-24 −0.12%); both baselines updated |
 
-## Head-to-head: mipple vs bc7enc_rdo (Kodak 24, BC7, v0.2)
-
-`scripts/head2head.py` runs each encoder to DDS and grades everything with `mipple score`, so metrics and back
-ends are identical. bc7enc_rdo (commit b943862, 2026-07-30) was built from source **without ISPC**, so its base
-encoder is `bc7enc.cpp` at `-u4` (modes 1/5/6/7), not the stronger `bc7e.ispc`; its RDO window was set to 1024
-bytes (`-zc1024`). bc7f and bc7g are not in this run (see "Not yet measured").
-
-**BD-rate vs bc7enc_rdo** (average size difference at equal PSNR; negative = smaller):
-
-| Family | Zstd-19 | Deflate-9 |
-| --- | --- | --- |
-| **mipple** (effort 1, λ 0–8) | **−13.4%** | **−12.6%** |
-| bc7enc_rdo `-C -e` (reduced-entropy base + RDO) | −7.9% | −6.7% |
-
-| Encoder config | Mean PSNR (dB) | Zstd-19 bpt | Deflate-9 bpt | Encode time, 24 images (s) |
-| --- | --- | --- | --- | --- |
-| mipple λ=0 | 45.03 | 7.266 | 7.358 | 9.4 |
-| mipple λ=0.5 | 44.25 | 6.454 | 6.533 | 54.6 |
-| mipple λ=1 | 43.00 | 5.703 | 5.792 | 56.8 |
-| mipple λ=2 | 41.26 | 4.919 | 5.032 | 58.0 |
-| mipple λ=4 | 39.91 | 4.506 | 4.638 | 59.2 |
-| bc7enc_rdo λ=0 | 45.33 | 7.194 | 7.296 | 7.8 |
-| bc7enc_rdo λ=0.1 | 44.75 | 6.902 | 6.989 | 185.1 |
-| bc7enc_rdo λ=0.25 | 43.30 | 6.429 | 6.503 | 179.8 |
-| bc7enc_rdo λ=0.5 | 40.94 | 5.890 | 5.953 | 177.1 |
-| bc7enc_rdo λ=1 | 37.59 | 5.253 | 5.307 | 174.4 |
-| bc7enc_rdo `-C -e` λ=0 | 43.83 | 6.408 | 6.579 | 8.2 |
-| bc7enc_rdo `-C -e` λ=0.25 | 41.98 | 5.709 | 5.840 | 168.2 |
-
-Full table (19 configs): `bench-results/h2h-kodak/summary.md`; per-image rows: `bench-results/h2h-kodak/rows.csv`.
-
-What it says:
-
-- **RDO:** at matched quality mipple ships fewer bytes: 43.0 dB at 5.70 bpt vs bc7enc_rdo's 43.3 dB at 6.43 bpt.
-  mipple's RDO pass is also about 3× faster here.
-- **Base encoder:** bc7enc's base is slightly better and faster at λ=0 (45.33 dB at 1.2 Mpix/s vs mipple's
-  45.03 dB at 1.0 Mpix/s). With bc7e it would be stronger still.
-- **λ scales differ:** bc7enc_rdo's λ = 1 is far more aggressive than mipple's; compare curves, not λ values.
-- **Reduced-entropy encoding is a cheap win:** bc7enc_rdo's `-e` (no RDO time cost) cuts size 11% at λ=0 and
-  improves its curve by 7.9%. mipple v0.9 adds it (see above). The gain is about 5% on mipple's curve, because
-  mipple's RDO already captured part of it. Re-running this head-to-head with `--entropy auto` is still to do.
-
-### bc7f-style effort 1 (this release)
-
-Effort 1 now pre-selects 2-subset partitions bc7f's way (principal-axis split, popcount match against the 64
-patterns) before line-fit ranking, and sends very low-variance blocks straight to mode 6. Measured on 8 Kodak
-images at λ=0:
-
-| Variant | PSNR (dB) | Zstd bpt | Base time (s) |
-| --- | --- | --- | --- |
-| Previous effort 1 (line-fit rank all 64, keep 4) | 45.04 | 7.389 | 6.59 |
-| One-shot guess, keep 4 (pure bc7f style) | 44.38 | 7.297 | 2.62 |
-| Popcount top 8 → line-fit → keep 4 | 44.62 | 7.301 | 2.69 |
-| **Popcount top 16 → line-fit → keep 4 (shipped)** | **44.86** | **7.298** | **3.26** |
-| Popcount top 24 → line-fit → keep 4 | 44.91 | 7.295 | 3.79 |
-
-The shipped variant is 2.1× faster for −0.18 dB, and its blocks compress slightly better, which moved the
-head-to-head BD-rate from −11.5% (previous effort 1) to −13.4%.
-
-### Not yet measured
-
-- **bc7e.ispc** (bc7enc_rdo's best base): needs ISPC; downloading its prebuilt compiler was blocked in the dev sandbox.
-- **bc7f**: `tools/bc7f/` has the harness and build script; compiling Basis Universal was blocked in the dev sandbox.
-- **bc7g**: announced, unreleased. `scripts/head2head.py --bc7g` is ready.
-
-## Kodak 24 (photos, 768×512), λ sweep (v0.2, entropy reduction off)
-
-| Format | λ | Mean PSNR (dB) | Mean SSIM | Zstd bpt | Δ Zstd vs λ0 | Deflate bpt | Δ Deflate vs λ0 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| BC1 | 0 | 36.16 | 0.9812 | 2.992 | — | 3.115 | — |
-| BC1 | 1 | 36.20 | 0.9800 | 2.813 | −6.0% | 2.940 | −5.6% |
-| BC1 | 2 | 36.07 | 0.9779 | 2.650 | −11.4% | 2.765 | −11.3% |
-| BC1 | 4 | 35.64 | 0.9712 | 2.340 | −21.8% | 2.434 | −21.9% |
-| BC7 | 0 | 45.03 | 0.9973 | 7.266 | — | 7.358 | — |
-| BC7 | 0.5 | 44.25 | 0.9960 | 6.454 | −11.2% | 6.533 | −11.2% |
-| BC7 | 1 | 43.00 | 0.9927 | 5.703 | −21.5% | 5.792 | −21.3% |
-| BC7 | 2 | 41.26 | 0.9862 | 4.919 | −32.3% | 5.032 | −31.6% |
-| BC7 | 4 | 39.91 | 0.9807 | 4.506 | −38.0% | 4.638 | −37.0% |
-
-A zoomed visual check of kodim23 shows no block artifacts at λ = 4, only slight softening of fine texture.
-
-## Synthetic corpus (512×512, `mipple synth`, v0.2)
-
-| Format | λ | Mean PSNR (dB) | Normal err (°) | Zstd bpt | Δ Zstd vs λ0 |
-| --- | --- | --- | --- | --- | --- |
-| BC1 | 0 | 42.69 | 2.86 | 1.962 | — |
-| BC1 | 1 | 42.98 | 2.86 | 1.822 | −7.2% |
-| BC1 | 4 | 41.59 | 2.91 | 1.526 | −22.2% |
-| BC4 | 0 | 66.03 | — | 2.872 | — |
-| BC4 | 1 | 54.92 | — | 1.934 | −32.7% |
-| BC5 | 0 | 66.03 | 0.60 | 5.117 | — |
-| BC5 | 1 | 54.57 | 0.69 | 3.258 | −36.3% |
-| BC7 | 0 | 51.53 | 1.52 | 4.973 | — |
-| BC7 | 1 | 47.15 | 1.52 | 3.887 | −21.8% |
-| BC7 | 4 | 43.96 | 1.98 | 3.129 | −37.1% |
-
-Mean PSNR counts losslessly encoded images as 99 dB; see `bench-results/synthetic.csv` for per-image values.
-
 ## How to reproduce
 
 ```sh
@@ -637,8 +538,9 @@ cargo build --release
 ./target/release/mipple check -f bc7 --entropy off                    # v0.9 vs v0.2 behaviour, same baseline
 scripts/fetch-kodak.sh
 ./target/release/mipple bench test-images/kodak -f bc1,bc7 -l 0,0.5,1,2,4
-python3 scripts/head2head.py --corpus test-images/kodak --out bench-results/h2h-kodak \
-    --mipple target/release/mipple --bc7enc /path/to/bc7enc_rdo/build/bc7enc --bc7f tools/bc7f/bc7f_encode
+python3 scripts/compete.py --corpus test-images/kodak --out bench-results/compete-kodak \
+    --mipple target/release/mipple --bc7enc /path/to/bc7enc_rdo/build/bc7enc \
+    --harness /path/to/bcn_harness       # add --threads 1 --base-only --affinity MASK for per-core tables
 ```
 
 Building bc7enc_rdo with recent GCC needs `-DCMAKE_CXX_FLAGS="-include cstdint"`; add `-DSUPPORT_BC7E=TRUE`

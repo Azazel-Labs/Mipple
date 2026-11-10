@@ -40,9 +40,7 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | `src/synth.rs` | Deterministic procedural test images |
 | `src/main.rs` | CLI: `encode`, `decode`, `info`, `compare`, `bench`, `check`, `score`, `synth` |
 | `scripts/compete.py` | Multi-format head-to-head against third-party encoders (see [BENCHMARKS.md](BENCHMARKS.md)) |
-| `scripts/head2head.py` | BC7-only head-to-head (mipple / bc7enc_rdo / bc7f / bc7g); shares the BD-rate code |
 | `tools/competitors/` | `bcn_harness`: bc7f, Intel ISPC Texture Compressor, icbc and stb_dxt behind one CLI |
-| `tools/bc7f/` | Older single-encoder harness for bc7f |
 
 ## SIMD (`src/simd.rs`)
 
@@ -194,7 +192,7 @@ effort, entropy mode). The comparison pools each (format, λ) into one point: PS
 with lossless results capped at 99 dB, and summed bytes. Then it applies these gates:
 
 - BD-rate of the curve vs the baseline curve. Each curve is reduced to its Pareto front and ln(rate) is
-  interpolated piecewise-linearly in PSNR (the same method as `head2head.py` and `compete.py`). A least-squares
+  interpolated piecewise-linearly in PSNR (the same method as `scripts/bdrate.py`, used by `compete.py`). A least-squares
   cubic was used before; it swings wildly on short or non-monotonic RDO sweeps (it reported +15% for a BC1 curve
   that was smaller at every matched quality);
 - λ = 0 pooled PSNR drop and size growth;

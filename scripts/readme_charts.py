@@ -14,7 +14,7 @@ own blocks from a stock Unreal Engine 5.8 cook of Kodak-24), and writes:
   README.md                the block between `<!-- results:start -->` and `<!-- results:end -->`
 
 The SVGs follow the viewer's light/dark preference. BD-rate is the same computation as compete.py's
-summary (scripts/head2head.py `bd_rate`), so the README always agrees with docs/BENCHMARKS.md once both are
+summary (scripts/bdrate.py), so the README always agrees with docs/BENCHMARKS.md once both are
 refreshed from the same rows. Re-run this after any compete or ue_oodle/compare run; it needs no encoder.
 """
 
@@ -27,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
-from head2head import bd_rate  # noqa: E402
+from bdrate import bd_rate  # noqa: E402
 
 FORMATS = ["bc1", "bc4", "bc5", "bc7"]
 # What each format is for, shown under the panel title.

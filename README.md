@@ -99,7 +99,7 @@ Normal maps: `-f bc5 --normal`. Masks: `-f bc4`. Data maps are linear by default
 Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, Even Better TOML, Dependi).
 
 - **Build / test:** `Ctrl+Shift+B` builds release; *Run Test Task* runs the suite. rust-analyzer checks with clippy on save.
-- **Tasks** (*Terminal → Run Task*): regression check (synthetic, Kodak first 4, accept baseline), generate synthetic images, bench synthetic, bench Kodak, head-to-head vs bc7enc_rdo/bc7f, encode the image open in the editor, decode the open KTX2.
+- **Tasks** (*Terminal → Run Task*): regression check (synthetic, Kodak first 4, accept baseline), generate synthetic images, bench synthetic, bench Kodak, compete vs bc7enc_rdo and the bcn_harness encoders, encode the image open in the editor, decode the open KTX2.
 - **Debug** (F5): encode bricks, encode the current image, bench, unit tests, and the cross-decode integration test, all under CodeLLDB.
 
 ## Commands
@@ -134,14 +134,15 @@ AVX2 encoder is faster at a few ms per megapixel. Cargo features: `cli` (the `mi
 
 ## What's inside
 
-- BC1, BC4, BC5 and BC7 encoders (BC7 modes 0/1/2/3/6/7; all 8 modes decode), with an entropy-reduced BC7
-  mode for RDO (mode-6 preference, 64-level mode-6 endpoints).
+- BC1, BC4, BC5 and BC7 encoders (all 8 BC7 modes), with an entropy-reduced BC7 mode for RDO (mode-6
+  preference, 64-level mode-6 endpoints), and wgpu compute kernels that write the CPU's exact blocks.
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.
 - `mipple check`, a 30-second regression check with BD-rate gates against a committed baseline (also in CI).
-- A benchmark harness, a synthetic corpus, DDS I/O, and a head-to-head driver (`scripts/head2head.py`) that
-  scores mipple, bc7enc_rdo, bc7f (`tools/bc7f/`) and, once released, bc7g on one corpus and reports BD-rate.
+- A benchmark harness, a synthetic corpus, DDS I/O, and a competitor driver (`scripts/compete.py`) that grades
+  mipple, bc7enc_rdo/bc7e, bc7f, Intel ISPC, icbc, stb_dxt, Compressonator and texconv with the same metrics
+  and reports BD-rate; `scripts/ue_oodle/` does the same against Oodle Texture through Unreal Engine.
 
 Design details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); next steps are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -150,11 +151,13 @@ Design details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); next steps a
 ```text
 src/            library + CLI (see docs/ARCHITECTURE.md for the module map)
 tests/          cross-decoder, KTX2 container and quality/RDO tests
-docs/           reference research, bc7f/bc7g notes, architecture, benchmarks, roadmap
-bench-results/  latest benchmark CSV + Markdown, incl. h2h-kodak/
+docs/           architecture, benchmarks, roadmap, research notes (docs/research/)
+bench-results/  check baselines and the compete / Oodle runs behind docs/BENCHMARKS.md
 test-images/    synthetic set (generated); Kodak is fetched by scripts/, not committed
-scripts/        fetch-kodak.sh / .ps1, head2head.py
-tools/bc7f/     harness + build script for Binomial's bc7f encoder
+scripts/        corpus fetchers, compete.py / scoreboard.py (vs competitors), ue_oodle/ (vs Oodle),
+                readme_charts.py, ranker training (train_ranker*.py), make_icon.py
+tools/          competitors/: bcn_harness, third-party BCn encoders behind one CLI
+web/            the browser demo (wasm)
 .vscode/        settings, tasks, launch configs, extension recommendations
 ```
 
