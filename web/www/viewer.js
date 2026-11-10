@@ -281,8 +281,20 @@ export class Viewer {
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
-  onHandle(p) {
-    return this.mode === "split" && this.dec && Math.abs(p.x - this.el.clientWidth * this.split) <= 16;
+  onHandle(p, touch = false) {
+    // A wider grab zone for fingers.
+    const r = touch ? 28 : 16;
+    return this.mode === "split" && this.dec && Math.abs(p.x - this.el.clientWidth * this.split) <= r;
+  }
+
+  // Moves the view by a screen-space drag.
+  panBy(dx, dy) {
+    this.cx -= dx / this.scale;
+    this.cy -= dy / this.scale;
+    this.fitted = false;
+    this.clamp();
+    this.report();
+    this.draw();
   }
 
   // Offset of a point from its pane center, for anchored zoom.
@@ -296,22 +308,29 @@ export class Viewer {
 
   bindInput() {
     const c = this.canvas;
+    // Touch: one finger scrolls the page (CSS touch-action: pan-y) unless it starts on the split
+    // handle; two fingers pinch to zoom and move together to pan. Mouse and pen drag to pan.
     c.addEventListener("pointerdown", (e) => {
       if (!this.orig) return;
-      c.setPointerCapture(e.pointerId);
+      const touch = e.pointerType === "touch";
       const p = this.local(e);
       this.pointers.set(e.pointerId, p);
       if (this.pointers.size === 2) {
         const [a, b] = [...this.pointers.values()];
+        for (const id of this.pointers.keys()) {
+          if (!c.hasPointerCapture(id)) c.setPointerCapture(id);
+        }
         this.drag = {
           kind: "pinch",
           dist: Math.hypot(a.x - b.x, a.y - b.y),
           scale: this.scale,
-          mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+          last: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
         };
-      } else if (this.onHandle(p)) {
+      } else if (this.onHandle(p, touch)) {
+        c.setPointerCapture(e.pointerId);
         this.drag = { kind: "split" };
-      } else {
+      } else if (!touch) {
+        c.setPointerCapture(e.pointerId);
         this.drag = { kind: "pan", last: p };
         c.classList.add("panning");
       }
@@ -319,7 +338,7 @@ export class Viewer {
     c.addEventListener("pointermove", (e) => {
       const p = this.local(e);
       if (!this.pointers.has(e.pointerId)) {
-        c.classList.toggle("on-handle", !!this.onHandle(p));
+        if (e.pointerType !== "touch") c.classList.toggle("on-handle", !!this.onHandle(p));
         return;
       }
       this.pointers.set(e.pointerId, p);
@@ -329,17 +348,15 @@ export class Viewer {
         this.split = Math.min(1, Math.max(0, p.x / this.el.clientWidth));
         this.draw();
       } else if (d.kind === "pan") {
-        this.cx -= (p.x - d.last.x) / this.scale;
-        this.cy -= (p.y - d.last.y) / this.scale;
+        this.panBy(p.x - d.last.x, p.y - d.last.y);
         d.last = p;
-        this.fitted = false;
-        this.clamp();
-        this.report();
-        this.draw();
       } else if (d.kind === "pinch" && this.pointers.size >= 2) {
         const [a, b] = [...this.pointers.values()];
         const dist = Math.hypot(a.x - b.x, a.y - b.y);
-        this.setScale((d.scale * dist) / Math.max(1, d.dist), this.anchor(d.mid));
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        this.setScale((d.scale * dist) / Math.max(1, d.dist), this.anchor(mid));
+        this.panBy(mid.x - d.last.x, mid.y - d.last.y);
+        d.last = mid;
       }
     });
     const end = (e) => {
@@ -348,8 +365,9 @@ export class Viewer {
         this.drag = null;
         c.classList.remove("panning");
       } else if (this.drag?.kind === "pinch") {
+        // One finger left: touch stops there (the page owns one-finger moves), a mouse keeps panning.
         const [p] = this.pointers.values();
-        this.drag = { kind: "pan", last: p };
+        this.drag = e.pointerType === "touch" ? null : { kind: "pan", last: p };
       }
     };
     c.addEventListener("pointerup", end);

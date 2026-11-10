@@ -419,7 +419,8 @@ h2 {
   overflow: hidden;
   border-radius: 10px;
   background: var(--view-bg);
-  touch-action: none;
+  /* One finger scrolls the page; the viewer handles pinch, two-finger pan and the split handle. */
+  touch-action: pan-y;
   user-select: none;
 }
 
