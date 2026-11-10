@@ -1149,20 +1149,15 @@ fn guess_partitions<V: SimdF32, const K: usize>(t: &Texels<V>, mean: &[V; 3], ax
     best_p
 }
 
-/// Ranks all 64 2-subset partitions per lane by an estimate of their error with 3-bit and with
-/// 2-bit indices: per subset, `trace(S) - λ + Δw² λ` with λ the Rayleigh quotient after one
-/// power step from the block's principal axis (`Δw` = index step, as the batch encoder's
-/// ranking), in exact integers so the GPU kernel ranks the same: the scatter matrix
-/// n S = n Σttᵀ - Σt Σtᵀ cut to 10 bits (by its largest diagonal), the power step's vector cut to
-/// 5 bits (a Rayleigh quotient's error is quadratic in the vector's), λ floored, then
-/// (a tr - b λ) / n for Δw² = 1 - b / a (49/48 and 9/8) in 1/16 units floored, the two subsets
-/// scaled back and summed with one rounding. Subset sums come from per-nibble subset tables: the membership
-/// of a partition is the same in every lane. Returns each lane's `K` best partitions for the
-/// first `R` index sizes (3-bit, then 2-bit; the rest left 0), best first.
+/// `tab[k][m][v]` of [`moment_tables`].
+type MomentTables<V> = [[[V; 9]; 16]; 4];
+
+/// Per-nibble subset moment tables for [`rank_fits`] and [`rank_fits3`]: `tab[k][m][v]` is moment
+/// `v` (r, g, b, rr, rg, rb, gg, gb, bb) summed over the texels `4k + j` with bit `j` set in `m`,
+/// and the block's totals. Texels are integers, so every sum is exact.
 #[inline(always)]
-fn rank_fits<V: SimdF32, const K: usize, const R: usize>(t: &Texels<V>, axis: &[V; 3]) -> [[V::Int; K]; 2] {
+fn moment_tables<V: SimdF32>(t: &Texels<V>) -> (MomentTables<V>, [V; 9]) {
     let zero = V::splat(0.0);
-    let one = V::splat(1.0);
     // Texels and their products: 9 moments per texel (integers below 2^16).
     let mut val = [[zero; 16]; 9];
     let mut i = 0;
@@ -1207,8 +1202,85 @@ fn rank_fits<V: SimdF32, const K: usize, const R: usize>(t: &Texels<V>, axis: &[
         }
         k += 1;
     }
+    (tab, tot)
+}
+
+/// One subset's error estimates for [`rank_fits`] and [`rank_fits3`]: `n` texels with moment sums
+/// `sm` (Σr, Σg, Σb, Σrr, Σrg, Σrb, Σgg, Σgb, Σbb), from the block's 10-bit `axis`. Returns the
+/// first `R` index sizes' estimates (3-bit, 2-bit) in 2^cs / 16 units and the scale 2^-cs.
+#[inline(always)]
+fn subset_est<V: SimdF32, const R: usize>(n: f32, sm: &[V; 9], axis: &[V; 3]) -> ([V; 2], V) {
+    let zero = V::splat(0.0);
+    let one = V::splat(1.0);
     // (a, b) of est = (a tr - b λ) / n: Δw² = 1/49 (3-bit), 1/9 (2-bit).
     const AB: [(f32, f32); 2] = [(49.0, 48.0), (9.0, 8.0)];
+    let mut est = [zero; 2];
+    // n Σttᵀ - Σt Σtᵀ (each product below 2^24, the difference below 2^23), cut to
+    // 10 bits.
+    let nv = V::splat(n);
+    let ns = [zero - sm[0], zero - sm[1], zero - sm[2]];
+    let c = [
+        ns[0].mul_add(sm[0], sm[3] * nv),
+        ns[0].mul_add(sm[1], sm[4] * nv),
+        ns[0].mul_add(sm[2], sm[5] * nv),
+        ns[1].mul_add(sm[1], sm[6] * nv),
+        ns[1].mul_add(sm[2], sm[7] * nv),
+        ns[2].mul_add(sm[2], sm[8] * nv),
+    ];
+    let sc = shrink(c[0].simd_max(c[3]).simd_max(c[5]), 9);
+    let mut cs = [zero; 6];
+    let mut j = 0;
+    while j < 6 {
+        cs[j] = floor(c[j] * sc);
+        j += 1;
+    }
+    let [c00, c01, c02, c11, c12, c22] = cs;
+    // One power step from the 10-bit axis (|v1| < 3 * 2^20), cut to 5 bits.
+    let v1 = [
+        c00.mul_add(axis[0], c01.mul_add(axis[1], c02 * axis[2])),
+        c01.mul_add(axis[0], c11.mul_add(axis[1], c12 * axis[2])),
+        c02.mul_add(axis[0], c12.mul_add(axis[1], c22 * axis[2])),
+    ];
+    let s5 = shrink(abs_max(&v1), 4);
+    let v1 = [floor(v1[0] * s5), floor(v1[1] * s5), floor(v1[2] * s5)];
+    let v2 = [
+        c00.mul_add(v1[0], c01.mul_add(v1[1], c02 * v1[2])),
+        c01.mul_add(v1[0], c11.mul_add(v1[1], c12 * v1[2])),
+        c02.mul_add(v1[0], c12.mul_add(v1[1], c22 * v1[2])),
+    ];
+    // λ = floor(v1·v2 / |v1|²): |v1|² < 3 * 2^10 and the cut matrix's eigenvalues are
+    // below 3 * 2^10, so the numerator is below 2^24 and the quotient below 2^12, the
+    // division's estimate within one ([`div_floor`]); 0 when the step vanishes.
+    let num = v1[0].mul_add(v2[0], v1[1].mul_add(v2[1], v1[2] * v2[2]));
+    let den = v1[0].mul_add(v1[0], v1[1].mul_add(v1[1], v1[2] * v1[2])).simd_max(one);
+    let lam = div_floor(num, den, one / den).0.simd_max(zero);
+    let tr = c00 + c11 + c22;
+    let inv_n = V::splat(1.0 / n);
+    let mut r = 0;
+    while r < R {
+        let (a, b) = AB[r];
+        // 16 x < 2^22 for x = a tr - b λ <= 49 * 3069.
+        let x = lam.mul_add(V::splat(-b), tr * V::splat(a)).simd_max(zero);
+        est[r] = div_floor_q(x * V::splat(16.0), inv_n);
+        r += 1;
+    }
+    (est, sc)
+}
+
+/// Ranks all 64 2-subset partitions per lane by an estimate of their error with 3-bit and with
+/// 2-bit indices: per subset, `trace(S) - λ + Δw² λ` with λ the Rayleigh quotient after one
+/// power step from the block's principal axis (`Δw` = index step, as the batch encoder's
+/// ranking), in exact integers so the GPU kernel ranks the same: the scatter matrix
+/// n S = n Σttᵀ - Σt Σtᵀ cut to 10 bits (by its largest diagonal), the power step's vector cut to
+/// 5 bits (a Rayleigh quotient's error is quadratic in the vector's), λ floored, then
+/// (a tr - b λ) / n for Δw² = 1 - b / a (49/48 and 9/8) in 1/16 units floored, the two subsets
+/// scaled back and summed with one rounding. Subset sums come from per-nibble subset tables: the membership
+/// of a partition is the same in every lane. Returns each lane's `K` best partitions for the
+/// first `R` index sizes (3-bit, then 2-bit; the rest left 0), best first.
+#[inline(always)]
+fn rank_fits<V: SimdF32, const K: usize, const R: usize>(t: &Texels<V>, axis: &[V; 3]) -> [[V::Int; K]; 2] {
+    let zero = V::splat(0.0);
+    let (tab, tot) = moment_tables(t);
     let mut best = [[V::splat(f32::INFINITY); K]; 2];
     let mut best_p = [[V::Int::splat(0); K]; 2];
     let mut p = 0;
@@ -1227,73 +1299,16 @@ fn rank_fits<V: SimdF32, const K: usize, const R: usize>(t: &Texels<V>, axis: &[
             k += 1;
         }
         // Per subset: each index size's estimate (in 2^cs / 16 units) and the scale 2^-cs.
-        let mut est = [[zero; 2]; 2];
-        let mut scale = [one; 2];
-        let mut sub = 0;
-        while sub < 2 {
-            let (n, sm) = if sub == 1 {
-                (n1, s1)
-            } else {
-                let mut s0 = [zero; 9];
-                let mut v = 0;
-                while v < 9 {
-                    s0[v] = tot[v] - s1[v];
-                    v += 1;
-                }
-                (16.0 - n1, s0)
-            };
-            // n Σttᵀ - Σt Σtᵀ (each product below 2^24, the difference below 2^23), cut to
-            // 10 bits.
-            let nv = V::splat(n);
-            let ns = [zero - sm[0], zero - sm[1], zero - sm[2]];
-            let c = [
-                ns[0].mul_add(sm[0], sm[3] * nv),
-                ns[0].mul_add(sm[1], sm[4] * nv),
-                ns[0].mul_add(sm[2], sm[5] * nv),
-                ns[1].mul_add(sm[1], sm[6] * nv),
-                ns[1].mul_add(sm[2], sm[7] * nv),
-                ns[2].mul_add(sm[2], sm[8] * nv),
-            ];
-            let sc = shrink(c[0].simd_max(c[3]).simd_max(c[5]), 9);
-            let mut cs = [zero; 6];
-            let mut j = 0;
-            while j < 6 {
-                cs[j] = floor(c[j] * sc);
-                j += 1;
-            }
-            let [c00, c01, c02, c11, c12, c22] = cs;
-            // One power step from the 10-bit axis (|v1| < 3 * 2^20), cut to 5 bits.
-            let v1 = [
-                c00.mul_add(axis[0], c01.mul_add(axis[1], c02 * axis[2])),
-                c01.mul_add(axis[0], c11.mul_add(axis[1], c12 * axis[2])),
-                c02.mul_add(axis[0], c12.mul_add(axis[1], c22 * axis[2])),
-            ];
-            let s5 = shrink(abs_max(&v1), 4);
-            let v1 = [floor(v1[0] * s5), floor(v1[1] * s5), floor(v1[2] * s5)];
-            let v2 = [
-                c00.mul_add(v1[0], c01.mul_add(v1[1], c02 * v1[2])),
-                c01.mul_add(v1[0], c11.mul_add(v1[1], c12 * v1[2])),
-                c02.mul_add(v1[0], c12.mul_add(v1[1], c22 * v1[2])),
-            ];
-            // λ = floor(v1·v2 / |v1|²): |v1|² < 3 * 2^10 and the cut matrix's eigenvalues are
-            // below 3 * 2^10, so the numerator is below 2^24 and the quotient below 2^12, the
-            // division's estimate within one ([`div_floor`]); 0 when the step vanishes.
-            let num = v1[0].mul_add(v2[0], v1[1].mul_add(v2[1], v1[2] * v2[2]));
-            let den = v1[0].mul_add(v1[0], v1[1].mul_add(v1[1], v1[2] * v1[2])).simd_max(one);
-            let lam = div_floor(num, den, one / den).0.simd_max(zero);
-            let tr = c00 + c11 + c22;
-            let inv_n = V::splat(1.0 / n);
-            let mut r = 0;
-            while r < R {
-                let (a, b) = AB[r];
-                // 16 x < 2^22 for x = a tr - b λ <= 49 * 3069.
-                let x = lam.mul_add(V::splat(-b), tr * V::splat(a)).simd_max(zero);
-                est[sub][r] = div_floor_q(x * V::splat(16.0), inv_n);
-                r += 1;
-            }
-            scale[sub] = sc;
-            sub += 1;
+        let mut s0 = [zero; 9];
+        let mut v = 0;
+        while v < 9 {
+            s0[v] = tot[v] - s1[v];
+            v += 1;
         }
+        let (est0, sc0) = subset_est::<V, R>(16.0 - n1, &s0, axis);
+        let (est1, sc1) = subset_est::<V, R>(n1, &s1, axis);
+        let est = [est0, est1];
+        let scale = [sc0, sc1];
         // est0 2^cs0 + est1 2^cs1 in one rounded f32 addition: the products are exact (powers
         // of two; a scale's reciprocal is an exponent flip), so the sum is the exact sum rounded
         // once, the same under any fusing.
@@ -1342,54 +1357,15 @@ const PART3_MASKS: [(u16, u16); 64] = {
     out
 };
 
-/// Ranks 3-subset partitions per lane like [`rank_fits`]: mode 0's 16 with 3-bit indices and
-/// mode 2's 64 with 2-bit indices. Returns each lane's `K` best for each, best first.
+/// Ranks 3-subset partitions per lane like [`rank_fits`], in the same exact integers: mode 0's 16
+/// with 3-bit indices and mode 2's 64 with 2-bit indices. The three subsets' estimates are cut to
+/// the coarsest one's scale (floored) and summed as integers, so the sum is exact and the GPU
+/// kernel ranks the same under any reassociation. Returns each lane's `K` best for each, best
+/// first.
 #[inline(always)]
-fn rank_fits3<V: SimdF32, const K: usize>(t: &Texels<V>, mean: &[V; 3], axis: &[V; 3]) -> [[V::Int; K]; 2] {
+fn rank_fits3<V: SimdF32, const K: usize>(t: &Texels<V>, axis: &[V; 3]) -> [[V::Int; K]; 2] {
     let zero = V::splat(0.0);
-    let mut val = [[zero; 16]; 9];
-    let mut i = 0;
-    while i < 16 {
-        let (r, g, b) = (t[0][i] - mean[0], t[1][i] - mean[1], t[2][i] - mean[2]);
-        val[0][i] = r;
-        val[1][i] = g;
-        val[2][i] = b;
-        val[3][i] = r * r;
-        val[4][i] = r * g;
-        val[5][i] = r * b;
-        val[6][i] = g * g;
-        val[7][i] = g * b;
-        val[8][i] = b * b;
-        i += 1;
-    }
-    let mut tab = [[[zero; 9]; 16]; 4];
-    let mut k = 0;
-    while k < 4 {
-        let mut m = 1usize;
-        while m < 16 {
-            let low = m & (16 - m) & 15;
-            let j = low.trailing_zeros() as usize;
-            let rest = m & !low;
-            let mut v = 0;
-            while v < 9 {
-                tab[k][m][v] = tab[k][rest][v] + val[v][4 * k + j];
-                v += 1;
-            }
-            m += 1;
-        }
-        k += 1;
-    }
-    let mut tot = [zero; 9];
-    let mut k = 0;
-    while k < 4 {
-        let mut v = 0;
-        while v < 9 {
-            tot[v] += tab[k][15][v];
-            v += 1;
-        }
-        k += 1;
-    }
-    let qs = [V::splat(1.0 / 49.0 - 1.0), V::splat(1.0 / 9.0 - 1.0)];
+    let (tab, tot) = moment_tables(t);
     let mut best = [[V::splat(f32::INFINITY); K]; 2];
     let mut best_p = [[V::Int::splat(0); K]; 2];
     let mut p = 0;
@@ -1415,45 +1391,23 @@ fn rank_fits3<V: SimdF32, const K: usize>(t: &Texels<V>, mean: &[V; 3], axis: &[
             s0[v] = tot[v] - s1[v] - s2[v];
             v += 1;
         }
+        // Every subset of a BC7 partition holds at least its anchor texel.
         let n1 = m1.count_ones() as f32;
         let n2 = m2.count_ones() as f32;
-        let ns = [16.0 - n1 - n2, n1, n2];
-        let subs = [s0, s1, s2];
-        let mut est = [zero; 2];
-        let mut sub = 0;
-        while sub < 3 {
-            let (n, sm) = (ns[sub], subs[sub]);
-            if n > 0.0 {
-                let inv_n = V::splat(1.0 / n);
-                let c00 = sm[3] - sm[0] * sm[0] * inv_n;
-                let c01 = sm[4] - sm[0] * sm[1] * inv_n;
-                let c02 = sm[5] - sm[0] * sm[2] * inv_n;
-                let c11 = sm[6] - sm[1] * sm[1] * inv_n;
-                let c12 = sm[7] - sm[1] * sm[2] * inv_n;
-                let c22 = sm[8] - sm[2] * sm[2] * inv_n;
-                let v1 = [
-                    c00.mul_add(axis[0], c01.mul_add(axis[1], c02 * axis[2])),
-                    c01.mul_add(axis[0], c11.mul_add(axis[1], c12 * axis[2])),
-                    c02.mul_add(axis[0], c12.mul_add(axis[1], c22 * axis[2])),
-                ];
-                let v2 = [
-                    c00.mul_add(v1[0], c01.mul_add(v1[1], c02 * v1[2])),
-                    c01.mul_add(v1[0], c11.mul_add(v1[1], c12 * v1[2])),
-                    c02.mul_add(v1[0], c12.mul_add(v1[1], c22 * v1[2])),
-                ];
-                let num = v1[0].mul_add(v2[0], v1[1].mul_add(v2[1], v1[2] * v2[2]));
-                let den = v1[0].mul_add(v1[0], v1[1].mul_add(v1[1], v1[2] * v1[2]));
-                let lam = V::select(V::splat(1e-6).simd_lt(den), num / den.simd_max(V::splat(1e-6)), zero);
-                let tr = c00 + c11 + c22;
-                est[0] += qs[0].mul_add(lam, tr);
-                est[1] += qs[1].mul_add(lam, tr);
-            }
-            sub += 1;
-        }
+        let (e0, c0) = subset_est::<V, 2>(16.0 - n1 - n2, &s0, axis);
+        let (e1, c1) = subset_est::<V, 2>(n1, &s1, axis);
+        let (e2, c2) = subset_est::<V, 2>(n2, &s2, axis);
+        // est_i 2^cs_i summed at the coarsest scale 2^cs (cs = max cs_i): each term
+        // floor(est_i 2^(cs_i - cs)) is exact (a power-of-two scaling, then a floor), the integer
+        // sum stays below 3 * 2^22, and the final scaling by 2^cs is exact.
+        let fine = c0.simd_min(c1).simd_min(c2); // 2^-cs
+        let up = fine.pow2_recip();
+        let ups = [c0.pow2_recip() * fine, c1.pow2_recip() * fine, c2.pow2_recip() * fine];
         // Mode 0 only has the first 16 partitions.
         let mut r = usize::from(p >= 16);
         while r < 2 {
-            let mut e = est[r];
+            let sum = floor(e0[r] * ups[0]) + floor(e1[r] * ups[1]) + floor(e2[r] * ups[2]);
+            let mut e = sum * up;
             let mut id = V::Int::splat(p as i32);
             let mut k = 0;
             while k < K {
@@ -2179,7 +2133,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                 }
             };
             let cands3: [[V::Int; 4]; 2] = if cfg.three != 0 {
-                rank_fits3::<V, 4>(t, &mean, &v)
+                rank_fits3::<V, 4>(t, &v)
             } else {
                 [[V::Int::splat(0); 4]; 2]
             };
