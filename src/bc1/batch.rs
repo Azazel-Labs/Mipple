@@ -143,52 +143,133 @@ fn assign<V: SimdF32>(t: &Texels<V>, e0: [V; 3], e1: [V; 3]) -> Fit<V> {
         b[c] = V::select(swap, q0.v[c], q1.v[c]);
         c += 1;
     }
-    // step = clamp(round(3 (p - a).d / |d|^2)) with d = b - a, folded to p.k + bias.
+    // step = clamp(round(3 (p - a).d / |d|^2), 0, 3) with d = b - a, exactly: with
+    // n = 6 (p - a).d, step >= k when n >= (2k - 1) |d|^2. Every value is an integer below 2^24,
+    // so the comparisons are exact whatever the rounding or contraction (the GPU kernel's too).
     let zero = V::splat(0.0);
+    let one = V::splat(1.0);
     let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let n2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-    let s = V::select(zero.simd_lt(n2), V::splat(3.0) / n2.simd_max(V::splat(1.0)), zero);
-    let k = [d[0] * s, d[1] * s, d[2] * s];
-    let bias = V::splat(0.5) - (a[0] * k[0] + a[1] * k[1] + a[2] * k[2]);
+    let pos = zero.simd_lt(n2);
+    let half = V::splat(0.5);
+    let (t1, t3, t5) = (n2 - half, n2 * V::splat(3.0) - half, n2 * V::splat(5.0) - half);
+    let six = V::splat(6.0);
+    let d6 = [d[0] * six, d[1] * six, d[2] * six];
+    let base = a[0] * d6[0] + a[1] * d6[1] + a[2] * d6[2];
     let mut step = [zero; 16];
     let mut i = 0;
     while i < 16 {
-        let x = t[0][i] * k[0] + t[1][i] * k[1] + t[2][i] * k[2] + bias;
-        step[i] = floor(x.simd_clamp(zero, V::splat(3.0)));
+        let n = t[0][i] * d6[0] + t[1][i] * d6[1] + t[2][i] * d6[2] - base;
+        let s = V::select(t1.simd_lt(n), one, zero)
+            + V::select(t3.simd_lt(n), one, zero)
+            + V::select(t5.simd_lt(n), one, zero);
+        step[i] = V::select(pos, s, zero);
         i += 1;
     }
     Fit { c0, c1, a, b, step }
 }
 
-/// Least-squares endpoints for the fit's steps (weight step / 3 toward c1). `None` lanes (a
-/// singular system) keep `fallback`; returns (e0, e1, valid).
+/// Least-squares endpoints for the fit's steps (weight step / 3 toward c1) as decoded 565
+/// values, and the lanes where the system is regular: exactly [`ls_levels`] per lane, in exact
+/// f32 integer arithmetic (every value below 2^24; see `level`).
 #[inline(always)]
 fn refit<V: SimdF32>(t: &Texels<V>, sum: &[V; 3], f: &Fit<V>) -> ([V; 3], [V; 3], V::Mask) {
-    let zero = V::splat(0.0);
-    // Steps and texels are integers, so these sums are exact in any order; weights are step / 3.
-    let (third, ninth) = (V::splat(1.0 / 3.0), V::splat(1.0 / 9.0));
-    let st = sum16!(|i| f.step[i]) * third;
-    let stt = sum16!(|i| f.step[i] * f.step[i]) * ninth;
-    let stp = [
-        sum16!(|i| f.step[i] * t[0][i]) * third,
-        sum16!(|i| f.step[i] * t[1][i]) * third,
-        sum16!(|i| f.step[i] * t[2][i]) * third,
+    // Steps and texels are integers, so these sums are exact in any order.
+    let j = sum16!(|i| f.step[i]);
+    let jj = sum16!(|i| f.step[i] * f.step[i]);
+    let jx = [
+        sum16!(|i| f.step[i] * t[0][i]),
+        sum16!(|i| f.step[i] * t[1][i]),
+        sum16!(|i| f.step[i] * t[2][i]),
     ];
-    let s00 = V::splat(16.0) - st - st + stt;
-    let s01 = st - stt;
-    let det = s00 * stt - s01 * s01;
-    let ok = V::splat(0.5).simd_lt(det);
-    let inv = V::splat(1.0) / V::select(ok, det, V::splat(1.0));
-    let mut e0 = [zero; 3];
-    let mut e1 = [zero; 3];
+    let s00 = V::splat(144.0) - j * V::splat(6.0) + jj;
+    let s01 = j * V::splat(3.0) - jj;
+    // s00 + 2 s01 + jj = 144 with s01 >= 0, so d <= 72^2.
+    let d = s00 * jj - s01 * s01;
+    let ok = V::splat(40.5).simd_lt(d);
+    let d = V::select(ok, d, V::splat(1.0));
+    let inv = V::splat(1.0) / d;
+    let mut e0 = [V::splat(0.0); 3];
+    let mut e1 = [V::splat(0.0); 3];
     let mut c = 0;
     while c < 3 {
-        let (s0x, s1x) = (sum[c] - stp[c], stp[c]);
-        e0[c] = (stt * s0x - s01 * s1x) * inv;
-        e1[c] = (s00 * s1x - s01 * s0x) * inv;
+        let s0x = sum[c] * V::splat(3.0) - jx[c]; // Σ (3 - j) x
+        e0[c] = ls_level(jj * s0x - s01 * jx[c], d, inv, c == 1);
+        e1[c] = ls_level(s00 * jx[c] - s01 * s0x, d, inv, c == 1);
         c += 1;
     }
     (e0, e1, ok)
+}
+
+/// The decoded 565 value of [`ls_levels`]' `level`: round(3 L num / (255 d)), clamped to 0..=L,
+/// i.e. (6 L num + 255 d) / (510 d), without its 2^30 numerator: with num = Q d + R
+/// (|num| < 2^22, d <= 72^2) and 6 L Q + 255 = 510 k + a, it is k + [a d + 6 L R >= 510 d],
+/// every term below 2^24. Q >= 85 means the endpoint is at least 255, so level L.
+#[inline(always)]
+fn ls_level<V: SimdF32>(num: V, d: V, inv: V, six: bool) -> V {
+    let l = if six { 63.0 } else { 31.0 };
+    let (q, r) = div_floor(num, d, inv);
+    let big = V::splat(84.5).simd_lt(q);
+    let a = q.simd_min(V::splat(85.0)) * V::splat(6.0 * l) + V::splat(255.0);
+    let k = floor((a + V::splat(0.5)) * V::splat(1.0 / 510.0));
+    let a = a - k * V::splat(510.0);
+    let up = (d * V::splat(510.0) - V::splat(0.5)).simd_lt(a * d + r * V::splat(6.0 * l));
+    let lv = (k + V::select(up, V::splat(1.0), V::splat(0.0))).simd_min(V::splat(l));
+    let lv = V::select(big, V::splat(l), lv);
+    expand(V::select(V::splat(0.0).simd_lt(num), lv, V::splat(0.0)), six)
+}
+
+/// Exact floor(a / d) and remainder a - q d, for integer lanes with d > 0, |a| < 2^23 and
+/// `inv` = 1 / d rounded: the estimate floor(a inv) is within one of the quotient, and the
+/// correction is exact since q d stays within d of a (fused or not, every product is an
+/// integer below 2^24).
+#[inline(always)]
+fn div_floor<V: SimdF32>(a: V, d: V, inv: V) -> (V, V) {
+    let one = V::splat(1.0);
+    let q = floor(a * inv);
+    let r = a - q * d;
+    let lo = r.simd_lt(V::splat(0.0));
+    let (q, r) = (V::select(lo, q - one, q), V::select(lo, r + d, r));
+    let hi = (d - V::splat(0.5)).simd_lt(r);
+    (V::select(hi, q + one, q), V::select(hi, r - d, r))
+}
+
+/// Bit-replicated 8-bit value of a 5-bit (or, `six`, 6-bit) level.
+#[inline(always)]
+#[cfg(test)]
+fn expand_level(q: i32, six: bool) -> i32 {
+    if six { (q << 2) | (q >> 4) } else { (q << 3) | (q >> 2) }
+}
+
+/// Least-squares 565 endpoint levels (q0, q1) of texels from the sums of their steps toward c1
+/// (`j`: 0 = c0 .. 3 = c1, weight j / 3): `j` = Σj, `jj` = Σj², `jx` = Σj·x and `sx` = Σx per
+/// channel. Each endpoint is clamped to 0..=255 and rounded to the nearest level (half up), all in
+/// exact integer arithmetic, so every encoder (SIMD lanes, the GPU kernel) gets the same levels.
+/// `None` when the system is near singular (determinant below 41, i.e. 0.5 in the weights' units).
+///
+/// The normal equations scaled by 9: [Σ(3-j)², Σj(3-j); Σj(3-j), Σj²] [e0; e1] = 3 [Σ(3-j)x; Σjx].
+/// Every intermediate fits i32 (the largest, `378 * num`, stays below 2^30).
+#[cfg(test)]
+pub(crate) fn ls_levels(j: i32, jj: i32, jx: [i32; 3], sx: [i32; 3]) -> Option<([i32; 3], [i32; 3])> {
+    let s00 = 144 - 6 * j + jj; // Σ (3 - j)²
+    let s01 = 3 * j - jj; // Σ j (3 - j)
+    let d = s00 * jj - s01 * s01;
+    if d < 41 {
+        return None;
+    }
+    // round(e * L / 255) for e = 3 num / d, clamped to 0..=L: (6 L num + 255 d) / (510 d).
+    let level = |num: i32, l: i32| {
+        let n = 6 * l * num + 255 * d;
+        if n <= 0 { 0 } else { (n / (510 * d)).min(l) }
+    };
+    let (mut q0, mut q1) = ([0; 3], [0; 3]);
+    for c in 0..3 {
+        let l = if c == 1 { 63 } else { 31 };
+        let s0x = 3 * sx[c] - jx[c]; // Σ (3 - j) x
+        q0[c] = level(jj * s0x - s01 * jx[c], l);
+        q1[c] = level(s00 * jx[c] - s01 * s0x, l);
+    }
+    Some((q0, q1))
 }
 
 /// Squared error of a fit against the decoder palette: floor(((3 - s) a + s b) / 3) per channel.
@@ -1132,52 +1213,69 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, row_order: bool) -> ([u8; 64], [
     // Raw sums of integer texels and their products are exact in f32 (at most 16 * 255^2), so
     // the order of summation does not matter: four chains keep the dependency depth short.
     let sum = [sum16!(|i| t[0][i]), sum16!(|i| t[1][i]), sum16!(|i| t[2][i])];
-    let inv16 = V::splat(1.0 / 16.0);
-    let mean = [sum[0] * inv16, sum[1] * inv16, sum[2] * inv16];
-    // Centered moments: sum(xy) - sum(x) sum(y) / 16 (exact: multiples of 1/16 below 2^20).
-    let rr = sum16!(|i| t[0][i] * t[0][i]) - sum[0] * mean[0];
-    let rg = sum16!(|i| t[0][i] * t[1][i]) - sum[0] * mean[1];
-    let rb = sum16!(|i| t[0][i] * t[2][i]) - sum[0] * mean[2];
-    let gg = sum16!(|i| t[1][i] * t[1][i]) - sum[1] * mean[1];
-    let gb = sum16!(|i| t[1][i] * t[2][i]) - sum[1] * mean[2];
-    let bb = sum16!(|i| t[2][i] * t[2][i]) - sum[2] * mean[2];
-    // Integer texels make the covariance exact: a zero trace means a solid block.
+    // The line fit is exact integer arithmetic (every value below 2^24 in f32), so its result
+    // does not depend on rounding, summation order or fused multiply-adds: the GPU kernel
+    // (`src/gpu/bc1.wgsl`) computes the same endpoints. Covariance scaled by 16:
+    // 16 Σxy - Σx Σy.
+    let s16 = V::splat(16.0);
+    let rr = sum16!(|i| t[0][i] * t[0][i]) * s16 - sum[0] * sum[0];
+    let rg = sum16!(|i| t[0][i] * t[1][i]) * s16 - sum[0] * sum[1];
+    let rb = sum16!(|i| t[0][i] * t[2][i]) * s16 - sum[0] * sum[2];
+    let gg = sum16!(|i| t[1][i] * t[1][i]) * s16 - sum[1] * sum[1];
+    let gb = sum16!(|i| t[1][i] * t[2][i]) * s16 - sum[1] * sum[2];
+    let bb = sum16!(|i| t[2][i] * t[2][i]) * s16 - sum[2] * sum[2];
+    // A zero trace means a solid block.
     let solid_mask = (rr + gg + bb).simd_lt(V::splat(0.5));
-    // Start from the largest-diagonal row, one power iteration.
-    let mut v = [rr, rg, rb];
+    // One power iteration from the largest-diagonal row, on the covariance cut to 11 bits
+    // (floor(C / 2^s); the largest diagonal bounds every entry) so the products stay exact.
+    let cs = shrink(rr.simd_max(gg).simd_max(bb), 10);
+    let (srr, srg, srb, sgg, sgb, sbb) = (
+        floor(rr * cs),
+        floor(rg * cs),
+        floor(rb * cs),
+        floor(gg * cs),
+        floor(gb * cs),
+        floor(bb * cs),
+    );
+    let mut v = [srr, srg, srb];
     let mut best = rr;
     let m = best.simd_lt(gg);
-    v = [V::select(m, rg, v[0]), V::select(m, gg, v[1]), V::select(m, gb, v[2])];
+    v = [
+        V::select(m, srg, v[0]),
+        V::select(m, sgg, v[1]),
+        V::select(m, sgb, v[2]),
+    ];
     best = best.simd_max(gg);
     let m = best.simd_lt(bb);
-    v = [V::select(m, rb, v[0]), V::select(m, gb, v[1]), V::select(m, bb, v[2])];
-    let mut w = [
-        rr * v[0] + rg * v[1] + rb * v[2],
-        rg * v[0] + gg * v[1] + gb * v[2],
-        rb * v[0] + gb * v[1] + bb * v[2],
+    v = [
+        V::select(m, srb, v[0]),
+        V::select(m, sgb, v[1]),
+        V::select(m, sbb, v[2]),
     ];
-    let n2 = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
+    let mut w = [
+        srr * v[0] + srg * v[1] + srb * v[2],
+        srg * v[0] + sgg * v[1] + sgb * v[2],
+        srb * v[0] + sgb * v[1] + sbb * v[2],
+    ];
     // Degenerate covariance (solid blocks; patched below): any axis will do.
-    let flat = n2.simd_lt(V::splat(1e-12));
+    let flat = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).simd_lt(V::splat(0.5));
     w = [
         V::select(flat, V::splat(1.0), w[0]),
         V::select(flat, V::splat(1.0), w[1]),
         V::select(flat, V::splat(1.0), w[2]),
     ];
-    let n2 = V::select(flat, V::splat(3.0), n2);
-    // Projections onto w relative to the mean (the mean's projection is subtracted once).
-    macro_rules! proj {
-        ($i:expr) => {
-            t[0][$i] * w[0] + t[1][$i] * w[1] + t[2][$i] * w[2]
-        };
-    }
-    let mw = mean[0] * w[0] + mean[1] * w[1] + mean[2] * w[2];
-    let tmin = reduce16!(|i| proj!(i), |a, b| a.simd_min(b)) - mw;
-    let tmax = reduce16!(|i| proj!(i), |a, b| a.simd_max(b)) - mw;
-    let inset = (tmax - tmin) * V::splat(1.0 / 16.0);
-    let (lo, hi) = ((tmin + inset) / n2, (tmax - inset) / n2);
-    let e_hi = [mean[0] + w[0] * hi, mean[1] + w[1] * hi, mean[2] + w[2] * hi];
-    let e_lo = [mean[0] + w[0] * lo, mean[1] + w[1] * lo, mean[2] + w[2] * lo];
+    // The axis cut to 7 bits; the extreme projections, inset by 1/16 of their range, and
+    // the points of the axis line through the mean they project from (see [`line_points`]).
+    let ws = {
+        let z = V::splat(0.0);
+        let m = w[0]
+            .simd_max(z - w[0])
+            .simd_max(w[1].simd_max(z - w[1]))
+            .simd_max(w[2].simd_max(z - w[2]));
+        let s = shrink(m, 6);
+        [floor(w[0] * s), floor(w[1] * s), floor(w[2] * s)]
+    };
+    let (e_hi, e_lo) = line_points(t, &sum, &ws);
     let mut fit = assign(t, e_hi, e_lo);
     let mut err = V::splat(0.0);
 
@@ -1301,6 +1399,73 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, row_order: bool) -> ([u8; 64], [
         l += 1;
     }
     (out, solid)
+}
+
+/// Power-of-two scale 2^-s per lane, with s the least shift (at most 15) that brings the
+/// non-negative integer `m` (below 2^24) under 2^(bits + 1): the largest s with m >= 2^(bits + s),
+/// found by halving steps. Exact: every product is a power-of-two scaling.
+#[inline(always)]
+fn shrink<V: SimdF32>(m: V, bits: i32) -> V {
+    let mut ms = m;
+    let mut scale = V::splat(1.0);
+    for k in [8, 4, 2, 1] {
+        let small = ms.simd_lt(V::splat((1u32 << (bits + k)) as f32));
+        let f = V::splat(1.0 / (1u32 << k) as f32);
+        ms = V::select(small, ms, ms * f);
+        scale = V::select(small, scale, scale * f);
+    }
+    scale
+}
+
+/// Line-fit endpoints (high, low) as decoded 565 values, from an integer axis `ws` (|ws| < 2^7,
+/// not all 0): with p = t·ws, the extreme projections inset by 1/16 of their range, relative to
+/// the mean's, are τ = (15 pmax + pmin - Σp) / 16 and (pmax + 15 pmin - Σp) / 16, and the
+/// endpoints are mean + ws τ / |ws|², kept in 1/16 units (floored) and clamped to 0..=255
+/// before rounding to the nearest level. Exact integers ([`div_floor`]).
+#[inline(always)]
+fn line_points<V: SimdF32>(t: &Texels<V>, sum: &[V; 3], ws: &[V; 3]) -> ([V; 3], [V; 3]) {
+    // Exact integer projections, so the reduction order does not matter.
+    let pmin = reduce16!(|i| t[0][i] * ws[0] + t[1][i] * ws[1] + t[2][i] * ws[2], |a, b| a
+        .simd_min(b));
+    let pmax = reduce16!(|i| t[0][i] * ws[0] + t[1][i] * ws[1] + t[2][i] * ws[2], |a, b| a
+        .simd_max(b));
+    // Every value below 2^24: |p| < 3 * 255 * 2^7, |Σp| < 2^21, |ws|² < 3 * 2^14.
+    let pm = sum[0] * ws[0] + sum[1] * ws[1] + sum[2] * ws[2];
+    let n2 = ws[0] * ws[0] + ws[1] * ws[1] + ws[2] * ws[2];
+    let inv = V::splat(1.0) / n2;
+    let fifteen = V::splat(15.0);
+    // floor(wc τ16 / n2) = wc q + floor(wc r / n2) with τ16 = q n2 + r: every term below 2^23.
+    let (qh, rh) = div_floor(pmax.mul_add(fifteen, pmin) - pm, n2, inv);
+    let (ql, rl) = div_floor(pmin.mul_add(fifteen, pmax) - pm, n2, inv);
+    let hi = [
+        axis_point(sum[0], ws[0], qh, rh, n2, inv, false),
+        axis_point(sum[1], ws[1], qh, rh, n2, inv, true),
+        axis_point(sum[2], ws[2], qh, rh, n2, inv, false),
+    ];
+    let lo = [
+        axis_point(sum[0], ws[0], ql, rl, n2, inv, false),
+        axis_point(sum[1], ws[1], ql, rl, n2, inv, true),
+        axis_point(sum[2], ws[2], ql, rl, n2, inv, false),
+    ];
+    (hi, lo)
+}
+
+/// One channel of a [`line_points`] endpoint: sc + floor(wc τ16 / n2) for τ16 = q n2 + r,
+/// clamped to 0..=4080 and rounded to the nearest level.
+#[inline(always)]
+fn axis_point<V: SimdF32>(sc: V, wc: V, q: V, r: V, n2: V, inv: V, six: bool) -> V {
+    let e = sc + wc * q + div_floor(wc * r, n2, inv).0;
+    inset_level(e.simd_clamp(V::splat(0.0), V::splat(4080.0)), six)
+}
+
+/// The decoded value of the 5-bit (or, `six`, 6-bit) level nearest `e16 / 16` (an integer
+/// in 0..=4080): round(e * L / 255) = (2 L e16 + 4080) / 8160 in integers, which `+ 0.5` keeps at
+/// least 0.5 / 8160 from any integer, far beyond the reciprocal's rounding error.
+#[inline(always)]
+fn inset_level<V: SimdF32>(e16: V, six: bool) -> V {
+    let l = if six { 63.0 } else { 31.0 };
+    let q = floor(e16.mul_add(V::splat(2.0 * l), V::splat(4080.5)) * V::splat(1.0 / 8160.0));
+    expand(q, six)
 }
 
 /// Re-encodes the solid blocks of a batch (blocks `k..`) with the single-color tables.
@@ -1461,6 +1626,66 @@ mod tests {
                 .sum::<u64>();
         }
         10.0 * (255.0f64 * 255.0 * (s.block_count() * 48) as f64 / sse.max(1) as f64).log10()
+    }
+
+    /// The SIMD least-squares refit is exactly the integer reference [`ls_levels`], which
+    /// the GPU kernel implements: random texels and steps, including extreme values.
+    #[test]
+    fn refit_matches_integer_levels() {
+        let mut seed = 0x2545_f491u32;
+        let mut rnd = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        for round in 0..20_000 {
+            let mut tx = [[[0f32; LANES]; 16]; 3];
+            let mut st = [[0f32; LANES]; 16];
+            for l in 0..LANES {
+                let skew = rnd(4);
+                for i in 0..16 {
+                    for c in &mut tx {
+                        c[i][l] = match round % 3 {
+                            0 => rnd(256),
+                            1 => [0, 255][rnd(2) as usize],
+                            _ => 120 + rnd(16),
+                        } as f32;
+                    }
+                    // Mostly two or three distinct steps, so near-singular systems occur.
+                    st[i][l] = if rnd(4) < skew { rnd(4) } else { 3 * (i as u32 & 1) } as f32;
+                }
+            }
+            let t: Texels<f32x8> = std::array::from_fn(|c| std::array::from_fn(|i| f32x8::from_array(tx[c][i])));
+            let sum = std::array::from_fn(|c| sum16!(|i| t[c][i]));
+            let mut fit = assign(&t, [f32x8::splat(0.0); 3], [f32x8::splat(0.0); 3]);
+            fit.step = std::array::from_fn(|i| f32x8::from_array(st[i]));
+            let (e0, e1, ok) = refit(&t, &sum, &fit);
+            let ok = f32x8::mask_to_bools(ok);
+            for l in 0..LANES {
+                let s = |f: &dyn Fn(usize) -> f32| (0..16).map(|i| f(i) as i32).sum::<i32>();
+                let j = s(&|i| st[i][l]);
+                let jj = s(&|i| st[i][l] * st[i][l]);
+                let jx = std::array::from_fn(|c| s(&|i| st[i][l] * tx[c][i][l]));
+                let sx = std::array::from_fn(|c| s(&|i| tx[c][i][l]));
+                let want = ls_levels(j, jj, jx, sx);
+                assert_eq!(ok[l], want.is_some(), "round {round} lane {l}");
+                if let Some((q0, q1)) = want {
+                    for c in 0..3 {
+                        assert_eq!(
+                            e0[c].to_array()[l] as i32,
+                            expand_level(q0[c], c == 1),
+                            "round {round} lane {l} c {c}"
+                        );
+                        assert_eq!(
+                            e1[c].to_array()[l] as i32,
+                            expand_level(q1[c], c == 1),
+                            "round {round} lane {l} c {c}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
