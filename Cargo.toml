@@ -6,7 +6,11 @@ rust-version = "1.90"
 description = "Rate-distortion optimized GPU texture encoder (BC1/BC4/BC5/BC7) with KTX2 + Zstd output"
 readme = "README.md"
 license = "MIT-0"
-publish = false
+repository = "https://github.com/Azazel-Labs/mipple"
+homepage = "https://azazel-labs.github.io/Mipple/"
+# The crate is the library, CLI and GPU kernels; test images, benchmarks, docs and tooling stay
+# in the repository (crates.io resolves the README's relative links against `repository`).
+include = ["/src/**", "/README.md", "/LICENSE"]
 keywords = ["texture", "compression", "bc7", "ktx2", "rdo"]
 categories = ["graphics", "compression", "game-development"]
 
