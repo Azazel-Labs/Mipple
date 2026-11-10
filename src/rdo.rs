@@ -1914,8 +1914,8 @@ fn dump7_pick(s: &Block) -> bool {
     h.wrapping_mul(0x9e37_79b1) >> 24 == 0
 }
 
-/// Ranker training rows (`MIPPLE_LOCAL_DUMP=path`, BC5 only), appended by every encode in the
-/// process: a development hook for `scripts/train_ranker.py`, not used otherwise. Every
+/// Ranker training rows (`MIPPLE_LOCAL_DUMP=path`; BC4, BC5 and BC7), appended by every encode in
+/// the process: a development hook for `scripts/train_ranker*.py`, not used otherwise. Every
 /// `DUMP_EVERY`-th block searches every far block of its chunk, each scored on its own against
 /// the near search's best, and writes one row per far block.
 pub static DUMP: std::sync::LazyLock<std::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>> =

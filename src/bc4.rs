@@ -139,7 +139,7 @@ fn ls_bits(bits: u64, v: &[u8; 16]) -> Option<(i32, i32)> {
 
 /// Encodes 16 values. Effort 0 projects onto the min/max line, 1 adds a least-squares refit,
 /// 2..=9 run the exact search with ever wider endpoint windows. Runs the SIMD batch encoder on
-/// one lane; batch callers use [`encode_batch`].
+/// one lane; whole surfaces use [`encode_surface`].
 pub fn encode_channel(v: &[u8; 16], effort: u8) -> [u8; 8] {
     encode_channels8(&[*v; crate::simd::LANES], effort)[0]
 }

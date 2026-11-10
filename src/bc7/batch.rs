@@ -76,7 +76,7 @@ impl Spec {
 }
 
 /// Eight blocks' texels, channel-major, plus alpha (always 255 in a batch).
-pub(super) struct Texels<V> {
+struct Texels<V> {
     x: [[V; 16]; 4],
 }
 
@@ -655,7 +655,7 @@ fn subset_fit<V: SimdF32>(n: f32, s: &[V; 3], q: &[V; 6], block_axis: &[V; 3]) -
 /// partition, `(residual, λ)` summed over its two subsets (see [`super::partition`]). Subset
 /// membership is the same in every lane, so the moments are plain sums over member texels.
 #[inline(always)]
-pub(super) fn fits8<V: SimdF32>(t: &Texels<V>, res: &mut [[f32; LANES]; 64], lam: &mut [[f32; LANES]; 64]) {
+fn fits8<V: SimdF32>(t: &Texels<V>, res: &mut [[f32; LANES]; 64], lam: &mut [[f32; LANES]; 64]) {
     let zero = V::splat(0.0);
     // Center on the block mean to keep the f32 scatter accurate.
     let mut mean = [zero; 3];
@@ -720,7 +720,7 @@ pub(super) fn fits8<V: SimdF32>(t: &Texels<V>, res: &mut [[f32; LANES]; 64], lam
 
 /// The 4 most promising two-subset partitions of lane `l` for `ib`-bit indices, as (bound,
 /// partition): ranked by `residual + Δw² · λ` like [`super::top_partitions`], bound = residual.
-pub(super) fn top4(res: &[[f32; LANES]; 64], lam: &[[f32; LANES]; 64], l: usize, ib: u8) -> [(f32, u8); 4] {
+fn top4(res: &[[f32; LANES]; 64], lam: &[[f32; LANES]; 64], l: usize, ib: u8) -> [(f32, u8); 4] {
     let dw = 1.0 / ((1u32 << ib) - 1) as f32;
     let mut best = [(f32::INFINITY, f32::INFINITY, 0u8); 4];
     for p in 0..64u8 {
@@ -736,14 +736,6 @@ pub(super) fn top4(res: &[[f32; LANES]; 64], lam: &[[f32; LANES]; 64], l: usize,
         }
     }
     best.map(|(_, bound, p)| (bound, p))
-}
-
-/// The batch encoder's texels from RGB channel rows (alpha 255).
-#[inline(always)]
-pub(super) fn texels_from<V: SimdF32>(t: &[[V; 16]; 3]) -> Texels<V> {
-    Texels {
-        x: [t[0], t[1], t[2], [V::splat(255.0); 16]],
-    }
 }
 
 /// Subset membership masks (1.0 / 0.0 per texel) of lanes' 2-subset partitions.

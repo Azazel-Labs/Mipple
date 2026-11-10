@@ -27,11 +27,6 @@ pub struct MipAlpha {
     pub coverage_cutoff: Option<f32>,
 }
 
-/// Full mip chain down to 1x1, starting with a copy of `top`.
-pub fn chain(top: &Surface, filter: MipFilter) -> Vec<Surface> {
-    chain_with(top, filter, MipAlpha::default())
-}
-
 /// Full mip chain down to 1x1 with `alpha`'s treatment of alpha, starting with a copy of `top`
 /// (which is not bled: callers bleed the top level they encode).
 pub fn chain_with(top: &Surface, filter: MipFilter, alpha: MipAlpha) -> Vec<Surface> {
@@ -122,7 +117,7 @@ mod tests {
     #[test]
     fn chain_reaches_one_by_one() {
         let s = Surface::new(37, 10);
-        let c = chain(&s, MipFilter::Srgb);
+        let c = chain_with(&s, MipFilter::Srgb, MipAlpha::default());
         assert_eq!(c.last().map(|l| (l.width, l.height)), Some((1, 1)));
         assert_eq!(c.len(), 6); // 37x10, 18x5, 9x2, 4x1, 2x1, 1x1
     }

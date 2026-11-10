@@ -78,7 +78,7 @@ fn round_up(v: usize, a: usize) -> usize {
     v.div_ceil(a) * a
 }
 
-/// Whether [`write`] applies the [`crate::prep`] transform.
+/// Whether [`write()`] applies the [`crate::prep`] transform.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum PrepMode {

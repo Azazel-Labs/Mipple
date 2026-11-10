@@ -1,21 +1,27 @@
-//! Fast BC7 batch encoder: mode 6 only, eight opaque blocks per SIMD batch (one per lane), read
-//! straight from the surface and packed in registers.
+//! Fast BC7 encoder for opaque blocks: eight blocks per SIMD batch (one per lane), read straight
+//! from the surface and packed in registers. It serves every effort ([`Cfg`], set by
+//! `super::fast_cfg`).
 //!
-//! Mode 6 has one subset, 7-bit RGBA endpoints with a p-bit each (so an endpoint channel is an
-//! exact 8-bit value `2q + p`) and 4-bit indices. Per batch:
+//! Every lane starts with mode 6 (one subset, 7-bit RGBA endpoints with a p-bit each, 4-bit
+//! indices):
 //!
-//! * endpoints: the principal axis by power iteration (unnormalized; only its direction
-//!   matters), at the extreme projections;
+//! * endpoints: the principal axis by power iteration, cut to 7 bits, at the extreme projections
+//!   of the line through the mean;
 //! * quantization: for each endpoint and p-bit the nearest levels are one rounding; the p-bit
 //!   with the lower endpoint error wins (alpha included, so opaque blocks keep alpha 255 unless
 //!   p = 0 is clearly better for RGB);
-//! * indices: projection onto the quantized endpoints, rounded to 15 steps (the mode-6 weights
-//!   are within 0.5 of 64k/15);
+//! * indices: of the two palette entries around the projection, the one that decodes closer;
 //! * [`Cfg::refits`] least-squares refits from those indices, each kept per lane when it lowers
-//!   the exact error.
+//!   the error.
 //!
-//! Blocks with alpha go to the scalar encoder. Every value is a small integer or an IEEE result
-//! in a fixed order, so both backends agree bit for bit.
+//! Lanes with error left then try modes 1 and 3 on estimated or ranked 2-subset partitions
+//! (`guess_partitions`, `rank_fits`), modes 0 and 2 on ranked 3-subset partitions
+//! (`rank_fits3`) and dual-plane mode 5, with refits, ±1 endpoint refinement and (efforts 8-9)
+//! bc7e-style uber trials. Blocks with alpha go to the scalar encoder.
+//!
+//! Every value is an integer below 2^24 in f32 (see `crate::exact`), so results do not depend on
+//! rounding, summation order or fused multiply-adds: the portable and AVX2 backends and the GPU
+//! kernel (`src/gpu/bc7.wgsl`, efforts 0-5) write the same blocks.
 
 use crate::exact::{div_floor, div_floor_q, dot16, reduce16, shrink, sum16};
 use crate::format::BlockOpts;
@@ -31,27 +37,19 @@ pub struct Cfg {
     pub power: u8,
     /// Least-squares refits, each kept per lane when it lowers the exact error.
     pub refits: u8,
-    /// Keep both p-bits at 1 so alpha decodes to exactly 255 (otherwise each endpoint takes the
-    /// p-bit with the lower RGBA endpoint error).
-    pub opaque_pbits: bool,
-    /// Pick each index by exact palette error between the two entries around the projection
-    /// (otherwise the projection is rounded).
-    pub exact: bool,
     /// Also try 2-subset mode 1 (bit 0) and mode 3 (bit 1) on each lane's estimated partition.
     pub two: u8,
     /// Least-squares refits of the 2-subset encodings.
     pub two_refits: u8,
     /// Partition candidates per lane for the 2-subset modes (1-4).
     pub parts: u8,
-    /// Partition ranking: 0 = bc7f's popcount estimate, 1 = line-fit residual of all 64
-    /// partitions with a one-step λ estimate ([`rank_fits`]), 2 = the batch encoder's `fits8`.
-    pub rank: u8,
-    /// ±1 endpoint refinement passes of the winning 2-subset encodings ([`refine_two`]).
+    /// Partition ranking: the line-fit residual of all 64 partitions with a one-step λ estimate
+    /// (`rank_fits`) instead of bc7f's popcount estimate.
+    pub rank: bool,
+    /// ±1 endpoint refinement passes of the winning 2-subset encodings (`refine_two`).
     pub refine: u8,
     /// Mode-6 error (sum over the block) at or below which a block skips the 2-subset search.
     pub busy_err: f32,
-    /// Partition candidates for mode 3 (0 = as many as `parts`).
-    pub parts3: u8,
     /// Also refine the lanes where mode 6 wins.
     pub refine6: bool,
     /// Also try 3-subset mode 0 (bit 0) and mode 2 (bit 1) on line-fit-ranked partitions.
@@ -98,7 +96,7 @@ struct Ends<V: SimdF32> {
 
 /// Nearest mode-6 levels of one endpoint (RGB from `e`, alpha 255) for the better p-bit.
 #[inline(always)]
-fn quant_endpoint<V: SimdF32>(e: &[V; 3], opaque: bool) -> ([V; 4], V, [V; 4]) {
+fn quant_endpoint<V: SimdF32>(e: &[V; 3]) -> ([V; 4], V, [V; 4]) {
     let zero = V::splat(0.0);
     let half = V::splat(0.5);
     let top = V::splat(127.0);
@@ -107,7 +105,7 @@ fn quant_endpoint<V: SimdF32>(e: &[V; 3], opaque: bool) -> ([V; 4], V, [V; 4]) {
     let mut best_v = [zero; 4];
     let mut best_e = V::splat(f32::INFINITY);
     let mut best_p = zero;
-    let mut p = i32::from(opaque);
+    let mut p = 0;
     while p < 2 {
         let pv = V::splat(p as f32);
         let mut q = [zero; 4];
@@ -138,31 +136,14 @@ fn quant_endpoint<V: SimdF32>(e: &[V; 3], opaque: bool) -> ([V; 4], V, [V; 4]) {
 }
 
 #[inline(always)]
-fn quantize<V: SimdF32>(e0: &[V; 3], e1: &[V; 3], opaque: bool) -> Ends<V> {
-    let (q0, p0, v0) = quant_endpoint(e0, opaque);
-    let (q1, p1, v1) = quant_endpoint(e1, opaque);
+fn quantize<V: SimdF32>(e0: &[V; 3], e1: &[V; 3]) -> Ends<V> {
+    let (q0, p0, v0) = quant_endpoint(e0);
+    let (q1, p1, v1) = quant_endpoint(e1);
     Ends {
         q: [q0, q1],
         p: [p0, p1],
         v: [v0, v1],
     }
-}
-
-/// Squared RGB error of texel `i` against the palette entry with weight `w` (opaque blocks are
-/// scored on RGB; alpha only steers the p-bit choice).
-#[inline(always)]
-fn texel_error<V: SimdF32>(t: &Texels<V>, e: &Ends<V>, i: usize, w: V) -> V {
-    let (c64, c32, inv64) = (V::splat(64.0), V::splat(32.0), V::splat(1.0 / 64.0));
-    let wa = c64 - w;
-    let mut err = V::splat(0.0);
-    let mut c = 0;
-    while c < 3 {
-        let pal = floor(wa.mul_add(e.v[0][c], w.mul_add(e.v[1][c], c32)) * inv64);
-        let d = t[c][i] - pal;
-        err = d.mul_add(d, err);
-        c += 1;
-    }
-    err
 }
 
 /// Squared errors of texel `i` (channels `ch`) against the palette entries with weights `w0` and
@@ -193,62 +174,35 @@ fn pair_err<V: SimdF32, const N: usize>(
     (e0, e1)
 }
 
-/// Indices by projection onto the quantized endpoints (RGB): rounded to the 15 steps, or (with
-/// `exact`) the better of the two palette entries around the projection. Returns the indices
-/// and, with `exact`, the block's RGB error (else zero).
+/// Indices by projection onto the quantized endpoints (RGB): the better of the two palette
+/// entries around the projection. Returns the indices and the block's RGB error.
 #[inline(always)]
-fn project<V: SimdF32>(t: &Texels<V>, e: &Ends<V>, exact: bool) -> ([V; 16], V) {
+fn project<V: SimdF32>(t: &Texels<V>, e: &Ends<V>) -> ([V; 16], V) {
     let zero = V::splat(0.0);
     let d = [e.v[1][0] - e.v[0][0], e.v[1][1] - e.v[0][1], e.v[1][2] - e.v[0][2]];
     let dd = d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2]));
-    let scale = V::select(zero.simd_lt(dd), V::splat(15.0) / dd.simd_max(V::splat(1.0)), zero);
-    let k = [d[0] * scale, d[1] * scale, d[2] * scale];
-    // Rounded: floor((x - a)·k + 1/2); exact: candidates floor((x - a)·k) and the next one.
-    let base = e.v[0][0].mul_add(k[0], e.v[0][1].mul_add(k[1], e.v[0][2] * k[2]));
-    let bias = if exact { zero - base } else { V::splat(0.5) - base };
-    let top = V::splat(if exact { 14.0 } else { 15.0 });
+    let top = V::splat(14.0);
     let inv64 = V::splat(1.0 / 64.0);
     let a3 = [e.v[0][0], e.v[0][1], e.v[0][2]];
     let d64 = [d[0] * inv64, d[1] * inv64, d[2] * inv64];
     let mut idx = [zero; 16];
     let mut err = zero;
-    // Exact: j = floor(15 (x - a)·d / |d|²) in integers (|15 (x - a)·d| < 2^22), the numerator
-    // plus 1/2 ([`div_floor_q`]) in three exact fused steps.
+    // j = floor(15 (x - a)·d / |d|²) in integers (|15 (x - a)·d| < 2^22), the numerator plus 1/2
+    // ([`div_floor_q`]) in three exact fused steps; then j or j + 1, whichever decodes closer.
     let inv_dd = V::splat(1.0) / dd.simd_max(V::splat(1.0));
     let d15 = [d[0] * V::splat(15.0), d[1] * V::splat(15.0), d[2] * V::splat(15.0)];
     let xbias = V::splat(0.5) - (a3[0] * d15[0] + a3[1] * d15[1] + a3[2] * d15[2]);
     let mut i = 0;
     while i < 16 {
-        let j = if exact {
-            let num = t[0][i].mul_add(d15[0], t[1][i].mul_add(d15[1], t[2][i].mul_add(d15[2], xbias)));
-            floor(num * inv_dd).simd_max(zero).simd_min(top)
-        } else {
-            let s = t[0][i].mul_add(k[0], t[1][i].mul_add(k[1], t[2][i].mul_add(k[2], bias)));
-            floor(s.simd_max(zero)).simd_min(top)
-        };
-        if exact {
-            let (e0, e1) = pair_err(t, [0, 1, 2], i, &a3, &d64, weight(j, 16), weight(j + V::splat(1.0), 16));
-            let up = e1.simd_lt(e0);
-            idx[i] = V::select(up, j + V::splat(1.0), j);
-            err += e0.simd_min(e1);
-        } else {
-            idx[i] = j;
-        }
+        let num = t[0][i].mul_add(d15[0], t[1][i].mul_add(d15[1], t[2][i].mul_add(d15[2], xbias)));
+        let j = floor(num * inv_dd).simd_max(zero).simd_min(top);
+        let (e0, e1) = pair_err(t, [0, 1, 2], i, &a3, &d64, weight(j, 16), weight(j + V::splat(1.0), 16));
+        let up = e1.simd_lt(e0);
+        idx[i] = V::select(up, j + V::splat(1.0), j);
+        err += e0.simd_min(e1);
         i += 1;
     }
     (idx, err)
-}
-
-/// Exact RGB error of indices against the decoded palette.
-#[inline(always)]
-fn error<V: SimdF32>(t: &Texels<V>, e: &Ends<V>, idx: &[V; 16]) -> V {
-    let mut err = V::splat(0.0);
-    let mut i = 0;
-    while i < 16 {
-        err += texel_error(t, e, i, weight(idx[i], 16));
-        i += 1;
-    }
-    err
 }
 
 /// Least-squares RGB endpoints in 8-bit units (multiples of 1/16) for the indices `idx`
@@ -813,7 +767,7 @@ fn refine6<V: SimdF32>(t: &Texels<V>, ends: &mut Ends<V>, idx: &mut [V; 16], err
                     k += 1;
                 }
             }
-            let (cidx, cerr) = project(t, &cand, true);
+            let (cidx, cerr) = project(t, &cand);
             let take = active & cerr.simd_lt(*err);
             if V::mask_any(take) {
                 any = true;
@@ -976,15 +930,7 @@ fn uber_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], sub: &mut Sub<V>, mode: Two,
 
 /// [`uber_two`]'s trials for mode 6 in the `active` lanes (16-level indices, 8-bit endpoints).
 #[inline(always)]
-fn uber6<V: SimdF32>(
-    t: &Texels<V>,
-    ends: &mut Ends<V>,
-    idx: &mut [V; 16],
-    err: &mut V,
-    active: V::Mask,
-    level: u8,
-    opaque: bool,
-) {
+fn uber6<V: SimdF32>(t: &Texels<V>, ends: &mut Ends<V>, idx: &mut [V; 16], err: &mut V, active: V::Mask, level: u8) {
     let zero = V::splat(0.0);
     let maxsel = 15.0f32;
     let top = V::splat(maxsel);
@@ -1041,8 +987,8 @@ fn uber6<V: SimdF32>(
             }
         }
         let (a, b, ok) = ls_ends(t, &[V::splat(1.0); 16], &idx2, 16, prev);
-        let cand = quantize(&a, &b, opaque);
-        let (cidx, cerr) = project(t, &cand, true);
+        let cand = quantize(&a, &b);
+        let (cidx, cerr) = project(t, &cand);
         let take = active & ok & cerr.simd_lt(*err);
         if V::mask_any(take) {
             *err = V::select(take, cerr, *err);
@@ -1886,7 +1832,7 @@ fn subset_ends<V: SimdF32>(t: &Texels<V>, m: &[V; 16], n: V, sum: &[V; 3], ws: &
 }
 
 /// Encodes eight opaque blocks; returns the four 32-bit words of each lane's mode-6 block and,
-/// for lanes where a 2-subset mode won, that block instead.
+/// for lanes where another mode won, that block instead.
 #[inline(always)]
 fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16]>; LANES]) {
     // The line fit is exact integer arithmetic (every value an integer below 2^24 in f32, see
@@ -1913,33 +1859,14 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
     let (hi, lo) = line_ends(t, &sum, &ws);
     let mut e0 = [lo[0] * inv16, lo[1] * inv16, lo[2] * inv16];
     let mut e1 = [hi[0] * inv16, hi[1] * inv16, hi[2] * inv16];
-    // Solid lanes with p-bits 1: an even channel value c is the middle of the odd endpoints
-    // c - 1 and c + 1 (indices 7 and 8 decode to c); an odd one is exact.
-    if cfg.opaque_pbits {
-        let solid = (rr + gg + bb).simd_lt(V::splat(0.5));
-        let mut c = 0;
-        while c < 3 {
-            let m = mean[c];
-            let even = (m - floor(m * V::splat(0.5)) * V::splat(2.0)).simd_lt(V::splat(0.5));
-            let fix = solid & even & V::splat(0.5).simd_lt(m);
-            e0[c] = V::select(fix, m - V::splat(1.0), e0[c]);
-            e1[c] = V::select(fix, m + V::splat(1.0), e1[c]);
-            c += 1;
-        }
-    }
-    let op = cfg.opaque_pbits;
-    let mut ends = quantize(&e0, &e1, op);
-    let (mut idx, mut err) = project(t, &ends, cfg.exact);
+    let mut ends = quantize(&e0, &e1);
+    let (mut idx, mut err) = project(t, &ends);
     if cfg.refits > 0 {
-        if !cfg.exact {
-            err = error(t, &ends, &idx);
-        }
         let mut r = 0;
         while r < cfg.refits {
             let (a, b, ok) = ls_ends(t, &[V::splat(1.0); 16], &idx, 16, (e0, e1));
-            let cand = quantize(&a, &b, op);
-            let (cidx, cerr) = project(t, &cand, cfg.exact);
-            let cerr = if cfg.exact { cerr } else { error(t, &cand, &cidx) };
+            let cand = quantize(&a, &b);
+            let (cidx, cerr) = project(t, &cand);
             let take = ok & cerr.simd_lt(err);
             if !V::mask_any(take) {
                 break;
@@ -1972,15 +1899,12 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
     }
     let mut over = [None; LANES];
     if cfg.two != 0 {
-        if !cfg.exact && cfg.refits == 0 {
-            err = error(t, &ends, &idx);
-        }
         // Lanes worth a second subset: some error left and some spread (as the batch encoder).
         let busy =
             V::splat(cfg.busy_err).simd_lt(err) & V::splat(16.0 * 16.0 * 4.0).simd_lt(rr.simd_max(gg).simd_max(bb));
-        if V::mask_any(busy) && cfg.polish_modes && cfg.exact {
+        if V::mask_any(busy) && cfg.polish_modes {
             if cfg.uber > 0 {
-                uber6(t, &mut ends, &mut idx, &mut err, busy, cfg.uber, cfg.opaque_pbits);
+                uber6(t, &mut ends, &mut idx, &mut err, busy, cfg.uber);
             }
             if cfg.refine > 0 {
                 refine6(t, &mut ends, &mut idx, &mut err, busy, cfg.refine);
@@ -1989,33 +1913,13 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
         if V::mask_any(busy) {
             let k = (cfg.parts as usize).clamp(1, 4);
             // Candidates per mode: [3-bit index ranking (mode 1), 2-bit (mode 3)].
-            let cands: [[V::Int; 4]; 2] = match cfg.rank {
-                1 if cfg.two & 2 != 0 => rank_fits::<V, 4, 2>(t, &v),
-                1 => rank_fits::<V, 4, 1>(t, &v),
-                2 => {
-                    let bt = super::batch::texels_from(t);
-                    let mut res = [[0f32; LANES]; 64];
-                    let mut lam = [[0f32; LANES]; 64];
-                    super::batch::fits8(&bt, &mut res, &mut lam);
-                    let mut out = [[V::Int::splat(0); 4]; 2];
-                    for (r, ib) in [3u8, 2].into_iter().enumerate() {
-                        let mut pp = [[0i32; LANES]; 4];
-                        for l in 0..LANES {
-                            let top = super::batch::top4(&res, &lam, l, ib);
-                            for (n, x) in top.iter().enumerate() {
-                                pp[n][l] = x.1 as i32;
-                            }
-                        }
-                        for n in 0..4 {
-                            out[r][n] = V::Int::from_array(pp[n]);
-                        }
-                    }
-                    out
-                }
-                _ => {
-                    let g = guess_partitions::<V, 4>(t, &mean, &v);
-                    [g, g]
-                }
+            let cands: [[V::Int; 4]; 2] = if !cfg.rank {
+                let g = guess_partitions::<V, 4>(t, &mean, &v);
+                [g, g]
+            } else if cfg.two & 2 != 0 {
+                rank_fits::<V, 4, 2>(t, &v)
+            } else {
+                rank_fits::<V, 4, 1>(t, &v)
             };
             let cands3: [[V::Int; 4]; 2] = if cfg.three != 0 {
                 rank_fits3::<V, 4>(t, &v)
@@ -2030,15 +1934,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
             for (slot, mode) in MODES.into_iter().enumerate() {
                 let (on, list, kk) = match slot {
                     0 => (cfg.two & 1 != 0, &cands[0], k),
-                    1 => (
-                        cfg.two & 2 != 0,
-                        &cands[1],
-                        if cfg.parts3 > 0 {
-                            (cfg.parts3 as usize).min(4)
-                        } else {
-                            k
-                        },
-                    ),
+                    1 => (cfg.two & 2 != 0, &cands[1], k),
                     2 => (cfg.three & 1 != 0, &cands3[0], (cfg.parts_three as usize).clamp(1, 4)),
                     _ => (cfg.three & 2 != 0, &cands3[1], (cfg.parts_three as usize).clamp(1, 4)),
                 };
@@ -2126,14 +2022,6 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                 if !V::mask_any(lanes) {
                     continue;
                 }
-                if cfg.uber > 0 && !cfg.polish_modes {
-                    let m = part_masks::<V>(bp, mode);
-                    let mut j = 0;
-                    while j < mode.subsets() {
-                        uber_two(t, &m[j], &mut b[j], mode, cfg.uber);
-                        j += 1;
-                    }
-                }
                 if cfg.refine > 0 && !cfg.polish_modes {
                     // ±1 refinement of this mode's winners only (refinement never raises the
                     // error, so they stay winners).
@@ -2214,13 +2102,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                     }
                 }
             }
-            if cfg.uber > 0 && cfg.exact && cfg.refine6 && !cfg.polish_modes {
-                let m6 = busy & winner.simd_lt(V::Int::splat(1));
-                if V::mask_any(m6) {
-                    uber6(t, &mut ends, &mut idx, &mut err, m6, cfg.uber, cfg.opaque_pbits);
-                }
-            }
-            if cfg.refine > 0 && cfg.exact && cfg.refine6 && !cfg.polish_modes {
+            if cfg.refine > 0 && cfg.refine6 && !cfg.polish_modes {
                 let m6 = busy & winner.simd_lt(V::Int::splat(1));
                 if V::mask_any(m6) {
                     refine6(t, &mut ends, &mut idx, &mut err, m6, cfg.refine);
@@ -2343,7 +2225,7 @@ fn encode_span_avx2(s: &Surface, first: usize, out: &mut [u8], cfg: Cfg, opts: B
     encode_span::<crate::simd::avx2::F>(s, first, out, cfg, opts);
 }
 
-/// Encodes a whole surface with the fast mode-6 search. `opts` is passed to the scalar encoder
+/// Encodes a whole surface with the fast search `cfg`. `opts` is passed to the scalar encoder
 /// for blocks with alpha. Returns raw 16-byte blocks in raster order.
 pub fn encode_surface(surface: &Surface, cfg: Cfg, opts: BlockOpts) -> Vec<u8> {
     use rayon::prelude::*;
@@ -2381,15 +2263,12 @@ mod tests {
             Cfg {
                 power: 2,
                 refits: 0,
-                opaque_pbits: false,
-                exact: false,
                 two: 0,
                 two_refits: 0,
                 parts: 1,
-                rank: 0,
+                rank: false,
                 refine: 0,
                 busy_err: 0.0,
-                parts3: 0,
                 refine6: true,
                 three: 0,
                 parts_three: 1,
@@ -2402,15 +2281,12 @@ mod tests {
             Cfg {
                 power: 3,
                 refits: 2,
-                opaque_pbits: true,
-                exact: true,
                 two: 3,
                 two_refits: 1,
                 parts: 2,
-                rank: 1,
+                rank: true,
                 refine: 1,
                 busy_err: 0.0,
-                parts3: 0,
                 refine6: true,
                 three: 3,
                 parts_three: 1,
@@ -2506,15 +2382,12 @@ mod tests {
         let cfg = Cfg {
             power: 3,
             refits: 2,
-            opaque_pbits: false,
-            exact: true,
             two: 3,
             two_refits: 2,
             parts: 4,
-            rank: 1,
+            rank: true,
             refine: 1,
             busy_err: 0.0,
-            parts3: 0,
             refine6: true,
             three: 0,
             parts_three: 1,

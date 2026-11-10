@@ -107,7 +107,7 @@ pub fn pca_endpoints(pts: &[V4], dims: usize) -> (V4, V4) {
 }
 
 /// Sum of squared distances from the points to their best-fit line (n * (trace - λmax)).
-/// Used to rank BC7 partitions cheaply.
+/// The scalar reference the SIMD partition rankers are tested against.
 pub fn line_fit_error(pts: &[V4], dims: usize) -> f32 {
     if pts.len() < 2 {
         return 0.0;

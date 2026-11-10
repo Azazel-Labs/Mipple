@@ -55,7 +55,7 @@ pub struct BlockOpts {
 }
 
 impl BlockOpts {
-    /// These options with `effort` replaced by its [`search_level`] (what the BC1 and BC7
+    /// These options with `effort` replaced by its [`search_level`] (what the scalar and batch BC7
     /// encoders take).
     pub fn searched(self) -> Self {
         Self {

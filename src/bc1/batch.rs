@@ -320,8 +320,6 @@ pub(super) struct Cfg {
     pub refits: u8,
     /// 4-color cluster-fit splits scored (in the learned order); 0 = no cluster fit.
     pub splits: usize,
-    /// Score splits with the closed-form least-squares error instead of snapped endpoints.
-    pub closed: bool,
     /// Also try a 3-color cluster fit with dark texels on the black entry.
     pub three: bool,
     /// Snapped scoring skips a split unless its closed-form error plus this multiple of the
@@ -346,7 +344,6 @@ pub(super) fn cfg(effort: u8) -> Cfg {
     let base = Cfg {
         refits: 2,
         splits: 0,
-        closed: false,
         three: true,
         prune: 0.0,
         refine: 0,
@@ -724,35 +721,6 @@ fn closed4() -> &'static Closed4 {
         }
         c
     })
-}
-
-/// 4-color cluster fit scoring the first `limit` splits of the learned order with the
-/// closed-form least-squares error, then snapping only each lane's winner.
-#[inline(always)]
-fn cluster_closed<V: SimdF32>(t: &Texels<V>, srt: &Sorted<V>, limit: usize) -> Coded<V> {
-    let pre = &srt.pre;
-    let total = [pre[0][16], pre[1][16], pre[2][16]];
-    let tt = total[0] * total[0] + total[1] * total[1] + total[2] * total[2];
-    let c = closed4();
-    let len = limit.min(c.k0.len());
-    let mut best = V::splat(0.0);
-    let mut best_id = V::Int::splat(0);
-    let mut n = 0;
-    while n < len {
-        let (si, sj, sk) = (c.i[n] as usize, c.j[n] as usize, c.k[n] as usize);
-        let u0 = pre[0][si] + pre[0][sj] + pre[0][sk];
-        let u1 = pre[1][si] + pre[1][sj] + pre[1][sk];
-        let u2 = pre[2][si] + pre[2][sj] + pre[2][sk];
-        let ut = u0 * total[0] + u1 * total[1] + u2 * total[2];
-        let uu = u0 * u0 + u1 * u1 + u2 * u2;
-        let gain = V::splat(c.k0[n]) * tt + V::splat(c.k1[n]) * ut + V::splat(c.k2[n]) * uu;
-        let better = best.simd_lt(gain);
-        best = V::select(better, gain, best);
-        best_id = V::Int::select(better, V::Int::splat(n as i32), best_id);
-        n += 1;
-    }
-    let (e0, e1) = split_endpoints(srt, best_id);
-    exact(t, e0, e1)
 }
 
 /// Texels at or below this in every channel may take 3-color mode's black entry.
@@ -1294,14 +1262,10 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, row_order: bool) -> ([u8; 64], [
             }
             let srt = sort_along(t, ax);
             if cfg.splits > 0 {
-                let cf = if cfg.closed {
-                    cluster_closed(t, &srt, cfg.splits)
-                } else {
-                    match cfg.topk {
-                        0 | 1 => cluster_snapped::<V, 1>(t, &srt, cfg.splits, cfg.prune),
-                        2 => cluster_snapped::<V, 2>(t, &srt, cfg.splits, cfg.prune),
-                        _ => cluster_snapped::<V, 4>(t, &srt, cfg.splits, cfg.prune),
-                    }
+                let cf = match cfg.topk {
+                    0 | 1 => cluster_snapped::<V, 1>(t, &srt, cfg.splits, cfg.prune),
+                    2 => cluster_snapped::<V, 2>(t, &srt, cfg.splits, cfg.prune),
+                    _ => cluster_snapped::<V, 4>(t, &srt, cfg.splits, cfg.prune),
                 };
                 keep_better(&mut cur, cf);
             }
@@ -1480,7 +1444,6 @@ fn encode_span_avx2_e0(s: &Surface, first: usize, out: &mut [u8]) {
 const EFFORT0: Cfg = Cfg {
     refits: 0,
     splits: 0,
-    closed: false,
     three: false,
     prune: 0.0,
     refine: 0,
@@ -1672,10 +1635,9 @@ mod diag {
         for e in 0..=4u8 {
             println!("batch e{e}: {:.3}", pooled(&|s| encode_surface(s, e)));
         }
-        let c = |splits, closed, three, prune| Cfg {
+        let c = |splits, three, prune| Cfg {
             refits: 2,
             splits,
-            closed,
             three,
             prune,
             refine: 0,
@@ -1687,14 +1649,13 @@ mod diag {
         };
         let all = usize::MAX;
         for (name, cf) in [
-            ("snapped all + 3c", c(all, false, true, 0.0)),
-            ("snapped all + 3c, prune 0.5", c(all, false, true, 0.5)),
-            ("snapped all + 3c, prune 0.8", c(all, false, true, 0.8)),
-            ("snapped all + 3c, prune 1.0", c(all, false, true, 1.0)),
-            ("snapped all + 3c, prune 1.5", c(all, false, true, 1.5)),
-            ("snapped 256 + 3c, prune 1.0", c(256, false, true, 1.0)),
-            ("closed all + 3c", c(all, true, true, 0.0)),
-            ("3c only", c(0, true, true, 0.0)),
+            ("snapped all + 3c", c(all, true, 0.0)),
+            ("snapped all + 3c, prune 0.5", c(all, true, 0.5)),
+            ("snapped all + 3c, prune 0.8", c(all, true, 0.8)),
+            ("snapped all + 3c, prune 1.0", c(all, true, 1.0)),
+            ("snapped all + 3c, prune 1.5", c(all, true, 1.5)),
+            ("snapped 256 + 3c, prune 1.0", c(256, true, 1.0)),
+            ("3c only", c(0, true, 0.0)),
         ] {
             let t0 = std::time::Instant::now();
             let q = pooled(&|s| encode_surface_cfg(s, cf));
@@ -1736,18 +1697,12 @@ mod perf {
     use crate::simd::avx2::F;
 
     #[target_feature(enable = "avx2,fma")]
-    fn run(ts: &[Texels<F>], limit: usize, closed: bool) -> f32 {
+    fn run(ts: &[Texels<F>], limit: usize) -> f32 {
         let mut acc = 0f32;
         let ax = [F::splat(0.57), F::splat(0.58), F::splat(0.57)];
         for t in ts {
             let srt = sort_along(t, ax);
-            acc += if closed {
-                cluster_closed(t, &srt, limit)
-            } else {
-                cluster_snapped::<F, 1>(t, &srt, limit, 0.0)
-            }
-            .err
-            .to_array()[0];
+            acc += cluster_snapped::<F, 1>(t, &srt, limit, 0.0).err.to_array()[0];
         }
         acc
     }
@@ -1772,13 +1727,13 @@ mod perf {
                 t
             })
             .collect();
-        for (limit, closed) in [(0usize, false), (256, false), (969, false), (256, true), (969, true)] {
+        for limit in [0usize, 256, 969] {
             let t0 = std::time::Instant::now();
             // SAFETY: the timing test only runs on AVX2 machines.
-            let acc = unsafe { run(&ts, limit, closed) };
+            let acc = unsafe { run(&ts, limit) };
             let dt = t0.elapsed().as_secs_f64();
             println!(
-                "limit {limit:4} closed {closed:5}: {:7.2} ms, {:6.1} ns/batch/split (chk {acc})",
+                "limit {limit:4}: {:7.2} ms, {:6.1} ns/batch/split (chk {acc})",
                 dt * 1e3,
                 dt * 1e9 / ts.len() as f64 / limit.max(1) as f64
             );

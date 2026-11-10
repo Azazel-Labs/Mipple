@@ -323,7 +323,7 @@ mod imp {
                     + include_str!("bc7.wgsl");
                 self.pipeline("bc7", &source)
             });
-            // Mode 1 (on bc7f's partition estimate) when the configuration has it.
+            // Mode 1 (on estimated or ranked partitions) when the configuration has it.
             let parts = if cfg.two & 1 != 0 {
                 u32::from(cfg.parts.clamp(1, 4))
             } else {
@@ -339,7 +339,7 @@ mod imp {
                     first,
                     u32::from(cfg.refits)
                         | parts << 8
-                        | u32::from(cfg.rank == 1) << 16
+                        | u32::from(cfg.rank) << 16
                         | u32::from(cfg.two_refits) << 20
                         | u32::from(cfg.refine) << 24
                         | u32::from(cfg.refine6) << 28,

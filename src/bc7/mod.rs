@@ -2,9 +2,12 @@
 //!
 //! * [`unpack`] / [`pack`] convert between the 128-bit block and [`Bc7Block`] for all 8 modes.
 //! * [`decode`] decodes all 8 modes (rotation and index-select included).
-//! * [`encode`] searches modes 6, 1, 3 (opaque, plus 0 and 2 at high effort) and 6, 7 (alpha).
-//!   Modes 4 and 5 (separate alpha with channel rotation) are on the roadmap.
-//! * [`reindex`], [`refit`] and [`with_indices`] are the field-level edits used by RDO.
+//! * [`encode`] is the scalar encoder for every mode and effort: the reference, and the encoder
+//!   for blocks with alpha and for entropy-reduced (RDO) bases. [`fast`] is the SIMD encoder for
+//!   opaque blocks (and the GPU kernel's twin); [`encode_batch`] runs entropy-reduced search
+//!   levels 0-1.
+//! * [`reindex_bounded`], [`with_indices`] and [`with_layout`] are the field-level edits used
+//!   by RDO.
 
 mod batch;
 pub mod fast;
@@ -27,15 +30,12 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
     let base = fast::Cfg {
         power: 3,
         refits: 1,
-        opaque_pbits: false,
-        exact: true,
         two: 0,
         two_refits: 0,
         parts: 1,
-        rank: 0,
+        rank: false,
         refine: 0,
         busy_err: 0.0,
-        parts3: 0,
         refine6: true,
         three: 0,
         parts_three: 1,
@@ -50,7 +50,7 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
         two: 1,
         two_refits: 1,
         parts: 4,
-        rank: 1,
+        rank: true,
         refine: 1,
         ..base
     };
@@ -84,7 +84,7 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
         // + mode 1 on the best partition by line-fit ranking.
         3 => fast::Cfg {
             two: 1,
-            rank: 1,
+            rank: true,
             ..base
         },
         4 => fast::Cfg { refine6: false, ..deep },
@@ -1263,13 +1263,8 @@ fn refine_endpoints(blk: &mut Bc7Block, px: &Block, w: &[u32; 4], passes: u32) {
     }
 }
 
-/// Keeps every field except the indices, which are re-chosen. Used by RDO.
-pub fn reindex(raw: &[u8], px: &Block, w: &[u32; 4]) -> Option<[u8; 16]> {
-    reindex_bounded(raw, px, w, u64::MAX, &mut SegBound::new(px, w)).map(|(b, _)| b)
-}
-
-/// [`reindex`] with the weighted squared error of the result, or None as soon as that error
-/// exceeds `bound`.
+/// Keeps every field except the indices, which are re-chosen; returns the block with its
+/// weighted squared error, or None as soon as that error exceeds `bound`. Used by RDO.
 pub fn reindex_bounded(
     raw: &[u8],
     px: &Block,
@@ -1449,16 +1444,6 @@ fn refit_endpoints(b: &mut Bc7Block, px: &Block, w: &[u32; 4], reduce: bool) {
             b.pbits[s] = qz.p;
         }
     }
-}
-
-/// Keeps the indices, refits the endpoints. Used by RDO.
-pub fn refit(raw: &[u8], px: &Block, w: &[u32; 4]) -> Option<[u8; 16]> {
-    let mut b = unpack(raw)?;
-    if MODES[b.mode as usize].ib2 > 0 {
-        return None;
-    }
-    refit_endpoints(&mut b, px, w, false);
-    Some(pack(&b))
 }
 
 /// What [`with_indices`] needs from an unpacked previous block: its indices packed 4 bits each,
