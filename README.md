@@ -1,4 +1,4 @@
-# mipple
+# <img src="docs/img/mipple-icon.svg" alt="" width="48" height="48" align="middle"> mipple
 
 [![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
