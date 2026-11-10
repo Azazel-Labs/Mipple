@@ -70,11 +70,16 @@ search width and the span distance leave the output byte-identical. BC7 spends t
 context: an 8 KiB window and 64 KiB chunks (6 per Kodak image) instead of 2 KiB and 16 KiB took BC7 from
 −23.7% / −20.8% to −28.4% / −26.7% at about 1.5× the time (12.2-18.9 s before).
 
-Field-swap refinement (`--refine-back`, default 256 for BC1/BC4): after the search picks a block, try replacing
+Field-swap refinement (`--refine-back`, default 256 for BC1/BC4/BC7): after the search picks a block, try replacing
 one of its fields (endpoints or indices) with that field of each of the previous 256 blocks, so a block can
 take its endpoints from one earlier block and its indices from another. Kodak-24 BD-rate (`mipple check`): BC1
 −0.98%, BC4 −0.39%; vs bc7enc_rdo BC1 −19.2% → −19.8%, BC4 −16.8% → −17.0%. It is off for BC5, where it gains
 −0.17% at depth 32 and −0.31% at 256 for 4% and 20% more RDO time, which BC5 cannot spare against bc7enc_rdo.
+BC7 splits each block into its two 8-byte halves (in mode 6, the most common RDO mode: mode, endpoints and P0;
+then P1 and the indices) and reaches past the exhaustive copy depth to the whole window. Mode-6 halves are scored
+exactly without a decode (a per-texel error table for each index when the low half is kept, per-texel weights
+when the high half is). Kodak-24 BD-rate −0.12% at 1.07× the time, and the equal-RMSE gap to Oodle at λ 10-40
+narrows from +2.3-4.0% to +1.8-3.1% (depth 1024 is no better and 1.2× the time).
 
 Literal costs: the rate model used to learn its order-0 literal costs from the bytes emitted so far in the
 chunk, so the first blocks of every chunk saw near-uniform 8-bit literals, and RDO's own copies skewed the
@@ -372,10 +377,10 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | −16.2% | −8.8% | −6.0% (15/24 images) | −2.7% (4/24) | −9.6% | −4.6% | −26.7% | −10.0% |
 | 1 | −12.4% | −6.1% | −2.6% (12/24) | −1.0% (4/24) | +0.2% (20/24) | −0.7% | +4.0% (22/24) | +0.1% |
-| 10 | −7.6% | −6.9% | +2.3% | −4.8% | −2.2% | −0.9% | −6.8% | −2.0% |
-| 20 | −6.5% | −6.6% | +4.0% | −2.9% | −4.7% | −1.6% | −12.4% | −3.7% |
-| 30 | −6.3% | −6.1% | +3.3% | −1.9% | −7.6% | −2.6% | −15.8% | −4.3% |
-| 40 | −6.4% | −5.7% | +2.7% | −1.3% | −9.9% | −3.2% | −18.3% | −4.6% |
+| 10 | −7.6% | −6.9% | +2.0% | −5.1% | −2.2% | −0.9% | −6.8% | −2.0% |
+| 20 | −6.5% | −6.6% | +3.1% | −3.6% | −4.7% | −1.6% | −12.4% | −3.7% |
+| 30 | −6.3% | −6.1% | +2.5% | −2.8% | −7.6% | −2.6% | −15.8% | −4.3% |
+| 40 | −6.4% | −5.7% | +1.8% | −2.3% | −9.9% | −3.2% | −18.3% | −4.6% |
 
 BC1 is ahead on every image at every λ on SSIM except kodim05 at λ 40 (+0.5%). BC7 is the open gap: Oodle
 2.9.16 holds 2-4% fewer bits at equal RMSE (mipple is 1-5% ahead at equal SSIM). Its non-RDO BC7 is more
@@ -523,6 +528,7 @@ Later changes:
 | BC7 re-index bound before palettes, no index unpack, cached subset means | PASS: all identical, Kodak-8 BC7 time 0.94× |
 | BC7 far search (`--far-back` 1024, BC7 window 16 KiB) | PASS: BD-rate BC7 −1.62%, others identical, total time 1.33× (synthetic; Kodak-8: BC7 −1.46%, 1.18× vs before the bound changes); synthetic baseline updated |
 | Localized BC5 search (`--local` 16: nearest 128 + 16 network-ranked + row above) | PASS: BD-rate BC5 −1.05%, others identical, total time 1.08× (synthetic; Kodak-24: BC5 −0.76%, 1.02×); synthetic baseline updated |
+| Field-swap refinement for BC7 (`--refine-back` 256, mode-6 halves scored without a decode) | PASS: BD-rate BC7 −1.13% Zstd / −0.87% Deflate, BC1/BC4/BC5 identical, total time 1.07× (synthetic; Kodak-24 −0.12%); both baselines updated |
 
 ## Head-to-head: mipple vs bc7enc_rdo (Kodak 24, BC7, v0.2)
 

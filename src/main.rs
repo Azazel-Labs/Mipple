@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use mipple::bench::{self, BenchConfig};
+use mipple::gpu::Gpu;
 use mipple::pipeline::{self, EncodeOptions};
 use mipple::{EntropyMode, Format, RdoParams, Surface, dds, ktx2, metrics, synth};
 use std::path::PathBuf;
@@ -79,6 +80,8 @@ enum Cmd {
         #[arg(long, default_value_t = 512)]
         size: u32,
     },
+    /// Report the GPU mipple would use and which formats it can encode there.
+    Gpu,
 }
 
 #[derive(Args, Clone)]
@@ -95,7 +98,7 @@ struct RdoArgs {
     #[arg(long, default_value_t = 8)]
     span_back: usize,
     /// Previous blocks whose single fields are tried in the chosen block after the search
-    /// (0 disables) [default: 256 for BC1/BC4, 0 for BC5/BC7].
+    /// (0 disables) [default: 256 for BC1/BC4/BC7, 0 for BC5].
     #[arg(long)]
     refine_back: Option<usize>,
     /// Beyond --max-back, earlier blocks whose endpoints are tried re-indexed, each distinct pair
@@ -182,6 +185,10 @@ struct EncodeArgs {
     /// Not standard KTX2: readers must undo it (mipple's does, flagged by the `mipple.prep` key).
     #[arg(long, value_enum, default_value_t = mipple::ktx2::PrepMode::Off)]
     prep: mipple::ktx2::PrepMode,
+    /// Base-encode on the CPU. By default the GPU encodes formats it has an encoder for (see
+    /// `mipple gpu`) and the CPU the rest.
+    #[arg(long)]
+    cpu: bool,
     #[command(flatten)]
     rdo: RdoArgs,
 }
@@ -390,6 +397,41 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Gpu => {
+            if !Gpu::built() {
+                println!("GPU backend not built (cargo build --release --features gpu)");
+                return Ok(());
+            }
+            let Some(gpu) = Gpu::shared() else {
+                println!("no usable GPU adapter: every format encodes on the CPU");
+                return Ok(());
+            };
+            let i = gpu.info();
+            println!(
+                "{} ({}, {}{})",
+                i.name,
+                i.backend,
+                i.device_type,
+                if i.driver.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", i.driver)
+                }
+            );
+            println!("  compute shaders: {}", if i.compute { "yes" } else { "no" });
+            println!("  BC texture sampling: {}", if i.bc_textures { "yes" } else { "no" });
+            for f in Format::ALL {
+                println!(
+                    "  {f}: {}",
+                    if gpu.encodes(f) {
+                        "GPU"
+                    } else {
+                        "CPU (no GPU encoder yet)"
+                    }
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -417,6 +459,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
         a.format.default_srgb()
     };
     opts.mips = !a.no_mips;
+    opts.gpu = !a.cpu;
     opts.rdo = a.rdo.params(a.lambda);
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
 
@@ -481,6 +524,13 @@ fn encode(a: EncodeArgs) -> Result<()> {
             r.est_bits_before,
             r.est_bits_after
         );
+    }
+    match &report.gpu {
+        Some(name) => println!("  base encode: GPU ({name})"),
+        None if a.cpu => println!("  base encode: CPU (--cpu)"),
+        None if !Gpu::built() => println!("  base encode: CPU (built without the gpu feature)"),
+        None if !Gpu::has_encoder(a.format) => println!("  base encode: CPU (no GPU {} encoder yet)", a.format),
+        None => println!("  base encode: CPU (no usable GPU)"),
     }
     println!(
         "  time: base {:.6}s, rdo {:.6}s, encode {:.6}s, total {:.6}s",

@@ -73,8 +73,8 @@ Shipped:
 
 Open for v0.9.x:
 
-- [ ] **BC7 vs Oodle 2.9.16 at equal RMSE:** Oodle keeps 2.3-4.0% fewer bits at equal RMSE on Kodak-24 (mipple is
-  1.3-4.8% ahead at equal SSIM). mipple effort 8-9 without RDO already matches Oodle's λ 0 accuracy at fewer
+- [ ] **BC7 vs Oodle 2.9.16 at equal RMSE:** Oodle keeps 1.8-3.1% fewer bits at equal RMSE on Kodak-24 (mipple is
+  2.3-5.1% ahead at equal SSIM; field-swap refinement for BC7 took the gap down from 2.3-4.0%). mipple effort 8-9 without RDO already matches Oodle's λ 0 accuracy at fewer
   bits, so the gap is in the RDO search: Oodle's RDO output has about 3× more index-half repeats. 128 KiB chunks
   are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing (1.4-1.5× wall time).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
@@ -107,7 +107,10 @@ Open for v0.9.x:
 - [ ] **Cheaper chunk boundaries:** worth less than thought: a single chunk per Kodak image is only −0.86% BD-rate
   for BC5 and −0.54% for BC1 vs 16 KiB chunks. Seeding each chunk with the base encoder's preceding blocks is
   worse (+2.9%: they change under it).
-- [ ] GPU compute base encoder (wgpu/naga, behind a `gpu` cargo feature) for iteration builds.
+- [ ] GPU compute base encoders (wgpu, `gpu` cargo feature, on by default; `src/gpu.rs`). The adapter
+  probe, per-format CPU fallback and `mipple gpu` are in, and the GPU is the default base-encode path.
+  Formats get compute kernels one at a time, each checked against the CPU encoder; WebGPU in the web
+  demo when the browser has it.
 
 ## v1.2: "output B": latent-space supercompression + transcoder
 

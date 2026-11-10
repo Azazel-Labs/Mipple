@@ -2519,7 +2519,7 @@ mod tests {
             // Every block is a valid mode-6 block within reach of the source.
             let bw = s.blocks_x();
             let mut sse = 0u64;
-            for (i, raw) in fast.chunks_exact(16).enumerate() {
+            for (i, raw) in fast.as_chunks::<16>().0.iter().enumerate() {
                 let b = super::super::unpack(raw).unwrap();
                 assert!(matches!(b.mode, 0..=3 | 5 | 6), "mode {}", b.mode);
                 let mut d = [[0u8; 4]; 16];
@@ -2570,7 +2570,7 @@ mod tests {
                 let bw = s.blocks_x();
                 let mut d = [[0u8; 4]; 16];
                 let (mut sse, mut n) = (0u64, 0u64);
-                for (i, b) in out[k].chunks_exact(16).enumerate() {
+                for (i, b) in out[k].as_chunks::<16>().0.iter().enumerate() {
                     super::super::decode(b, &mut d);
                     let src = s.read_block(i as u32 % bw, i as u32 / bw);
                     sse += crate::surface::block_sse(&src, &d, &[1, 1, 1, 0]);

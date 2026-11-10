@@ -631,10 +631,10 @@ pub fn encode(px: &Block, w: &[u32; 4], effort: u8) -> [u8; 8] {
                         n_lit += 1;
                     }
                 }
-                if n_lit < 16 {
-                    if let Some(s) = sort_along(&lit[..n_lit], &axis) {
-                        cands[2] = cluster_fit(&s, w, true, true, usize::MAX, None).map(|(a, b, e)| (e, a, b, true));
-                    }
+                if n_lit < 16
+                    && let Some(s) = sort_along(&lit[..n_lit], &axis)
+                {
+                    cands[2] = cluster_fit(&s, w, true, true, usize::MAX, None).map(|(a, b, e)| (e, a, b, true));
                 }
             }
             if effort == 1 {

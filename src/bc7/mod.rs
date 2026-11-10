@@ -458,19 +458,130 @@ pub fn decode_block(b: &Bc7Block, out: &mut Block) {
 /// p-bit is already the 8-bit endpoint. The RDO pass decodes hundreds of candidates per block,
 /// and entropy reduction makes most of them mode 6.
 fn decode_mode6(v: u128, out: &mut Block) {
-    let field = |pos: u32, bits: u32| ((v >> pos) as u32) & ((1 << bits) - 1);
-    let (p0, p1) = (field(63, 1), field(64, 1));
+    let pal = mode6_palette(v as u64, (v >> 64) as u64 & 1);
+    let idx = mode6_indices((v >> 64) as u64);
+    for (t, &k) in out.iter_mut().zip(&idx) {
+        *t = pal[k as usize];
+    }
+}
+
+/// The 8-bit endpoints of mode 6 from the low 64 bits (7-bit channels, P0 at bit 63) and P1.
+#[inline]
+fn mode6_endpoints(lo: u64, p1: u64) -> [[u32; 4]; 2] {
+    let ch = |pos: u32| ((lo >> pos) & 0x7f) as u32;
+    let p0 = (lo >> 63) as u32;
+    let p1 = p1 as u32 & 1;
+    [
+        [0, 1, 2, 3].map(|c| ch(7 + 14 * c) << 1 | p0),
+        [0, 1, 2, 3].map(|c| ch(14 + 14 * c) << 1 | p1),
+    ]
+}
+
+/// The 16-entry mode-6 palette from the low 64 bits of a mode-6 block and P1.
+fn mode6_palette(lo: u64, p1: u64) -> [[u8; 4]; 16] {
+    let e = mode6_endpoints(lo, p1);
     let mut pal = [[0u8; 4]; 16];
     for c in 0..4 {
-        let e0 = field(7 + 14 * c as u32, 7) << 1 | p0;
-        let e1 = field(14 + 14 * c as u32, 7) << 1 | p1;
         for (k, &w) in W4.iter().enumerate() {
-            pal[k][c] = interp(e0, e1, w);
+            pal[k][c] = interp(e[0][c], e[1][c], w);
         }
     }
-    out[0] = pal[field(65, 3) as usize];
-    for (i, t) in out.iter_mut().enumerate().skip(1) {
-        *t = pal[field(68 + 4 * (i as u32 - 1), 4) as usize];
+    pal
+}
+
+/// The 16 mode-6 indices from the high 64 bits (P1, a 3-bit anchor index, then 4 bits each).
+#[inline]
+fn mode6_indices(hi: u64) -> [u8; 16] {
+    let mut idx = [0u8; 16];
+    idx[0] = (hi >> 1 & 7) as u8;
+    for (i, k) in idx.iter_mut().enumerate().skip(1) {
+        *k = (hi >> (4 * i) & 15) as u8;
+    }
+    idx
+}
+
+/// Whether a block is mode 6.
+#[inline]
+pub fn is_mode6(raw: &[u8]) -> bool {
+    raw[0] & 0x7f == 0x40
+}
+
+/// Errors of a mode-6 block (its endpoints and P0) against every texel at every palette entry,
+/// for both values of P1. A candidate that keeps the low 8 bytes and takes P1 and the indices
+/// (the high 8 bytes) from another block then costs 16 lookups instead of a decode.
+pub struct Mode6Lo {
+    err: [[[u32; 16]; 16]; 2],
+}
+
+impl Mode6Lo {
+    pub fn new(raw: &[u8; 16], src: &Block, w: &[u32; 4]) -> Self {
+        let lo = u64::from_le_bytes(raw[..8].try_into().unwrap());
+        let mut err = [[[0u32; 16]; 16]; 2];
+        for (p1, tab) in err.iter_mut().enumerate() {
+            let pal = mode6_palette(lo, p1 as u64);
+            for (row, t) in tab.iter_mut().zip(src) {
+                for (e, p) in row.iter_mut().zip(&pal) {
+                    *e = texel_sse(t, p, w);
+                }
+            }
+        }
+        Self { err }
+    }
+
+    /// Error with `hi` (bytes 8-15 as a little-endian word) in place of the high half; at least
+    /// `bound` + 1 once it passes `bound`. Equal to decoding the block and taking [`block_sse`].
+    ///
+    /// [`block_sse`]: crate::surface::block_sse
+    pub fn err(&self, hi: u64, bound: u64) -> u64 {
+        let tab = &self.err[(hi & 1) as usize];
+        let idx = mode6_indices(hi);
+        let mut e = 0u64;
+        for q in 0..4 {
+            for i in q * 4..q * 4 + 4 {
+                e += tab[i][idx[i] as usize] as u64;
+            }
+            if e > bound {
+                return e;
+            }
+        }
+        e
+    }
+}
+
+/// The interpolation weight of each texel of a mode-6 block. A candidate that keeps P1 and the
+/// indices (the high 8 bytes) and takes the endpoints and P0 (the low 8 bytes, mode 6) from
+/// another block is scored by [`Mode6Hi::err`] without a decode.
+pub struct Mode6Hi {
+    wt: [u32; 16],
+    p1: u64,
+}
+
+impl Mode6Hi {
+    pub fn new(raw: &[u8; 16]) -> Self {
+        let hi = u64::from_le_bytes(raw[8..].try_into().unwrap());
+        Self {
+            wt: mode6_indices(hi).map(|k| W4[k as usize]),
+            p1: hi & 1,
+        }
+    }
+
+    /// Error with `lo` (bytes 0-7 of a mode-6 block) in place of the low half; at least `bound`
+    /// + 1 once it passes `bound`. Equal to decoding the block and taking [`block_sse`].
+    ///
+    /// [`block_sse`]: crate::surface::block_sse
+    pub fn err(&self, lo: u64, src: &Block, w: &[u32; 4], bound: u64) -> u64 {
+        let ep = mode6_endpoints(lo, self.p1);
+        let mut e = 0u64;
+        for q in 0..4 {
+            for i in q * 4..q * 4 + 4 {
+                let t = [0, 1, 2, 3].map(|c| interp(ep[0][c], ep[1][c], self.wt[i]));
+                e += texel_sse(&src[i], &t, w) as u64;
+            }
+            if e > bound {
+                return e;
+            }
+        }
+        e
     }
 }
 

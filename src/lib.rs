@@ -20,6 +20,7 @@ pub mod color;
 pub mod dds;
 pub mod fit;
 pub mod format;
+pub mod gpu;
 pub mod ktx2;
 pub mod metrics;
 pub mod mips;

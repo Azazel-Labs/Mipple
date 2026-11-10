@@ -25,3 +25,15 @@ jobs:
       - name: Regression check (synthetic corpus vs bench-results/check-baseline.csv)
         if: startsWith(matrix.os, 'ubuntu')
         run: cargo run --release -- check
+
+  # The minimum supported Rust (rust-version in Cargo.toml) still builds everything.
+  msrv:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.90
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo check --workspace --all-targets
+      - run: cargo check -p mipple --lib --no-default-features

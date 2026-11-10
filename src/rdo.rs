@@ -177,13 +177,14 @@ impl RdoParams {
         })
     }
 
-    /// Field-swap refinement depth: by default 256 for BC1/BC4 (Kodak-24 BD-rate −1.0% / −0.4%),
-    /// off for BC5 (−0.2% at depth 32, −0.3% at 256, but BC5 RDO has no time to spare against
-    /// bc7enc_rdo) and BC7 (not implemented).
+    /// Field-swap refinement depth: by default 256 for BC1/BC4/BC7 (Kodak-24 BD-rate −1.0% /
+    /// −0.4% / −0.1%; for BC7 it also trims 0.3-0.9 points off the equal-RMSE gap to Oodle at
+    /// λ 10-40, for 1.07× the time), off for BC5 (−0.2% at depth 32, −0.3% at 256, but BC5 RDO
+    /// has no time to spare against bc7enc_rdo).
     pub fn refine_back_for(&self, format: Format) -> usize {
         self.refine_back.unwrap_or(match format {
-            Format::Bc1 | Format::Bc4 => 256,
-            Format::Bc5 | Format::Bc7 => 0,
+            Format::Bc1 | Format::Bc4 | Format::Bc7 => 256,
+            Format::Bc5 => 0,
         })
     }
 
@@ -829,10 +830,10 @@ fn candidates(
                     (0, 6) => Some(&mut fields.spans),
                     _ => None,
                 };
-                if let Some(m) = memo {
-                    if !m.insert(field_key(&prev[k..k + len])) {
-                        continue;
-                    }
+                if let Some(m) = memo
+                    && !m.insert(field_key(&prev[k..k + len]))
+                {
+                    continue;
                 }
                 let mut c = *base;
                 c[k..k + len].copy_from_slice(&prev[k..k + len]);
@@ -1787,13 +1788,23 @@ fn optimize_chunk(
                 Format::Bc1 => &[(0, 4), (4, 8)],
                 Format::Bc4 => &[(0, 2), (2, 8)],
                 Format::Bc5 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
-                Format::Bc7 => &[],
+                // Mode 6 (most RDO output): mode, endpoints and P0; then P1 and the indices.
+                Format::Bc7 => &[(0, 8), (8, 16)],
             };
             let cur = best.1;
             // Each candidate changes one field, so for BC5 it keeps one half of `cur`.
             let cur_half = base_half_err(format, &cur, s, w);
+            // BC7 reaches past the exhaustive depth (32) to the whole window.
+            let depth = if bc7 {
+                refine_back.min(i).min(window / n)
+            } else {
+                back.min(refine_back)
+            };
+            // Mode 6 halves are scored without a decode (most BC7 RDO output is mode 6).
+            let m6 = (bc7 && bc7::is_mode6(&cur)).then(|| (bc7::Mode6Lo::new(&cur, s, w), bc7::Mode6Hi::new(&cur)));
+            let half = |c: &[u8; 16], k: usize| u64::from_le_bytes(c[k * 8..k * 8 + 8].try_into().unwrap());
             for &(a, b) in flds {
-                for d in 1..=back.min(refine_back) {
+                for d in 1..=depth {
                     let prev = &blocks[i - d];
                     if prev[a..b] == cur[a..b] {
                         continue;
@@ -1804,7 +1815,11 @@ fn optimize_chunk(
                         continue;
                     }
                     let bnd = limit.min((best.0 * 16.0 / smooth) as u64 + 2);
-                    let err = block_err(format, &c[..n], s, w, bnd, (&cur, cur_half), &mut dec);
+                    let err = match &m6 {
+                        Some((lo, _)) if a == 8 => lo.err(half(&c, 1), bnd),
+                        Some((_, hi)) if bc7::is_mode6(prev) => hi.err(half(&c, 0), s, w, bnd),
+                        _ => block_err(format, &c[..n], s, w, bnd, (&cur, cur_half), &mut dec),
+                    };
                     if err > limit {
                         continue;
                     }

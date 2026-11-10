@@ -81,7 +81,7 @@ fn split_bc1(raw: &[u8]) -> Vec<Vec<u8>> {
         Vec::with_capacity(4 * n),
     ];
     // Planes: c0 low, c0 high, c1 low, c1 high, selectors.
-    for b in raw.chunks_exact(8) {
+    for b in raw.as_chunks::<8>().0 {
         s[0].push(b[0]);
         s[1].push(b[1]);
         s[2].push(b[2]);
@@ -217,7 +217,7 @@ fn split_bc7(raw: &[u8]) -> Vec<Vec<u8>> {
         Vec::with_capacity(8 * n),
         Vec::new(),
     ];
-    for b in raw.chunks_exact(16) {
+    for b in raw.as_chunks::<16>().0 {
         let Some(blk) = bc7::unpack(b) else {
             s[MODE].push(8);
             s[ESCAPE].extend_from_slice(b);

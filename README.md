@@ -1,11 +1,15 @@
 # mipple
 
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
 
 A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC4 / BC5 / BC7**
 blocks, tuned so Zstd, Deflate or Kraken shrink them further, and stores them in **KTX2** with optional
 Zstd supercompression. GPUs read the output directly; nothing new runs at load time.
+
+**[Try it in your browser](https://azazel-labs.github.io/Mipple/)**: drop in your own image, move the
+quality and size sliders, and zoom in to compare pixels against the source. The encoder runs as
+WebAssembly on your machine; your images never leave the browser.
 
 Version 0.9. Background research: [docs/reference/oodle-rdo-ktx2.md](docs/reference/oodle-rdo-ktx2.md);
 notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/research/bc7f-bc7g.md).
@@ -38,8 +42,8 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | BC5 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−4.6%** to **−2.0%** (λ 10-40) | n/a | n/a | n/a |
 | BC7 | bc7enc_rdo (bc7e) | **−31.5%** | **−29.2%** | 17.1-28.5 | 51.8-57.8 |
 | BC7 | bc7enc_rdo (-e) | **−30.5%** | **−28.6%** | 17.1-28.5 | 38.1-44.4 |
-| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | +2.3% to +4.0% (λ 10-40) | n/a | n/a | n/a |
-| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−4.8%** to **−1.3%** (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | +1.8% to +3.1% (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−5.1%** to **−2.3%** (λ 10-40) | n/a | n/a | n/a |
 
 Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads `bench-results/compete-kodak24-rdo/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites this block and `docs/img/*.svg`).
 
@@ -49,7 +53,7 @@ Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads 
 
 Prebuilt binaries for Linux, Windows and macOS are on the
 [releases page](https://github.com/Azazel-Labs/mipple/releases): one `vX.Y.Z` release for every main commit that
-passes CI. To build from source you need Rust 1.85+ (stable).
+passes CI. To build from source you need Rust 1.90+ (stable).
 
 ```sh
 cargo build --release
@@ -110,9 +114,13 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 | `check [--corpus DIR --limit N] [--update-baseline]` | Fast regression check against a stored baseline; non-zero exit on regression |
 | `score SRC.png ENC.dds\|ENC.ktx2 [--csv --label L --secs T]` | Grade *any* encoder's output with mipple's metrics and back ends |
 | `synth [-o DIR]` | Write the procedural test set |
+| `gpu` | The GPU adapter, what it supports, and which formats it base-encodes |
 
 RDO knobs (on `encode`, `bench` and `check`): `--window`, `--max-back`, `--span-back`, `--chunk-bytes`, `--smooth-scale`,
 `--max-rms-ratio`, `--min-rms`.
+Base encoding runs on the GPU for every format that has a compute encoder there (see `mipple gpu`) and on the CPU
+for the rest, or when there is no usable GPU; `--cpu` forces the CPU. Cargo features: `cli` (the `mipple`
+binary) and `gpu` (wgpu), both on by default; `default-features = false` builds the library alone.
 `--entropy` picks BC7 entropy-reduced base encoding: `auto` (default: on for λ ≥ 1), `on`, or `off` (v0.2 behaviour).
 
 ## What's inside

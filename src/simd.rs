@@ -340,7 +340,7 @@ impl SimdI32 for i32x8 {
     #[inline(always)]
     fn to_le_bytes(self) -> [u8; 4 * LANES] {
         let mut out = [0u8; 4 * LANES];
-        for (o, v) in out.chunks_exact_mut(4).zip(self.0) {
+        for (o, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.0) {
             o.copy_from_slice(&v.to_le_bytes());
         }
         out

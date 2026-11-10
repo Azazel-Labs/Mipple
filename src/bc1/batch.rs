@@ -1307,7 +1307,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, row_order: bool) -> ([u8; 64], [
 fn patch_solid(s: &Surface, k: usize, o: &mut [u8], solid: &[bool; LANES]) {
     let w = crate::format::Format::Bc1.error_weights();
     let bw = s.blocks_x() as usize;
-    for (l, ob) in o.chunks_exact_mut(8).enumerate() {
+    for (l, ob) in o.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         if solid[l] {
             let b = s.read_block(((k + l) % bw) as u32, ((k + l) / bw) as u32);
             ob.copy_from_slice(&super::encode_solid(&b, &w).0);
@@ -1451,7 +1451,7 @@ mod tests {
         let bw = s.blocks_x();
         let mut sse = 0u64;
         let mut d = [[0u8; 4]; 16];
-        for (i, b) in raw.chunks_exact(8).enumerate() {
+        for (i, b) in raw.as_chunks::<8>().0.iter().enumerate() {
             super::super::decode(b, &mut d);
             let src = s.read_block(i as u32 % bw, i as u32 / bw);
             sse += src
@@ -1509,7 +1509,7 @@ mod diag {
                 let raw = f(s);
                 let bw = s.blocks_x();
                 let mut d = [[0u8; 4]; 16];
-                for (i, b) in raw.chunks_exact(8).enumerate() {
+                for (i, b) in raw.as_chunks::<8>().0.iter().enumerate() {
                     super::super::decode(b, &mut d);
                     let src = s.read_block(i as u32 % bw, i as u32 / bw);
                     sse += src
@@ -1612,7 +1612,9 @@ mod perf {
         let s = Surface::load(std::path::Path::new("test-images/kodak/kodim01.png")).unwrap();
         let blocks = s.blocks();
         let ts: Vec<Texels<F>> = blocks
-            .chunks_exact(LANES)
+            .as_chunks::<LANES>()
+            .0
+            .iter()
             .map(|c| {
                 let mut t = [[F::splat(0.0); 16]; 3];
                 for ch in 0..3 {

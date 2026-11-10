@@ -4,7 +4,8 @@ use crate::surface::Block;
 use crate::{bc1, bc4, bc7};
 
 /// When to use entropy-reduced base encoding ([`BlockOpts::reduce_entropy`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum EntropyMode {
     /// Never: the base encoder minimizes error only.
     Off,
@@ -74,7 +75,8 @@ impl From<u8> for BlockOpts {
 }
 
 /// GPU block formats mipple can produce.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum Format {
     /// 4 bpp RGB (opaque albedo, bulk color).
     Bc1,

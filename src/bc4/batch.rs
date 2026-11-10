@@ -433,7 +433,7 @@ fn encode_x<V: SimdF32>(x: &[V; 16], effort: u8, row_order: bool) -> [u8; 64] {
 fn encode8<V: SimdF32>(v: &[[u8; 16]; LANES], effort: u8) -> [[u8; 8]; LANES] {
     let raw = encode_x(&load::<V>(v), effort, false);
     let mut out = [[0u8; 8]; LANES];
-    for (o, r) in out.iter_mut().zip(raw.chunks_exact(8)) {
+    for (o, r) in out.iter_mut().zip(raw.as_chunks::<8>().0) {
         o.copy_from_slice(r);
     }
     out
@@ -499,7 +499,7 @@ fn put(o: &mut [u8], enc: &[u8; 64], c: usize, channels: usize) {
         let n = o.len();
         o.copy_from_slice(&enc[..n]);
     } else {
-        for (ob, e) in o.chunks_exact_mut(8 * channels).zip(enc.chunks_exact(8)) {
+        for (ob, e) in o.chunks_exact_mut(8 * channels).zip(enc.as_chunks::<8>().0) {
             ob[8 * c..8 * c + 8].copy_from_slice(e);
         }
     }
@@ -604,8 +604,8 @@ mod tests {
     fn fast_backends_agree_and_beat_min_max() {
         let c = corpus();
         let (mut fast_err, mut minmax_err) = (0u64, 0u64);
-        for chunk in c.chunks_exact(LANES) {
-            let v: [[u8; 16]; LANES] = chunk.try_into().unwrap();
+        for chunk in c.as_chunks::<LANES>().0 {
+            let v: [[u8; 16]; LANES] = *chunk;
             let fast = encode_channels8(&v, 1);
             assert_eq!(fast, encode8::<f32x8>(&v, 1));
             assert_eq!(encode_channels8(&v, 0), encode8::<f32x8>(&v, 0));
@@ -643,8 +643,8 @@ mod tests {
     fn matches_scalar_reference() {
         let c = corpus();
         for effort in [2u8, 4, 6, 7, 8] {
-            for chunk in c.chunks_exact(LANES) {
-                let v: [[u8; 16]; LANES] = chunk.try_into().unwrap();
+            for chunk in c.as_chunks::<LANES>().0 {
+                let v: [[u8; 16]; LANES] = *chunk;
                 let fast = encode_channels8(&v, effort);
                 let generic = encode8::<f32x8>(&v, effort);
                 for l in 0..LANES {
@@ -674,7 +674,9 @@ mod profile {
             blocks.len()
         );
         let chans: Vec<[[u8; 16]; LANES]> = blocks
-            .chunks_exact(LANES)
+            .as_chunks::<LANES>()
+            .0
+            .iter()
             .map(|c| std::array::from_fn(|l| super::super::channel(&c[l], 0)))
             .collect();
         for rep in 0..20 {

@@ -69,7 +69,7 @@ fn push_kv(out: &mut Vec<u8>, key: &str, value: &str) {
     out.push(0);
     out.extend_from_slice(value.as_bytes());
     out.push(0);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }
@@ -79,7 +79,8 @@ fn round_up(v: usize, a: usize) -> usize {
 }
 
 /// Whether [`write`] applies the [`crate::prep`] transform.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum PrepMode {
     /// Standard KTX2: raw blocks under Zstd.
     #[default]

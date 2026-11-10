@@ -1,7 +1,8 @@
 //! Repo chores, run as `cargo xtask <task>`:
 //!
 //!   fmt [--check]   rustfmt every crate in the workspace (`--check`: fail on a diff, as CI does)
-//!   clippy          clippy on all targets with warnings as errors, as CI runs it
+//!   clippy          clippy on all targets with warnings as errors, then the library without default
+//!                   features, as CI runs it
 //!   ci              fmt --check, then clippy, then the release tests
 
 use std::process::{Command, ExitCode};
@@ -21,10 +22,22 @@ fn fmt(check: bool) -> bool {
 }
 
 fn clippy() -> bool {
-    cargo(&[
+    let all = cargo(&[
         "clippy",
         "--workspace",
         "--all-targets",
+        "--release",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    // The library alone, without the `cli` and `gpu` features (as `web/` and library users build it).
+    all && cargo(&[
+        "clippy",
+        "-p",
+        "mipple",
+        "--lib",
+        "--no-default-features",
         "--release",
         "--",
         "-D",

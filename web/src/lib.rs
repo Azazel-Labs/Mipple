@@ -313,7 +313,7 @@ fn surface_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Surface> {
     Ok(Surface {
         width,
         height,
-        pixels: rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect(),
+        pixels: rgba.as_chunks::<4>().0.to_vec(),
     })
 }
 

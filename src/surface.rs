@@ -74,7 +74,7 @@ impl Surface {
         let (x0, y0) = (bx * 4, by * 4);
         if x0 + 4 <= self.width && y0 + 4 <= self.height {
             let w = self.width as usize;
-            for (r, row) in b.chunks_exact_mut(4).enumerate() {
+            for (r, row) in b.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let at = (y0 as usize + r) * w + x0 as usize;
                 row.copy_from_slice(&self.pixels[at..at + 4]);
             }
@@ -95,7 +95,7 @@ impl Surface {
         let (x0, y0) = (bx * 4, by * 4);
         if x0 + 4 <= self.width && y0 + 4 <= self.height {
             let w = self.width as usize;
-            for (r, out) in v.chunks_exact_mut(4).enumerate() {
+            for (r, out) in v.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let at = (y0 as usize + r) * w + x0 as usize;
                 for (o, t) in out.iter_mut().zip(&self.pixels[at..at + 4]) {
                     *o = t[c];

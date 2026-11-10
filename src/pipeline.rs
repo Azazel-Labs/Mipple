@@ -28,6 +28,10 @@ pub struct EncodeOptions {
     pub mips: bool,
     /// RDO settings (`lambda == 0` disables RDO).
     pub rdo: RdoParams,
+    /// Base-encode on the GPU (the default) where it has an encoder for the format
+    /// ([`crate::gpu`]); `false` forces the CPU. Formats without a GPU encoder, builds without the
+    /// `gpu` feature and machines without a usable GPU use the CPU either way.
+    pub gpu: bool,
 }
 
 impl EncodeOptions {
@@ -40,6 +44,7 @@ impl EncodeOptions {
             entropy: EntropyMode::default(),
             mips: true,
             rdo: RdoParams::default(),
+            gpu: true,
         }
     }
 
@@ -83,6 +88,8 @@ pub struct EncodedTexture {
 /// Timing and RDO statistics for one encode.
 #[derive(Clone, Debug, Default)]
 pub struct EncodeReport {
+    /// The GPU adapter that base-encoded the levels, or `None` for the CPU.
+    pub gpu: Option<String>,
     pub base_secs: f64,
     pub rdo_secs: f64,
     pub rdo: RdoStats,
@@ -231,15 +238,22 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     let w = opts.format.error_weights();
     let mut report = EncodeReport::default();
     let mut levels = Vec::with_capacity(levels_in.len());
+    // GPU base encoding only where the device has an encoder for this format; RDO stays on the CPU.
+    let gpu = (opts.gpu && crate::gpu::Gpu::has_encoder(opts.format))
+        .then(crate::gpu::Gpu::shared)
+        .flatten()
+        .filter(|g| g.encodes(opts.format));
+    report.gpu = gpu.map(|g| g.info().name.clone());
     let rdo_params = RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
         ..opts.rdo
     };
     for level in levels_in {
         let t0 = Instant::now();
-        if direct(opts.format, opts.block_opts()) && !rdo_params.enabled() {
+        let on_gpu = gpu.and_then(|g| g.encode_surface(level, opts.format, opts.block_opts()));
+        if !rdo_params.enabled() && (on_gpu.is_some() || direct(opts.format, opts.block_opts())) {
             // Straight to raw bytes: no source blocks, no 16-byte slots.
-            let data = encode_surface_raw(level, opts.format, opts.block_opts());
+            let data = on_gpu.unwrap_or_else(|| encode_surface_raw(level, opts.format, opts.block_opts()));
             report.base_secs += t0.elapsed().as_secs_f64();
             report.rdo = RdoStats::merge(
                 report.rdo,
@@ -261,7 +275,11 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         } else {
             Vec::new()
         };
-        let (mut blocks, alts) = rdo_bases(level, &src, opts.format, opts.block_opts(), rdo_params.enabled());
+        // A GPU base is RDO's only starting point (the CPU adds alternate bases for BC7).
+        let (mut blocks, alts) = match on_gpu {
+            Some(raw) => (unflatten(opts.format, &raw), Vec::new()),
+            None => rdo_bases(level, &src, opts.format, opts.block_opts(), rdo_params.enabled()),
+        };
         let t1 = Instant::now();
         let stats = if rdo_params.enabled() {
             let row = (level.width as usize).div_ceil(4);

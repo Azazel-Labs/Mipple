@@ -997,7 +997,7 @@ mod tests {
             surf.set(x, y, p.0);
         }
         let blocks = surf.blocks();
-        let batches: Vec<[Block; LANES]> = blocks.chunks_exact(LANES).map(|c| c.try_into().unwrap()).collect();
+        let batches: Vec<[Block; LANES]> = blocks.as_chunks::<LANES>().0.to_vec();
         #[target_feature(enable = "avx2,fma")]
         fn texels(b: &[Block; LANES]) -> Texels<F> {
             let mut t = Texels {
@@ -1092,8 +1092,8 @@ mod tests {
             crate::synth::roughness(32),
             crate::synth::bricks(32),
         ] {
-            for chunk in img.blocks().chunks_exact(LANES) {
-                let b: [Block; LANES] = chunk.try_into().unwrap();
+            for chunk in img.blocks().as_chunks::<LANES>().0 {
+                let b: [Block; LANES] = *chunk;
                 let mut t = Texels {
                     x: [[f32x8::splat(255.0); 16]; 4],
                 };

@@ -251,7 +251,7 @@ pub(super) struct Fits {
 /// Line fits of the first `count` (a multiple of 8, at most 64) partitions with `ns` subsets
 /// (2 or 3), over `dims` channels (3 = RGB, 4 = RGBA).
 pub(super) fn residuals(px: &Block, ns: u8, dims: usize, count: u8) -> Fits {
-    debug_assert!(count as usize % LANES == 0 && count <= 64 && (ns == 2 || ns == 3));
+    debug_assert!((count as usize).is_multiple_of(LANES) && count <= 64 && (ns == 2 || ns == 3));
     let mut out = Fits {
         residual: [f32::INFINITY; 64],
         lambda: [f32::INFINITY; 64],
