@@ -48,14 +48,16 @@ Shipped:
   1024 blocks back, behind exact mean and segment bounds), the plain search at effort 8+ as the base (a second
   base with entropy reduction), and a cross-mode candidate. vs bc7enc_rdo: BD-rate −33.7% (bc7e) / −32.3% (`-e`).
 - [x] **Smooth-block weight** (5× ramping to 1 at channel std 14): Kodak-24 BD-rate −2.3% to −3.6% in every
-  format. vs bc7enc_rdo: BC1 −26.8%, BC4 −20.0%, BC5 −26.1%.
+  format. Since 0.9.18 4× falling as k²/(k²+σ²) with k = 12, which put BC7 ahead of Oodle Texture at equal RMSE
+  (was 2-3% behind at λ 10-40) while staying ahead at equal SSIM. vs bc7enc_rdo: BC1 −26.8%, BC4 −20.0%, BC5 −26.1%.
 - [x] **Lossless field split** (`src/prep.rs`, BC7Prep-style, `mipple encode --prep on|auto`): −4% to −8%
   Zstd-19 without RDO. With strong RDO it can lose (RDO optimizes whole-block matches in the interleaved
   layout); `auto` keeps the smaller layout per level.
 - [x] **vs Oodle Texture 2.9.16 (Unreal Engine 5.8), true source:** `scripts/ue_oodle/` gets Oodle's real blocks
   out of a stock UE cook (bit-exact, no engine source) and scores them on Zstd-19 next to a mipple sweep
-  (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −7.6% to
-  −6.3% / −6.9% to −5.7%, BC4 −9.9% to −2.2% / −3.2% to −0.9%, BC5 −18.3% to −6.8% / −4.6% to −2.0%.
+  (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −9.6% to
+  −8.8% / −5.7% to −4.0%, BC4 −13.6% to −4.9% / −3.2% to −0.8%, BC7 −1.5% to −0.6% / −3.1% to −0.3%, BC5 (0.9.16)
+  −18.3% to −6.8% / −4.6% to −2.0%.
 - [x] **Learned BC7 ranker** (`src/ranker/bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
   the 1024-block far search, then 16 blocks from anywhere in the 64 KiB chunk, picked by a two-key prefilter
   (decoded value SAD and least-squares refit residual) and a small MLP. Kodak-24 BD-rate −0.22% at 0.86× the
@@ -73,10 +75,12 @@ Shipped:
 
 Open for v0.9.x:
 
-- [ ] **BC7 vs Oodle 2.9.16 at equal RMSE:** Oodle keeps 1.8-3.1% fewer bits at equal RMSE on Kodak-24 (mipple is
-  2.3-5.1% ahead at equal SSIM; field-swap refinement for BC7 took the gap down from 2.3-4.0%). mipple effort 8-9 without RDO already matches Oodle's λ 0 accuracy at fewer
-  bits, so the gap is in the RDO search: Oodle's RDO output has about 3× more index-half repeats. 128 KiB chunks
-  are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing (1.4-1.5× wall time).
+- [x] **BC7 vs Oodle 2.9.16 at equal RMSE:** Oodle kept 1.8-3.1% fewer bits at equal RMSE on Kodak-24 until the
+  smooth weight's new shape (0.9.18); mipple is now 0.6-1.5% smaller at equal RMSE and 0.3-3.1% at equal SSIM.
+- [ ] **Widen the BC7 lead:** the margin at λ 30-40 on SSIM is thin (−0.7%, −0.3%), and per image smooth-sky
+  shots (kodim07, kodim20) are still up to 5.5% behind there. Oodle's RDO output has about 3× more index-half
+  repeats. 128 KiB chunks are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing
+  (1.4-1.5× wall time).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
 - [ ] **Smarter entropy reduction:** pick mode/partition/p-bits by an estimated rate *given the previous blocks*
   (not a fixed mode-6 weight), so the base encoder and RDO share one objective.

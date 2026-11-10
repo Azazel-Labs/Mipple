@@ -135,13 +135,13 @@
           <summary>Advanced</summary>
           <div class="field">
             <label class="field-label" for="smooth-scale">Smooth-block weight <output id="smooth-scale-out"></output></label>
-            <input type="range" id="smooth-scale" min="1" max="12" step="0.5" value="5">
+            <input type="range" id="smooth-scale" min="1" max="12" step="0.5" value="4">
             <p class="note">Extra distortion weight on flat blocks, which protects gradients. <code>--smooth-scale</code></p>
           </div>
           <div class="field">
-            <label class="field-label" for="smooth-max-std">Smooth threshold <output id="smooth-max-std-out"></output></label>
-            <input type="range" id="smooth-max-std" min="0" max="40" step="1" value="14">
-            <p class="note">Blocks with a channel deviation this high or more get no extra weight. <code>--smooth-max-std</code></p>
+            <label class="field-label" for="smooth-std">Smooth threshold <output id="smooth-std-out"></output></label>
+            <input type="range" id="smooth-std" min="1" max="40" step="1" value="12">
+            <p class="note">Blocks with this channel deviation get half the extra weight; busier ones less. <code>--smooth-std</code></p>
           </div>
           <div class="field">
             <label class="field-label" for="max-rms-ratio">Max error ratio <output id="max-rms-ratio-out"></output></label>

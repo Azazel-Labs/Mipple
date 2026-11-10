@@ -116,12 +116,12 @@ struct RdoArgs {
     #[arg(long)]
     chunk_bytes: Option<usize>,
     /// Distortion multiplier for flat blocks (protects gradients).
-    #[arg(long, default_value_t = 5.0)]
+    #[arg(long, default_value_t = 4.0)]
     smooth_scale: f32,
-    /// Blocks whose largest channel standard deviation is at least this get no extra weight;
-    /// flatter blocks ramp linearly up to --smooth-scale.
-    #[arg(long, default_value_t = 14.0)]
-    smooth_max_std: f32,
+    /// Channel standard deviation at which a block gets half the extra weight; flatter blocks
+    /// approach --smooth-scale, busier ones 1.
+    #[arg(long, alias = "smooth-max-std", default_value_t = 12.0)]
+    smooth_std: f32,
     /// Reject candidates whose RMS error exceeds this multiple of the base encoding's.
     #[arg(long, default_value_t = 10.0)]
     max_rms_ratio: f32,
@@ -142,7 +142,7 @@ impl RdoArgs {
             local_k: self.local,
             chunk_bytes: self.chunk_bytes,
             smooth_scale: self.smooth_scale,
-            smooth_max_std: self.smooth_max_std,
+            smooth_std: self.smooth_std,
             max_rms_ratio: self.max_rms_ratio,
             min_rms: self.min_rms,
             ..RdoParams::default()

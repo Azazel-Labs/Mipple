@@ -119,8 +119,8 @@ pub struct Settings {
     pub lambda: f32,
     /// `--smooth-scale`: distortion multiplier for flat blocks.
     pub smooth_scale: f32,
-    /// `--smooth-max-std`: blocks at least this busy get no extra weight.
-    pub smooth_max_std: f32,
+    /// `--smooth-std`: channel deviation at which a block gets half the extra weight.
+    pub smooth_std: f32,
     /// `--max-rms-ratio`: RDO candidates may have at most this multiple of the base RMS error...
     pub max_rms_ratio: f32,
     /// `--min-rms`: ... or this RMS error per channel.
@@ -165,7 +165,7 @@ impl Settings {
         }
         for (flag, v, default) in [
             ("--smooth-scale", self.smooth_scale, d.smooth_scale),
-            ("--smooth-max-std", self.smooth_max_std, d.smooth_max_std),
+            ("--smooth-std", self.smooth_std, d.smooth_std),
             ("--max-rms-ratio", self.max_rms_ratio, d.max_rms_ratio),
             ("--min-rms", self.min_rms, d.min_rms),
         ] {
@@ -199,7 +199,7 @@ impl Settings {
             effort: DEFAULT_EFFORT,
             lambda: 0.0,
             smooth_scale: d.smooth_scale,
-            smooth_max_std: d.smooth_max_std,
+            smooth_std: d.smooth_std,
             max_rms_ratio: d.max_rms_ratio,
             min_rms: d.min_rms,
             zstd: DEFAULT_ZSTD,
@@ -220,7 +220,7 @@ impl Settings {
         o.rdo = RdoParams {
             lambda: self.lambda.max(0.0),
             smooth_scale: self.smooth_scale,
-            smooth_max_std: self.smooth_max_std,
+            smooth_std: self.smooth_std,
             max_rms_ratio: self.max_rms_ratio,
             min_rms: self.min_rms,
             verify_zstd_level: (self.zstd > 0).then_some(self.zstd),

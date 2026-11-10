@@ -2,16 +2,18 @@
 
 Oodle's blocks come from a normal UE 5.8.4 cook (Final encode speed, RDO on, lambda from Lossy Compression Amount; dumped with `-OodleDebugDumpFilter`, bit-exact with the cooked texture data). Both encoders are scored on the same source pixels, sizes are Zstd level 19 over the block data. Each cell is mipple's size at Oodle's quality relative to Oodle's size (negative = mipple smaller), from a mipple -e 5 lambda sweep. Lambda 0 is Oodle without RDO.
 
+BC5 and kodim18_original rows are from mipple 0.9.16 (smooth weight 5x, linear ramp to std 14): their inputs are not in the repo, so --scores cannot re-run them.
+
 ## BC1 Kodak-24 (24 images)
 
 | Oodle λ | Oodle bpt | Oodle RMSE | Oodle SSIM | at equal RMSE | at equal SSIM |
 |---:|---:|---:|---:|---:|---:|
-| 0 | 2.998 | 6.839 | 0.97219 | -16.3% | -8.9% |
-| 1 | 2.908 | 6.816 | 0.97215 | -12.5% | -6.2% |
-| 10 | 2.480 | 7.011 | 0.96588 | -7.6% | -6.9% |
-| 20 | 2.249 | 7.233 | 0.96093 | -6.5% | -6.6% |
-| 30 | 2.100 | 7.448 | 0.95707 | -6.3% | -6.1% |
-| 40 | 1.986 | 7.659 | 0.95366 | -6.4% | -5.7% |
+| 0 | 2.998 | 6.839 | 0.97219 | -17.6% | -8.5% |
+| 1 | 2.908 | 6.816 | 0.97215 | -13.8% | -5.8% |
+| 10 | 2.480 | 7.011 | 0.96588 | -9.6% | -5.7% |
+| 20 | 2.249 | 7.233 | 0.96093 | -8.8% | -5.2% |
+| 30 | 2.100 | 7.448 | 0.95707 | -8.8% | -4.6% |
+| 40 | 1.986 | 7.659 | 0.95366 | -8.8% | -4.0% |
 
 ## BC1 kodim18_original
 
@@ -28,12 +30,12 @@ Oodle's blocks come from a normal UE 5.8.4 cook (Final encode speed, RDO on, lam
 
 | Oodle λ | Oodle bpt | Oodle RMSE | Oodle SSIM | at equal RMSE | at equal SSIM |
 |---:|---:|---:|---:|---:|---:|
-| 0 | 3.789 | 1.630 | 0.99674 | -9.6% | -4.6% |
-| 1 | 3.389 | 1.626 | 0.99478 | +0.2% (20/24) | -0.7% |
-| 10 | 2.517 | 2.217 | 0.98089 | -2.2% | -0.9% |
-| 20 | 2.251 | 2.673 | 0.97263 | -4.7% | -1.6% |
-| 30 | 2.128 | 3.021 | 0.96737 | -7.6% | -2.6% |
-| 40 | 2.046 | 3.306 | 0.96331 | -9.9% | -3.2% |
+| 0 | 3.789 | 1.630 | 0.99674 | -10.7% | -4.6% |
+| 1 | 3.389 | 1.626 | 0.99478 | -1.1% (20/24) | -0.8% |
+| 10 | 2.517 | 2.217 | 0.98089 | -4.9% | -0.8% |
+| 20 | 2.251 | 2.673 | 0.97263 | -8.0% | -1.5% |
+| 30 | 2.128 | 3.021 | 0.96737 | -11.1% | -2.4% |
+| 40 | 2.046 | 3.306 | 0.96331 | -13.6% | -3.2% |
 
 ## BC4 kodim18_original
 
@@ -72,12 +74,12 @@ Oodle's blocks come from a normal UE 5.8.4 cook (Final encode speed, RDO on, lam
 
 | Oodle λ | Oodle bpt | Oodle RMSE | Oodle SSIM | at equal RMSE | at equal SSIM |
 |---:|---:|---:|---:|---:|---:|
-| 0 | 7.492 | 2.276 | 0.99571 | -6.0% (15/24) | -2.7% (4/24) |
-| 1 | 7.261 | 2.266 | 0.99574 | -2.6% (12/24) | -1.0% (4/24) |
-| 10 | 5.228 | 2.807 | 0.98897 | +2.0% | -5.1% |
-| 20 | 4.306 | 3.354 | 0.98310 | +3.1% | -3.6% |
-| 30 | 3.821 | 3.803 | 0.97855 | +2.5% | -2.8% |
-| 40 | 3.510 | 4.188 | 0.97461 | +1.8% | -2.3% |
+| 0 | 7.492 | 2.276 | 0.99571 | -6.5% (16/24) | -2.6% (4/24) |
+| 1 | 7.261 | 2.266 | 0.99574 | -3.0% (12/24) | -0.9% (4/24) |
+| 10 | 5.228 | 2.807 | 0.98897 | -1.1% | -3.1% |
+| 20 | 4.306 | 3.354 | 0.98310 | -0.6% | -1.5% |
+| 30 | 3.821 | 3.803 | 0.97855 | -0.9% | -0.7% |
+| 40 | 3.510 | 4.188 | 0.97461 | -1.5% | -0.3% |
 
 ## BC7 kodim18_original
 

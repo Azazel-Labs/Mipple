@@ -3,7 +3,7 @@
 Sizes are measured **after** a real compressor (Zstd level 19, Deflate level 9) on the raw blocks of the top
 mip level. Raw BC1/BC4 = 4 bits/texel (bpt), BC5/BC7 = 8 bpt. PSNR is over the channels the format stores, as
 a per-image mean. mipple RDO defaults: window 2048 bytes and 16 KiB chunks (BC7: 16 KiB and 64 KiB; BC1: 8 KiB window; BC5: 3072
-bytes), 256 back-references (capped by the window: 192 for BC5), partial-span copies from the nearest 8, smooth scale 5 (ramping to 1 at channel std 14), max RMS ratio 10, min RMS 3. Machine: 2-core cloud VM; timings are only comparable within a table. Raw rows are in `bench-results/`.
+bytes), 256 back-references (capped by the window: 192 for BC5), partial-span copies from the nearest 8, smooth scale 5 (ramping to 1 at channel std 14; since 0.9.18 4×, halved at std 12, which only the Oodle section below is measured with), max RMS ratio 10, min RMS 3. Machine: 2-core cloud VM; timings are only comparable within a table. Raw rows are in `bench-results/`.
 
 ## Base encoders vs competitors, one P-core (Kodak first 6)
 
@@ -375,15 +375,24 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 
 | Oodle λ | BC1 at RMSE | BC1 at SSIM | BC7 at RMSE | BC7 at SSIM | BC4 at RMSE | BC4 at SSIM | BC5 at RMSE | BC5 at SSIM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | −16.2% | −8.8% | −6.0% (15/24 images) | −2.7% (4/24) | −9.6% | −4.6% | −26.7% | −10.0% |
-| 1 | −12.4% | −6.1% | −2.6% (12/24) | −1.0% (4/24) | +0.2% (20/24) | −0.7% | +4.0% (22/24) | +0.1% |
-| 10 | −7.6% | −6.9% | +2.0% | −5.1% | −2.2% | −0.9% | −6.8% | −2.0% |
-| 20 | −6.5% | −6.6% | +3.1% | −3.6% | −4.7% | −1.6% | −12.4% | −3.7% |
-| 30 | −6.3% | −6.1% | +2.5% | −2.8% | −7.6% | −2.6% | −15.8% | −4.3% |
-| 40 | −6.4% | −5.7% | +1.8% | −2.3% | −9.9% | −3.2% | −18.3% | −4.6% |
+| 0 | −17.6% | −8.5% | −6.5% (16/24 images) | −2.6% (4/24) | −10.7% | −4.6% | −26.7% | −10.0% |
+| 1 | −13.8% | −5.8% | −3.0% (12/24) | −0.9% (4/24) | −1.1% (20/24) | −0.8% | +4.0% (22/24) | +0.1% |
+| 10 | −9.6% | −5.7% | −1.1% | −3.1% | −4.9% | −0.8% | −6.8% | −2.0% |
+| 20 | −8.8% | −5.2% | −0.6% | −1.5% | −8.0% | −1.5% | −12.4% | −3.7% |
+| 30 | −8.8% | −4.6% | −0.9% | −0.7% | −11.1% | −2.4% | −15.8% | −4.3% |
+| 40 | −8.8% | −4.0% | −1.5% | −0.3% | −13.6% | −3.2% | −18.3% | −4.6% |
 
-BC1 is ahead on every image at every λ on SSIM except kodim05 at λ 40 (+0.5%). BC7 is the open gap: Oodle
-2.9.16 holds 2-4% fewer bits at equal RMSE (mipple is 1-5% ahead at equal SSIM). Its non-RDO BC7 is more
+BC1, BC4 and BC7 are mipple 0.9.18 (smooth weight 4×, halved at channel std 12). BC5 is 0.9.16 (5× ramping
+linearly to 1 at std 14): its R16G16 cook inputs are not in the repo, so it was not re-run.
+
+mipple is now smaller at both of Oodle's quality measures at every λ in BC1, BC4 and BC7 (BC5 λ 1 is the one
+cell left behind). Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
+λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
+kodim08) and on SSIM for 26 (up to +5.5%, kodim07 and kodim20, smooth-sky images where Oodle's RDO keeps more
+structure at λ 30-40); BC4 loses most on kodim05, kodim14 and kodim18 on SSIM (+4% to +6% at λ 20-40).
+
+BC7 was the gap: Oodle 2.9.16 held 2-3% fewer bits at equal RMSE at λ 10-40 until the smooth-weight change
+(last item below). Its non-RDO BC7 is more
 accurate than mipple's -e 5 base, so at λ 0-1 mipple's curve only reaches Oodle's RMSE on some images (counts
 in brackets); at -e 8 or 9 without RDO mipple is as accurate as Oodle's λ 0 on 5 of those 6 images and
 smaller on all 6 (kodim03: RMSE 1.650 at 6.85 bpt vs Oodle's 1.623 at 7.30), so the gap is in the RDO search,
@@ -403,14 +412,22 @@ not the base encoder. It was 7-9% (+8.2%,
   BD-rate −0.22% vs the ranker alone at 1.06× the time. 128 KiB chunks would add another −1.0% to −1.3% BD-rate
   at the same CPU time (6-image Oodle subset: +2.1% / −4.5%), but fewer, longer chunks leave threads idle: 1.4-1.5×
   the wall time at 20 threads, so BC7 chunks stay 64 KiB.
+- the smooth-block weight's shape (all formats). The linear ramp gave flat blocks 5× and blocks at channel std
+  14 or more nothing, so gradual-but-textured blocks got no protection while the flattest were over-weighted:
+  turning the weight down only moved error from SSIM to RMSE (`--smooth-scale 1` +2.1% / +7.5%, 2.5 +2.0% /
+  +1.6% on the 6 images). `1 + (scale − 1) · k² / (k² + σ²)` keeps a tail of protection for busy blocks:
+  Kodak-24 BC7 λ 10-40 at RMSE went from +2.0%, +3.1%, +2.5%, +1.8% to −1.1%, −0.6%, −0.9%, −1.5%, at SSIM
+  from −5.1% … −2.3% to −3.1% … −0.3%; BC1 and BC4 gain 2-4% at RMSE and give back up to 1.7% of their SSIM
+  lead. Scale 3 at k 12 is further ahead on RMSE but behind on SSIM at λ 30-40 (+0.4%, +0.8%); 4 is the
+  lowest that stays ahead on both. `mipple check`: BD-rate −1.2% to −2.8% (synthetic), −3.8% (BC7 Kodak-4)
+  at the same speed.
 
-On those 6 images, mean of λ 10-40 at RMSE / SSIM: -e 5 +9.4% / −2.7% before, +4.0% / −2.2% after; -e 9 is
-the same as -e 5 now. The smooth-block weight moves error from RMSE to SSIM but does not close the gap:
-`--smooth-scale 1` gives +2.1% / +7.5%, `--smooth-scale 2.5` +2.0% / +1.6%, so the default (5) stays.
+On those 6 images, mean of λ 10-40 at RMSE / SSIM: -e 5 +9.4% / −2.7% before the first four changes, +4.0% /
+−2.2% after; -e 9 is the same as -e 5.
 
-BC4 and BC5 on Kodak-24 are ahead of Oodle at both metrics at λ 0 and λ 10-40, and close at λ 1, where Oodle
-comes out both more accurate and smaller than its own λ 0 (BC5: RMSE 2.687 at 5.69 bpt vs 2.756 at 7.43).
-The crop of kodim18 alone is behind at equal SSIM for BC4 and BC5:
+At λ 1 Oodle comes out both more accurate and smaller than its own λ 0 (BC5: RMSE 2.687 at 5.69 bpt vs 2.756
+at 7.43); mipple's BC4 is now ahead there too (−1.1% / −0.8%), BC5 (0.9.16) was +4.0% / +0.1%.
+The crop of kodim18 alone (0.9.16 numbers) is behind at equal SSIM for BC4 and BC5:
 kodim18 (512×512 crop), at RMSE / at SSIM: BC4 −5.2% / −1.5% at λ 0, then +2.8% / +4.8%, +1.2% / +6.2%,
 +0.2% / +6.7%, −0.6% / +6.6% at λ 10-40; BC5 −28.9% / −8.7% at λ 0, +5.6% / +3.8% at λ 1, then −7.3% / +2.3%,
 −12.2% / +1.0%, −14.8% / +0.4%, −17.2% / +0.7% at λ 10-40. BC1 kodim18: −7.3% at λ 0, −0.8% to −1.8% at λ 10-40 on
@@ -528,6 +545,7 @@ Later changes:
 | BC7 far search (`--far-back` 1024, BC7 window 16 KiB) | PASS: BD-rate BC7 −1.62%, others identical, total time 1.33× (synthetic; Kodak-8: BC7 −1.46%, 1.18× vs before the bound changes); synthetic baseline updated |
 | Localized BC5 search (`--local` 16: nearest 128 + 16 network-ranked + row above) | PASS: BD-rate BC5 −1.05%, others identical, total time 1.08× (synthetic; Kodak-24: BC5 −0.76%, 1.02×); synthetic baseline updated |
 | Field-swap refinement for BC7 (`--refine-back` 256, mode-6 halves scored without a decode) | PASS: BD-rate BC7 −1.13% Zstd / −0.87% Deflate, BC1/BC4/BC5 identical, total time 1.07× (synthetic; Kodak-24 −0.12%); both baselines updated |
+| Smooth weight `1 + 3 · 12² / (12² + σ²)` (was 5× ramping linearly to 1 at σ 14) | PASS: BD-rate Zstd BC1 −1.15%, BC4 −2.34%, BC5 −2.79%, BC7 −1.43% (synthetic), BC7 −3.82% (Kodak-4); same speed head-to-head on Kodak; both baselines updated |
 
 ## How to reproduce
 

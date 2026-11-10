@@ -46,9 +46,10 @@ pub struct RdoParams {
     /// cheap lower bound on its error leaves it a chance. `None` picks a per-format default
     /// ([`RdoParams::far_back_for`]); 0 disables it. BC1/BC4/BC5 only.
     pub far_back: Option<usize>,
-    /// Blocks whose largest channel standard deviation is below this count as smooth.
-    pub smooth_max_std: f32,
-    /// Distortion multiplier applied to perfectly flat blocks (scaled down to 1 at `smooth_max_std`).
+    /// Channel standard deviation at which a block gets half of `smooth_scale`'s extra weight
+    /// (see [`smooth_factor`]).
+    pub smooth_std: f32,
+    /// Distortion multiplier applied to perfectly flat blocks (falling towards 1 as they get busier).
     pub smooth_scale: f32,
     /// Reject candidates whose RMS error exceeds this multiple of the base encoding's.
     pub max_rms_ratio: f32,
@@ -88,10 +89,12 @@ impl Default for RdoParams {
             span_back: 8,
             refine_back: None,
             far_back: None,
-            // 5x ramping to 1 at std 14 (was 8x at 18): -2.3% to -3.6% Kodak-24 BD-rate on every
-            // format and ahead of Oodle Texture at both equal RMSE and equal SSIM on kodim18 BC1.
-            smooth_max_std: 14.0,
-            smooth_scale: 5.0,
+            // 4x falling as k²/(k²+std²) with k = 12 (was 5x ramping linearly to 1 at std 14): the
+            // linear ramp left busy-but-gradual blocks unprotected and over-weighted the flattest.
+            // Kodak-24 BC7 vs Oodle Texture at λ 10-40 went from +1.8..+3.1% to -0.6..-1.5% size at
+            // equal RMSE while staying ahead at equal SSIM; BC1/BC4 gained at equal RMSE too.
+            smooth_std: 12.0,
+            smooth_scale: 4.0,
             max_rms_ratio: 10.0,
             // 3 rather than 1.5: −5% BD-rate for BC4/BC5 on Kodak (smooth single-channel blocks
             // were stuck at their base encoding), BC1/BC7 within ±0.1%.
@@ -1076,6 +1079,8 @@ impl FieldsSeen {
 }
 
 /// Distortion multiplier for smooth blocks: banding on gradients is the most visible RDO artifact.
+/// `1 + (smooth_scale - 1) * k² / (k² + std²)` with `k = smooth_std` and `std` the largest channel
+/// standard deviation: full weight for flat blocks, half the extra at `k`, a long tail beyond it.
 fn smooth_factor(src: &Block, w: &[u32; 4], p: &RdoParams) -> f32 {
     let mut max_std = 0f32;
     for c in 0..4 {
@@ -1086,11 +1091,8 @@ fn smooth_factor(src: &Block, w: &[u32; 4], p: &RdoParams) -> f32 {
         let var = src.iter().map(|t| (t[c] as f32 - mean).powi(2)).sum::<f32>() / 16.0;
         max_std = max_std.max(var.sqrt());
     }
-    if max_std >= p.smooth_max_std {
-        1.0
-    } else {
-        1.0 + (p.smooth_scale - 1.0) * (1.0 - max_std / p.smooth_max_std)
-    }
+    let k2 = p.smooth_std * p.smooth_std;
+    1.0 + (p.smooth_scale - 1.0) * k2 / (k2 + max_std * max_std)
 }
 
 /// Sum of absolute differences of the first `len` bytes (a multiple of 16).

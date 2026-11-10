@@ -22,7 +22,7 @@ async function runEncode({ rgba, width, height, settings: o }) {
   s.effort = o.effort;
   s.lambda = o.lambda;
   s.smooth_scale = o.smoothScale;
-  s.smooth_max_std = o.smoothMaxStd;
+  s.smooth_std = o.smoothStd;
   s.max_rms_ratio = o.maxRmsRatio;
   s.min_rms = o.minRms;
   s.zstd = o.zstd;

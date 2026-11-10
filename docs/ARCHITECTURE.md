@@ -167,8 +167,11 @@ For each block in storage order:
    row by row once the error passes either bound; BC5 reuses the base block's half error for an unchanged half.
 5. Keep the lowest `J`, append it to the model's history.
 
-**Smooth-block protection.** Distortion is multiplied by up to `smooth_scale` for blocks whose largest
-channel standard deviation is below `smooth_max_std`, because banding on gradients is the most visible RDO artifact.
+**Smooth-block protection.** Distortion is multiplied by `1 + (smooth_scale − 1) · k² / (k² + σ²)`, where σ is
+the block's largest channel standard deviation and `k = smooth_std` (4× and 12 by default), because banding on
+gradients is the most visible RDO artifact. Flat blocks get the full weight, a block at σ = k half the extra, and
+busier blocks a tail that falls off smoothly (a linear ramp to 1 at σ 14 left gradual-but-textured blocks
+unprotected and cost 2-3% at equal RMSE against Oodle Texture on BC7).
 
 **Rate model (`LzModel`).** Greedy LZ parse over a sliding window with hash chains, plus a scan for
 matches inside the candidate itself. Literals cost order-0 entropy from the history; matches cost
