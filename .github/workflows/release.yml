@@ -4,7 +4,9 @@ name: Release
 # Cargo.toml (edit it to change major/minor); Z is the next patch after the highest vX.Y.* tag, or
 # the Cargo.toml patch if that is higher. The build stamps that version into Cargo.toml (not
 # committed) so `mipple --version` matches the tag. The first release of a new major version also
-# goes to crates.io (secret CARGO_REGISTRY_TOKEN). A commit that already has a tag is skipped.
+# goes to crates.io (secret CARGO_REGISTRY_TOKEN). A commit that already has a tag is skipped, and
+# so is one that is no longer the tip of main: the workflow token may not tag an older commit (HTTP
+# 403), and the newer commit's own release includes it.
 on:
   workflow_run:
     workflows: [CI]
@@ -40,6 +42,8 @@ jobs:
           # A re-run of an already released commit publishes nothing.
           skip=false
           if grep -q "^$SHA[[:space:]]refs/tags/v" <<< "$tags"; then skip=true; fi
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" != "$SHA" ]; then skip=true; echo "main has moved on to $tip"; fi
           last=$(sed -n "s|.*refs/tags/v$major\.$minor\.\([0-9][0-9]*\)$|\1|p" <<< "$tags" | sort -n | tail -n1)
           if [ -n "$last" ] && [ $((last + 1)) -gt "$patch" ]; then patch=$((last + 1)); fi
           echo "version=$major.$minor.$patch" >> "$GITHUB_OUTPUT"
@@ -95,6 +99,8 @@ jobs:
   publish:
     needs: [meta, build]
     runs-on: ubuntu-26.04
+    outputs:
+      released: ${{ steps.tip.outputs.go }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -107,7 +113,14 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum mipple-* > SHA256SUMS
+      # Checked again here: main can move on while the binaries build.
+      - name: Still the tip of main?
+        id: tip
+        run: |
+          tip=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+          if [ "$tip" = "$SHA" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "main has moved on to $tip; its release covers $SHA"; fi
       - name: Release
+        if: steps.tip.outputs.go == 'true'
         run: gh release create "v$VERSION" dist/* --target "$SHA" --title "mipple $VERSION" --generate-notes
 
   # crates.io gets only the first release of each major version (the X of a new X.Y.Z): the
@@ -115,6 +128,7 @@ jobs:
   # crates.io versions are permanent.
   crates:
     needs: [meta, publish]
+    if: needs.publish.outputs.released == 'true'
     runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.meta.outputs.version }}
