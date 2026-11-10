@@ -1,5 +1,8 @@
 # mipple
 
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
+
 A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC4 / BC5 / BC7**
 blocks, tuned so Zstd, Deflate or Kraken shrink them further, and stores them in **KTX2** with optional
 Zstd supercompression. GPUs read the output directly; nothing new runs at load time.
