@@ -11,7 +11,9 @@
 use super::tables::PART2;
 use super::{Bc7Block, ENTROPY, W2, W3, W4, anchors, pack};
 use crate::format::BlockOpts;
-use crate::simd::{LANES, Level, SimdF32, SimdI32, f32x8};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, SimdF32, SimdI32, f32x8};
 use crate::surface::Block;
 
 /// Interpolation weights padded for [`SimdF32::lookup17`].
@@ -945,6 +947,39 @@ fn pack_lanes(
     })
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn encode8_avx2(blocks: &[Block; LANES], opts: BlockOpts) -> [[u8; 16]; LANES] {
+    encode8::<crate::simd::avx2::F>(blocks, opts)
+}
+
+/// Encodes up to 8 blocks with effort 0 or 1. Opaque blocks go through the batch encoder;
+/// blocks with alpha use the scalar encoder.
+pub fn encode_batch(blocks: &[Block], w: &[u32; 4], opts: BlockOpts) -> Vec<[u8; 16]> {
+    debug_assert!(blocks.len() <= LANES && opts.effort <= 1);
+    let opaque = |b: &Block| b.iter().all(|t| t[3] == 255);
+    if *w != [1, 1, 1, 1] || !blocks.iter().any(opaque) {
+        return blocks.iter().map(|b| super::encode(b, w, opts)).collect();
+    }
+    // Pad with a copy of an opaque block; alpha lanes are re-encoded by the scalar encoder.
+    let fill = *blocks.iter().find(|b| opaque(b)).unwrap();
+    let lanes: [Block; LANES] = std::array::from_fn(|l| match blocks.get(l) {
+        Some(b) if opaque(b) => *b,
+        _ => fill,
+    });
+    let out = match crate::simd::level() {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
+        Level::Avx2 => unsafe { encode8_avx2(&lanes, opts) },
+        _ => encode8::<f32x8>(&lanes, opts),
+    };
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(l, b)| if opaque(b) { out[l] } else { super::encode(b, w, opts) })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,37 +1169,4 @@ mod tests {
             }
         }
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn encode8_avx2(blocks: &[Block; LANES], opts: BlockOpts) -> [[u8; 16]; LANES] {
-    encode8::<crate::simd::avx2::F>(blocks, opts)
-}
-
-/// Encodes up to 8 blocks with effort 0 or 1. Opaque blocks go through the batch encoder;
-/// blocks with alpha use the scalar encoder.
-pub fn encode_batch(blocks: &[Block], w: &[u32; 4], opts: BlockOpts) -> Vec<[u8; 16]> {
-    debug_assert!(blocks.len() <= LANES && opts.effort <= 1);
-    let opaque = |b: &Block| b.iter().all(|t| t[3] == 255);
-    if *w != [1, 1, 1, 1] || !blocks.iter().any(opaque) {
-        return blocks.iter().map(|b| super::encode(b, w, opts)).collect();
-    }
-    // Pad with a copy of an opaque block; alpha lanes are re-encoded by the scalar encoder.
-    let fill = *blocks.iter().find(|b| opaque(b)).unwrap();
-    let lanes: [Block; LANES] = std::array::from_fn(|l| match blocks.get(l) {
-        Some(b) if opaque(b) => *b,
-        _ => fill,
-    });
-    let out = match crate::simd::level() {
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
-        Level::Avx2 => unsafe { encode8_avx2(&lanes, opts) },
-        _ => encode8::<f32x8>(&lanes, opts),
-    };
-    blocks
-        .iter()
-        .enumerate()
-        .map(|(l, b)| if opaque(b) { out[l] } else { super::encode(b, w, opts) })
-        .collect()
 }

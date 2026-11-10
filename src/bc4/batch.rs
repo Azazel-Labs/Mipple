@@ -13,7 +13,9 @@
 //!
 //! Every value is a small integer held exactly in `f32`, so both backends agree bit for bit.
 
-use crate::simd::{LANES, Level, SimdF32, SimdI32, f32x8, level};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, SimdF32, SimdI32, f32x8, level};
 use crate::surface::{Block, Surface};
 
 /// Endpoint search radius of the exact encoder per effort (efforts 0-1 use [`proj8`] / [`fast8`]).
@@ -655,7 +657,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// Hand-run reports; the timing one calls the AVX2 kernel directly.
+#[cfg(all(test, target_arch = "x86_64"))]
 mod profile {
     use super::*;
 

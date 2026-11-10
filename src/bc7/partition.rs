@@ -11,7 +11,9 @@
 //! mean first, which keeps the f32 scatter accurate.
 
 use super::tables::{PART2, PART3};
-use crate::simd::{LANES, Level, SimdF32, SimdI32, f32x8};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, SimdF32, SimdI32, f32x8};
 use crate::surface::Block;
 
 /// Second-moment slots: products (a, b) with a <= b over up to 4 channels.

@@ -9,7 +9,9 @@ mod batch;
 pub use batch::{encode_block as encode_fast, encode_surface};
 
 use crate::fit::{V4, ls_endpoints, pca_endpoints};
-use crate::simd::{LANES, Level, SimdF32, SimdI32, f32x8};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, SimdF32, SimdI32, f32x8};
 use crate::surface::{Block, texel_sse};
 use std::sync::OnceLock;
 

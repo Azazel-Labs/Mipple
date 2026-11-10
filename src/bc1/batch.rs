@@ -22,7 +22,9 @@
 //! optimal single-color tables of the scalar encoder. All arithmetic is plain IEEE (with
 //! fused multiply-adds) in a fixed order, so both backends agree bit for bit.
 
-use crate::simd::{LANES, Level, SimdF32, SimdI32, f32x8, level};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, SimdF32, SimdI32, f32x8, level};
 use crate::surface::Surface;
 
 /// `floor` for non-negative lanes.
@@ -1428,6 +1430,7 @@ pub(super) fn encode_surface_cfg(surface: &Surface, cfg: Cfg) -> Vec<u8> {
 }
 
 /// Whether `cfg` searches exactly what effort 0 does.
+#[cfg(target_arch = "x86_64")]
 fn is_effort0(cfg: &Cfg) -> bool {
     cfg.refits == 0 && cfg.splits == 0 && !cfg.three && cfg.polish == 0 && cfg.refine == 0
 }

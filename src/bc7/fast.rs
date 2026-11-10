@@ -18,7 +18,9 @@
 //! in a fixed order, so both backends agree bit for bit.
 
 use crate::format::BlockOpts;
-use crate::simd::{LANES, Level, ROW_ORDER, SimdF32, SimdI32, f32x8, level};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, ROW_ORDER, SimdF32, SimdI32, f32x8, level};
 use crate::surface::Surface;
 
 /// Search configuration of the fast encoder.
