@@ -1,0 +1,15 @@
+/target
+*.ktx2
+*.decoded.png
+# Downloaded third-party corpora are fetched by scripts, never committed.
+/test-images/kodak/
+/test-images/oodle/
+/test-images/polyhaven/
+/test-images/polyhaven-test/
+/tools/bc7f/bc7f_encode
+/bench-results/**/work/
+__pycache__/
+# Third-party encoders built locally for head-to-head benchmarks, never committed.
+/third_party/
+# The browser demo's wasm-pack output (web/README.md).
+/web/www/pkg/

@@ -1,0 +1,84 @@
+[package]
+name = "mipple"
+version = "0.9.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rate-distortion optimized GPU texture encoder (BC1/BC4/BC5/BC7) with KTX2 + Zstd output"
+readme = "README.md"
+license = "MIT-0"
+publish = false
+keywords = ["texture", "compression", "bc7", "ktx2", "rdo"]
+categories = ["graphics", "compression", "game-development"]
+
+[workspace]
+# `cargo xtask fmt|clippy|ci` (alias in .cargo/config.toml).
+members = ["web", "xtask"]
+# Agent worktrees live under .claude/ and are separate checkouts, not members.
+exclude = [".claude"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# Index loops read better than iterator chains in the block and texel kernels.
+needless_range_loop = "allow"
+# Hygiene lints from pedantic and restriction that fit this code (all of pedantic is mostly cast and literal noise
+# in an encoder). Exceptions use #[expect(..., reason = "...")], which also flags an exception that no longer applies.
+allow_attributes_without_reason = "warn"
+bool_to_int_with_if = "warn"
+explicit_iter_loop = "warn"
+ignore_without_reason = "warn"
+map_unwrap_or = "warn"
+needless_for_each = "warn"
+ptr_as_ptr = "warn"
+redundant_closure_for_method_calls = "warn"
+ref_option = "warn"
+semicolon_if_nothing_returned = "warn"
+
+[lib]
+name = "mipple"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mipple"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+flate2 = "1.1.11"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga"] }
+rayon = "1.12.0"
+zstd = "0.14.3"
+
+# The encode report's timers: std::time::Instant panics in the browser (web/ builds the demo).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-time = "1.1.0"
+
+[dev-dependencies]
+ktx2 = "0.5.0"
+texture2ddecoder = "0.1.2"
+
+# Encoders are math-heavy: keep debug builds usable for tests and debugging.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+# Fast-to-build optimized profile for iterating on kernels (`cargo build --profile iter`).
+# Timings are close to release but not identical; confirm wins with a release build.
+[profile.iter]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

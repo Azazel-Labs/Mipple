@@ -1,0 +1,203 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo build (release)",
+      "type": "cargo",
+      "command": "build",
+      "args": [
+        "--release"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "cargo test (release)",
+      "type": "cargo",
+      "command": "test",
+      "args": [
+        "--release"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "cargo clippy",
+      "type": "cargo",
+      "command": "clippy",
+      "args": [
+        "--all-targets",
+        "--release"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: regression check (fast, synthetic)",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "check"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: regression check (Kodak first 4, BC7)",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "check",
+        "--corpus",
+        "test-images/kodak",
+        "--limit",
+        "4",
+        "-f",
+        "bc7"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: regression check — accept current output as baseline",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "check",
+        "--update-baseline"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: generate synthetic test images",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "synth",
+        "-o",
+        "test-images/synthetic"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: bench synthetic (all formats, λ sweep)",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "bench",
+        "test-images/synthetic",
+        "-f",
+        "bc1,bc4,bc5,bc7",
+        "-l",
+        "0,0.25,0.5,1,2,4,8",
+        "--csv",
+        "bench-results/synthetic.csv",
+        "--markdown",
+        "bench-results/synthetic.md"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: bench Kodak (run scripts/fetch-kodak first)",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "bench",
+        "test-images/kodak",
+        "-f",
+        "bc1,bc7",
+        "-l",
+        "0,0.5,1,2,4",
+        "--csv",
+        "bench-results/kodak.csv",
+        "--markdown",
+        "bench-results/kodak.md"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: encode current image (BC7, λ=1)",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "encode",
+        "${file}",
+        "-o",
+        "${fileDirname}/${fileBasenameNoExtension}.bc7.ktx2",
+        "-f",
+        "bc7",
+        "-l",
+        "1"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: decode current KTX2 to PNG",
+      "type": "cargo",
+      "command": "run",
+      "args": [
+        "--release",
+        "--",
+        "decode",
+        "${file}",
+        "-o",
+        "${fileDirname}/${fileBasenameNoExtension}.decoded.png"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "mipple: head-to-head vs bc7enc_rdo / bc7f (Kodak)",
+      "type": "shell",
+      "command": "python3 scripts/head2head.py --corpus test-images/kodak --out bench-results/h2h-kodak --mipple target/release/mipple --bc7enc ${input:bc7encPath} --bc7f tools/bc7f/bc7f_encode",
+      "dependsOn": "cargo build (release)",
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "bc7encPath",
+      "type": "promptString",
+      "description": "Path to the bc7enc_rdo binary (build: cmake + make in your bc7enc_rdo clone)",
+      "default": "../bc7enc_rdo/build/bc7enc"
+    }
+  ]
+}

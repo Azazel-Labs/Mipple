@@ -1,0 +1,309 @@
+//! Minimal KTX 2.0 writer and reader for block-compressed 2D textures.
+//!
+//! Supports BC1/BC4/BC5/BC7, full mip chains, and supercompression scheme 0 (none) or
+//! 2 (Zstandard). Layout follows the KTX 2.0 specification:
+//!
+//! ```text
+//! identifier | header | index | level index | DFD | key/value data | mip data (smallest first)
+//! ```
+
+use crate::format::Format;
+use crate::pipeline::{EncodedTexture, Level};
+use anyhow::{Context, Result, bail, ensure};
+
+pub const IDENTIFIER: [u8; 12] = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
+pub const SCHEME_NONE: u32 = 0;
+pub const SCHEME_ZSTD: u32 = 2;
+
+const HEADER_LEN: usize = 80;
+const LEVEL_ENTRY_LEN: usize = 24;
+
+/// KHR_DF color model for each format.
+fn color_model(format: Format) -> u8 {
+    match format {
+        Format::Bc1 => 128, // KHR_DF_MODEL_BC1A
+        Format::Bc4 => 131, // KHR_DF_MODEL_BC4
+        Format::Bc5 => 132, // KHR_DF_MODEL_BC5
+        Format::Bc7 => 134, // KHR_DF_MODEL_BC7
+    }
+}
+
+/// Builds the Data Format Descriptor (including the leading dfdTotalSize field).
+pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
+    // (bitOffset, bitLength - 1, channelType)
+    let samples: &[(u16, u8, u8)] = match format {
+        Format::Bc1 => &[(0, 63, 0)],
+        Format::Bc4 => &[(0, 63, 0)],
+        Format::Bc5 => &[(0, 63, 0), (64, 63, 1)],
+        Format::Bc7 => &[(0, 127, 0)],
+    };
+    let block_size = 24 + 16 * samples.len();
+    let mut v = Vec::with_capacity(4 + block_size);
+    v.extend_from_slice(&((4 + block_size) as u32).to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes()); // vendorId = Khronos, descriptorType = basic
+    v.extend_from_slice(&2u16.to_le_bytes()); // versionNumber
+    v.extend_from_slice(&(block_size as u16).to_le_bytes());
+    v.push(color_model(format));
+    v.push(1); // colorPrimaries = BT709
+    v.push(if srgb { 2 } else { 1 }); // transferFunction: sRGB or linear
+    v.push(0); // flags: straight alpha
+    v.extend_from_slice(&[3, 3, 0, 0]); // texelBlockDimension (4x4, stored minus one)
+    // bytesPlane0 is 0 ("unsized") when the data is supercompressed.
+    let bytes_plane0 = if supercompressed { 0 } else { format.block_bytes() as u8 };
+    v.extend_from_slice(&[bytes_plane0, 0, 0, 0, 0, 0, 0, 0]);
+    for &(offset, len, channel) in samples {
+        v.extend_from_slice(&offset.to_le_bytes());
+        v.push(len);
+        v.push(channel);
+        v.extend_from_slice(&[0, 0, 0, 0]); // samplePosition
+        v.extend_from_slice(&0u32.to_le_bytes()); // sampleLower
+        v.extend_from_slice(&u32::MAX.to_le_bytes()); // sampleUpper
+    }
+    v
+}
+
+fn push_kv(out: &mut Vec<u8>, key: &str, value: &str) {
+    let len = key.len() + 1 + value.len() + 1;
+    out.extend_from_slice(&(len as u32).to_le_bytes());
+    out.extend_from_slice(key.as_bytes());
+    out.push(0);
+    out.extend_from_slice(value.as_bytes());
+    out.push(0);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+}
+
+fn round_up(v: usize, a: usize) -> usize {
+    v.div_ceil(a) * a
+}
+
+/// Whether [`write`] applies the [`crate::prep`] transform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum PrepMode {
+    /// Standard KTX2: raw blocks under Zstd.
+    #[default]
+    Off,
+    /// Every level field-split before Zstd (needs mipple's reader or an equivalent inverse).
+    On,
+    /// Per level, only when the split makes it smaller.
+    Auto,
+}
+
+/// Key/value entry listing the levels stored with the [`crate::prep`] transform under Zstd: one
+/// `0`/`1` per level, level 0 first. Not part of the KTX2 standard: other readers will not undo it.
+pub const PREP_KEY: &str = "mipple.prep";
+
+/// Serializes a texture. `zstd_level = None` stores raw blocks; `Some(level)` applies Zstd per mip.
+/// With Zstd, `prep` applies the lossless [`crate::prep`] field split before compressing (`Auto`:
+/// per level, only when it makes the level smaller).
+pub fn write(
+    tex: &EncodedTexture,
+    zstd_level: Option<i32>,
+    writer_params: Option<&str>,
+    prep: PrepMode,
+) -> Result<Vec<u8>> {
+    ensure!(!tex.levels.is_empty(), "texture has no levels");
+    let supercompressed = zstd_level.is_some();
+    let mut prepped = vec![false; tex.levels.len()];
+    let payloads: Vec<Vec<u8>> = tex
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(li, l)| match zstd_level {
+            Some(z) => {
+                let plain = zstd::bulk::compress(&l.data, z).context("zstd compression failed")?;
+                if prep == PrepMode::Off {
+                    return Ok(plain);
+                }
+                let t = zstd::bulk::compress(&crate::prep::forward(tex.format, &l.data), z)
+                    .context("zstd compression failed")?;
+                if prep == PrepMode::On || t.len() < plain.len() {
+                    prepped[li] = true;
+                    Ok(t)
+                } else {
+                    Ok(plain)
+                }
+            }
+            None => Ok(l.data.clone()),
+        })
+        .collect::<Result<_>>()?;
+
+    let n = tex.levels.len();
+    let dfd = build_dfd(tex.format, tex.srgb, supercompressed);
+    let mut kvd = Vec::new();
+    // Keys must be sorted by their byte values.
+    push_kv(&mut kvd, "KTXwriter", &format!("mipple v{}", env!("CARGO_PKG_VERSION")));
+    if let Some(p) = writer_params {
+        push_kv(&mut kvd, "KTXwriterScParams", p);
+    }
+    if prepped.iter().any(|&p| p) {
+        let flags: String = prepped.iter().map(|&p| if p { '1' } else { '0' }).collect();
+        push_kv(&mut kvd, PREP_KEY, &flags);
+    }
+
+    let dfd_off = HEADER_LEN + LEVEL_ENTRY_LEN * n;
+    let kvd_off = dfd_off + dfd.len();
+    let data_start = kvd_off + kvd.len();
+    let align = if supercompressed {
+        1
+    } else {
+        // lcm(block size, 4); block sizes are 8 or 16, both multiples of 4.
+        tex.format.block_bytes()
+    };
+
+    // Mip data is stored smallest level first.
+    let mut offsets = vec![0usize; n];
+    let mut cur = data_start;
+    for li in (0..n).rev() {
+        cur = round_up(cur, align);
+        offsets[li] = cur;
+        cur += payloads[li].len();
+    }
+
+    let mut out = vec![0u8; cur];
+    let put32 = |o: &mut Vec<u8>, at: usize, v: u32| o[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |o: &mut Vec<u8>, at: usize, v: u64| o[at..at + 8].copy_from_slice(&v.to_le_bytes());
+
+    out[..12].copy_from_slice(&IDENTIFIER);
+    put32(&mut out, 12, tex.format.vk_format(tex.srgb));
+    put32(&mut out, 16, 1); // typeSize: 1 for block-compressed formats
+    put32(&mut out, 20, tex.width);
+    put32(&mut out, 24, tex.height);
+    put32(&mut out, 28, 0); // pixelDepth
+    put32(&mut out, 32, 0); // layerCount
+    put32(&mut out, 36, 1); // faceCount
+    put32(&mut out, 40, n as u32);
+    put32(&mut out, 44, if supercompressed { SCHEME_ZSTD } else { SCHEME_NONE });
+    put32(&mut out, 48, dfd_off as u32);
+    put32(&mut out, 52, dfd.len() as u32);
+    put32(&mut out, 56, if kvd.is_empty() { 0 } else { kvd_off as u32 });
+    put32(&mut out, 60, kvd.len() as u32);
+    put64(&mut out, 64, 0); // sgdByteOffset
+    put64(&mut out, 72, 0); // sgdByteLength
+
+    for li in 0..n {
+        let at = HEADER_LEN + LEVEL_ENTRY_LEN * li;
+        put64(&mut out, at, offsets[li] as u64);
+        put64(&mut out, at + 8, payloads[li].len() as u64);
+        put64(&mut out, at + 16, tex.levels[li].data.len() as u64);
+    }
+    out[dfd_off..dfd_off + dfd.len()].copy_from_slice(&dfd);
+    out[kvd_off..kvd_off + kvd.len()].copy_from_slice(&kvd);
+    for li in 0..n {
+        out[offsets[li]..offsets[li] + payloads[li].len()].copy_from_slice(&payloads[li]);
+    }
+    Ok(out)
+}
+
+/// Header fields, for `mipple info`.
+#[derive(Clone, Debug)]
+pub struct Header {
+    pub vk_format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub level_count: u32,
+    pub scheme: u32,
+    /// (byte offset, byte length, uncompressed length) per level.
+    pub levels: Vec<(u64, u64, u64)>,
+    pub key_values: Vec<(String, String)>,
+}
+
+/// Parses the header, level index and key/value data.
+pub fn read_header(bytes: &[u8]) -> Result<Header> {
+    ensure!(
+        bytes.len() >= HEADER_LEN && bytes[..12] == IDENTIFIER,
+        "not a KTX2 file"
+    );
+    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
+    let level_count = u32_at(40);
+    let n = level_count.max(1) as usize;
+    ensure!(bytes.len() >= HEADER_LEN + LEVEL_ENTRY_LEN * n, "truncated level index");
+    let levels = (0..n)
+        .map(|li| {
+            let at = HEADER_LEN + LEVEL_ENTRY_LEN * li;
+            (u64_at(at), u64_at(at + 8), u64_at(at + 16))
+        })
+        .collect();
+    let (kvd_off, kvd_len) = (u32_at(56) as usize, u32_at(60) as usize);
+    let mut key_values = Vec::new();
+    if kvd_len > 0 {
+        ensure!(kvd_off + kvd_len <= bytes.len(), "truncated key/value data");
+        let kvd = &bytes[kvd_off..kvd_off + kvd_len];
+        let mut p = 0;
+        while p + 4 <= kvd.len() {
+            let len = u32::from_le_bytes(kvd[p..p + 4].try_into().unwrap()) as usize;
+            let entry = &kvd[p + 4..(p + 4 + len).min(kvd.len())];
+            if let Some(z) = entry.iter().position(|&b| b == 0) {
+                let key = String::from_utf8_lossy(&entry[..z]).into_owned();
+                let val = entry[z + 1..].strip_suffix(&[0]).unwrap_or(&entry[z + 1..]);
+                key_values.push((key, String::from_utf8_lossy(val).into_owned()));
+            }
+            p = round_up(p + 4 + len, 4);
+        }
+    }
+    Ok(Header {
+        vk_format: u32_at(12),
+        width: u32_at(20),
+        height: u32_at(24),
+        level_count,
+        scheme: u32_at(44),
+        levels,
+        key_values,
+    })
+}
+
+/// Reads a KTX2 file written by mipple (or any 2D BC1/BC4/BC5/BC7 KTX2, scheme 0 or 2).
+pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
+    let h = read_header(bytes)?;
+    let (format, srgb) =
+        Format::from_vk(h.vk_format).with_context(|| format!("unsupported vkFormat {}", h.vk_format))?;
+    if h.scheme != SCHEME_NONE && h.scheme != SCHEME_ZSTD {
+        bail!("unsupported supercompression scheme {}", h.scheme);
+    }
+    let prep: Vec<bool> = h
+        .key_values
+        .iter()
+        .find(|(k, _)| k == PREP_KEY)
+        .map(|(_, v)| v.chars().map(|c| c == '1').collect())
+        .unwrap_or_default();
+    let mut levels = Vec::with_capacity(h.levels.len());
+    for (li, &(off, len, ulen)) in h.levels.iter().enumerate() {
+        let (off, len) = (off as usize, len as usize);
+        ensure!(off + len <= bytes.len(), "level {li} out of bounds");
+        let raw = &bytes[off..off + len];
+        let prepped = prep.get(li).copied().unwrap_or(false);
+        let mut data = if h.scheme == SCHEME_ZSTD {
+            // `ulen` is the size of the blocks; a prepped level inflates to its (larger) streams.
+            let cap = if prepped {
+                crate::prep::max_len(ulen as usize)
+            } else {
+                ulen as usize
+            };
+            zstd::bulk::decompress(raw, cap).with_context(|| format!("level {li}: zstd"))?
+        } else {
+            raw.to_vec()
+        };
+        if prepped {
+            data =
+                crate::prep::inverse(format, &data).with_context(|| format!("level {li}: malformed prep streams"))?;
+        }
+        let width = (h.width >> li).max(1);
+        let height = (h.height >> li).max(1);
+        let expected = width.div_ceil(4) as usize * height.div_ceil(4) as usize * format.block_bytes();
+        ensure!(
+            data.len() == expected,
+            "level {li}: {} bytes, expected {expected}",
+            data.len()
+        );
+        levels.push(Level { width, height, data });
+    }
+    Ok(EncodedTexture {
+        format,
+        srgb,
+        width: h.width,
+        height: h.height,
+        levels,
+    })
+}

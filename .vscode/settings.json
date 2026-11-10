@@ -1,0 +1,20 @@
+{
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.inlayHints.chainingHints.enable": false,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  },
+  "files.exclude": {
+    "**/target": true
+  },
+  "search.exclude": {
+    "**/target": true,
+    "test-images/kodak": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true
+  }
+}

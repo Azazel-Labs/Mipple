@@ -1,0 +1,28 @@
+[package]
+name = "mipple-web"
+version = "0.9.0"
+license = "MIT-0"
+edition = "2024"
+rust-version = "1.85"
+description = "mipple in the browser: WebAssembly bindings for the demo page in web/www"
+publish = false
+
+[lib]
+# cdylib for wasm-bindgen; rlib so the host build can run the unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+# The same decoders as `mipple encode`, so a dropped PNG/JPEG/TGA gives the CLI's pixels.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga"] }
+mipple = { path = ".." }
+wasm-bindgen = "0.2.104"
+
+[package.metadata.wasm-pack.profile.release]
+# The build uses SIMD128 (web/README.md), so wasm-opt must allow its features. -Os is the smallest
+# (wasm-opt 117, gzipped: -Os 814 KB, -O2 824 KB, -O3 825 KB, -Oz 827 KB; binaryen 133 is no smaller) and
+# no slower in node (BC7 λ 1 on a 512² sample: 37-38 s vs 38-40 s at -O2).
+wasm-opt = ["-Os", "--enable-simd", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals", "--enable-multivalue", "--enable-reference-types"]

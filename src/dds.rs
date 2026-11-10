@@ -1,0 +1,134 @@
+//! Minimal DDS reader/writer for BC1/BC4/BC5/BC7, so other encoders' output (bc7enc_rdo,
+//! bc7f harness, texconv...) can be scored with the same metrics and back ends as mipple.
+//!
+//! Reads legacy FourCC (DXT1, ATI1/BC4U, ATI2/BC5U) and DX10-extended headers; writes DX10.
+
+use crate::format::Format;
+use crate::pipeline::{EncodedTexture, Level};
+use anyhow::{Result, bail, ensure};
+
+const MAGIC: &[u8; 4] = b"DDS ";
+const HEADER_LEN: usize = 124;
+const DX10_LEN: usize = 20;
+
+fn dxgi(format: Format, srgb: bool) -> u32 {
+    match (format, srgb) {
+        (Format::Bc1, false) => 71,
+        (Format::Bc1, true) => 72,
+        (Format::Bc4, _) => 80,
+        (Format::Bc5, _) => 83,
+        (Format::Bc7, false) => 98,
+        (Format::Bc7, true) => 99,
+    }
+}
+
+fn from_dxgi(v: u32) -> Option<(Format, bool)> {
+    Some(match v {
+        70..=71 => (Format::Bc1, false),
+        72 => (Format::Bc1, true),
+        79..=80 => (Format::Bc4, false),
+        82..=83 => (Format::Bc5, false),
+        97..=98 => (Format::Bc7, false),
+        99 => (Format::Bc7, true),
+        _ => return None,
+    })
+}
+
+fn level_bytes(format: Format, w: u32, h: u32) -> usize {
+    w.div_ceil(4) as usize * h.div_ceil(4) as usize * format.block_bytes()
+}
+
+/// Writes a DX10-header DDS containing every level of `tex`.
+pub fn write(tex: &EncodedTexture) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(MAGIC);
+    let mut h = [0u32; 31];
+    h[0] = HEADER_LEN as u32;
+    // CAPS | HEIGHT | WIDTH | PIXELFORMAT | MIPMAPCOUNT | LINEARSIZE
+    h[1] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000;
+    h[2] = tex.height;
+    h[3] = tex.width;
+    h[4] = tex.levels[0].data.len() as u32;
+    h[6] = tex.levels.len() as u32;
+    // DDS_PIXELFORMAT at dword 18: size, flags (FOURCC), fourCC "DX10"
+    h[18] = 32;
+    h[19] = 0x4;
+    h[20] = u32::from_le_bytes(*b"DX10");
+    // caps: TEXTURE | MIPMAP | COMPLEX (the latter two only with mips)
+    h[26] = 0x1000 | if tex.levels.len() > 1 { 0x40_0008 } else { 0 };
+    for v in h {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [dxgi(tex.format, tex.srgb), 3, 0, 1, 0] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for l in &tex.levels {
+        out.extend_from_slice(&l.data);
+    }
+    out
+}
+
+/// Reads all levels present in a DDS file.
+pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
+    ensure!(bytes.len() >= 4 + HEADER_LEN && &bytes[..4] == MAGIC, "not a DDS file");
+    let dw = |i: usize| u32::from_le_bytes(bytes[4 + 4 * i..8 + 4 * i].try_into().unwrap());
+    let (height, width) = (dw(2), dw(3));
+    let mip_count = dw(6).max(1);
+    let fourcc = dw(20).to_le_bytes();
+    let mut offset = 4 + HEADER_LEN;
+    let (format, srgb) = match &fourcc {
+        b"DX10" => {
+            ensure!(bytes.len() >= offset + DX10_LEN, "truncated DX10 header");
+            let fmt = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            offset += DX10_LEN;
+            match from_dxgi(fmt) {
+                Some(f) => f,
+                None => bail!("unsupported DXGI format {fmt}"),
+            }
+        }
+        b"DXT1" => (Format::Bc1, false),
+        b"ATI1" | b"BC4U" => (Format::Bc4, false),
+        b"ATI2" | b"BC5U" => (Format::Bc5, false),
+        other => bail!("unsupported DDS FourCC {:?}", String::from_utf8_lossy(other)),
+    };
+    let mut levels = Vec::new();
+    for li in 0..mip_count {
+        let (w, h) = ((width >> li).max(1), (height >> li).max(1));
+        let n = level_bytes(format, w, h);
+        if offset + n > bytes.len() {
+            ensure!(li > 0, "DDS truncated: level 0 needs {n} bytes");
+            break; // tolerate files that claim more mips than they hold
+        }
+        levels.push(Level {
+            width: w,
+            height: h,
+            data: bytes[offset..offset + n].to_vec(),
+        });
+        offset += n;
+    }
+    Ok(EncodedTexture {
+        format,
+        srgb,
+        width,
+        height,
+        levels,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::{self, EncodeOptions};
+
+    #[test]
+    fn roundtrip() {
+        for format in Format::ALL {
+            let img = crate::synth::foliage(40);
+            let mut o = EncodeOptions::new(format);
+            o.effort = 0;
+            let (tex, _) = pipeline::encode(&img, &o);
+            let back = read(&write(&tex)).unwrap();
+            assert_eq!(back, tex, "{format}");
+        }
+    }
+}

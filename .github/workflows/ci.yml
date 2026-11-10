@@ -1,0 +1,27 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        # Pinned Ubuntu: ubuntu-latest is mid-migration to 26.04 and warns on every run.
+        os: [ubuntu-26.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Compiled dependencies, keyed on Cargo.lock and the toolchain; saved even when a step fails.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo xtask fmt --check
+      - run: cargo xtask clippy
+      - run: cargo test --release
+      - name: Regression check (synthetic corpus vs bench-results/check-baseline.csv)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo run --release -- check

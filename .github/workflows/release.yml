@@ -1,0 +1,101 @@
+name: Release
+
+# After CI passes on a push to main:
+#   - the Cargo.toml version has no tag yet -> tag vX.Y.Z and publish a release with binaries;
+#   - always -> refresh the rolling `nightly` prerelease to that commit.
+# Bump `version` in Cargo.toml to cut a release.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-26.04
+    outputs:
+      sha: ${{ steps.v.outputs.sha }}
+      version: ${{ steps.v.outputs.version }}
+      tagged: ${{ steps.v.outputs.tagged }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - id: v
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: meta
+    strategy:
+      matrix:
+        include:
+          # Oldest supported runner: the binary needs the glibc it was built against or newer.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, ext: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { os: macos-latest, target: aarch64-apple-darwin, ext: "" }
+          - { os: macos-latest, target: x86_64-apple-darwin, ext: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+      - run: cargo build --release --locked --bin mipple --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name=mipple-${{ matrix.target }}
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/mipple${{ matrix.ext }}" README.md LICENSE "$name/"
+          if [ "${{ runner.os }}" = Windows ]; then 7z a -bd "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mipple-${{ matrix.target }}
+          path: mipple-${{ matrix.target }}.*
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-26.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SHA: ${{ needs.meta.outputs.sha }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum mipple-* > SHA256SUMS
+      - name: Versioned release
+        if: needs.meta.outputs.tagged == 'false'
+        run: |
+          gh release create "v$VERSION" dist/* --target "$SHA" --title "mipple $VERSION" --generate-notes
+      - name: Nightly prerelease
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly dist/* --target "$SHA" --prerelease --title "mipple nightly ($VERSION, ${SHA::7})" \
+            --notes "Built from $SHA on main after CI passed. Rebuilt on every green push; for a fixed version use the latest vX.Y.Z release."

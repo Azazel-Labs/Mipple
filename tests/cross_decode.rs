@@ -1,0 +1,124 @@
+//! Every block we produce must decode the same way in an independent decoder, and our decoder
+//! must agree with that decoder on arbitrary BC7 bitstreams (all 8 modes).
+
+mod common;
+
+use common::{corpus, reference_decode};
+use mipple::pipeline::encode_base;
+use mipple::{BlockOpts, Format, bc7};
+
+fn channels(format: Format) -> &'static [usize] {
+    match format {
+        Format::Bc1 => &[0, 1, 2],
+        Format::Bc4 => &[0],
+        Format::Bc5 => &[0, 1],
+        Format::Bc7 => &[0, 1, 2, 3],
+    }
+}
+
+#[test]
+fn encoded_blocks_match_reference_decoder() {
+    for (name, img) in corpus(64) {
+        for format in Format::ALL {
+            for (effort, reduce_entropy) in [(0u8, false), (1, false), (5, false), (6, false), (5, true)] {
+                let opts = BlockOpts { effort, reduce_entropy };
+                let (_, blocks) = encode_base(&img, format, opts);
+                let n = format.block_bytes();
+                let mut ours = [[0u8; 4]; 16];
+                for (bi, b) in blocks.iter().enumerate() {
+                    format.decode_block(&b[..n], &mut ours);
+                    let theirs = reference_decode(format, &b[..n]);
+                    for i in 0..16 {
+                        for &c in channels(format) {
+                            assert_eq!(
+                                ours[i][c],
+                                theirs[i][c],
+                                "{name} {format} {opts:?} block {bi} texel {i} ch {c}: ours {:?} ref {:?} raw {:02x?}",
+                                ours[i],
+                                theirs[i],
+                                &b[..n]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bc7_decoder_matches_reference_on_random_blocks() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut ours = [[0u8; 4]; 16];
+    for mode in 0..8u32 {
+        for _ in 0..2000 {
+            let mut v = next() as u128 | (next() as u128) << 64;
+            v &= !((1u128 << (mode + 1)) - 1);
+            v |= 1u128 << mode;
+            let raw = v.to_le_bytes();
+            bc7::decode(&raw, &mut ours);
+            let theirs = reference_decode(Format::Bc7, &raw);
+            assert_eq!(ours, theirs, "mode {mode} raw {raw:02x?}");
+        }
+    }
+}
+
+#[test]
+fn bc7_encoder_uses_multiple_modes() {
+    // A sanity check that mode search is wired up: busy content should not be all mode 6.
+    let img = mipple::synth::bricks(64);
+    let (_, blocks) = encode_base(&img, Format::Bc7, 6);
+    let mut hist = [0usize; 8];
+    for b in &blocks {
+        hist[bc7::unpack(b).unwrap().mode as usize] += 1;
+    }
+    let used = hist.iter().filter(|&&c| c > 0).count();
+    assert!(used >= 3, "mode histogram {hist:?}");
+}
+
+#[test]
+fn bc7_reduced_entropy_mode6_endpoints() {
+    // Entropy reduction restricts mode-6 endpoints to 64 levels per channel with fixed p-bits,
+    // keeps opaque blocks exactly opaque, and makes mode 6 the majority mode.
+    let levels: Vec<u8> = (0..64).map(|j| ((j * 127 + 31) / 63) as u8).collect();
+    for (name, img) in corpus(64) {
+        let opts = BlockOpts {
+            effort: 1,
+            reduce_entropy: true,
+        };
+        let (src, blocks) = encode_base(&img, Format::Bc7, opts);
+        let (_, plain) = encode_base(&img, Format::Bc7, 1);
+        let count6 = |bs: &[[u8; 16]]| bs.iter().filter(|b| bc7::unpack(*b).unwrap().mode == 6).count();
+        assert!(count6(&blocks) >= count6(&plain), "{name}: fewer mode-6 blocks");
+        let mut dec = [[0u8; 4]; 16];
+        for (b, s) in blocks.iter().zip(&src) {
+            let blk = bc7::unpack(b).unwrap();
+            if blk.mode != 6 {
+                continue;
+            }
+            for e in 0..2 {
+                for c in 0..4 {
+                    assert!(levels.contains(&blk.ep[0][e][c]), "{name}: endpoint {:?}", blk.ep[0]);
+                }
+            }
+            let opaque = s.iter().all(|t| t[3] == 255);
+            let mut p = blk.pbits[0];
+            p.sort_unstable(); // the anchor fix-up may swap endpoints
+            if opaque {
+                assert_eq!(p, [1, 1], "{name}: opaque mode-6 block needs p-bits (1, 1)");
+            } else {
+                assert!(p == [0, 1] || p == [1, 1], "{name}: p-bits {p:?}");
+            }
+            if opaque {
+                bc7::decode(b, &mut dec);
+                assert!(dec.iter().all(|t| t[3] == 255), "{name}: opaque block lost alpha");
+            }
+        }
+    }
+}

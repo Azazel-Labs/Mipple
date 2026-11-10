@@ -1,0 +1,63 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: encode bricks (BC7, λ=1)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--bin=mipple"],
+        "filter": { "name": "mipple", "kind": "bin" }
+      },
+      "args": [
+        "encode", "test-images/synthetic/albedo_bricks.png",
+        "-o", "target/bricks.bc7.ktx2", "-f", "bc7", "-l", "1", "--no-mips"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug: encode current image (BC7, λ=1)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--bin=mipple"],
+        "filter": { "name": "mipple", "kind": "bin" }
+      },
+      "args": ["encode", "${file}", "-o", "target/current.bc7.ktx2", "-f", "bc7", "-l", "1"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug: bench synthetic (BC7)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--bin=mipple"],
+        "filter": { "name": "mipple", "kind": "bin" }
+      },
+      "args": ["bench", "test-images/synthetic", "-f", "bc7", "-l", "0,1"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug: library unit tests",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib"],
+        "filter": { "name": "mipple", "kind": "lib" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug: integration test cross_decode",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--no-run", "--test=cross_decode"],
+        "filter": { "name": "cross_decode", "kind": "test" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

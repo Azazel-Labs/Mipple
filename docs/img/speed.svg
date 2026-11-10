@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="328" viewBox="0 0 960 328" role="img" aria-labelledby="t d">
+<title id="t">Encode time vs bc7enc_rdo</title>
+<desc id="d">Per format, mean encode time per λ setting for mipple and bc7enc_rdo on the Kodak images.</desc>
+<style>
+  .bg { fill: #fcfcfb; } .ink { fill: #0b0b0b; } .ink2 { fill: #52514e; } .mute { fill: #898781; }
+  .grid { stroke: #e1e0d9; } .axis { stroke: #c3c2b7; } .ring { stroke: #fcfcfb; }
+  .s0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; }
+  .s1 { stroke: #eb6834; } .f1 { fill: #eb6834; }
+  .s2 { stroke: #1baf7a; } .f2 { fill: #1baf7a; }
+  .good { fill: #006300; } .wh { stroke: #52514e; }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #1a1a19; } .ink { fill: #f0efec; } .ink2 { fill: #c3c2b7; }
+    .grid { stroke: #2c2c2a; } .axis { stroke: #383835; } .ring { stroke: #1a1a19; }
+    .s0 { stroke: #3987e5; } .f0 { fill: #3987e5; }
+    .s1 { stroke: #d95926; } .f1 { fill: #d95926; }
+    .s2 { stroke: #199e70; } .f2 { fill: #199e70; }
+    .good { fill: #0ca30c; } .wh { stroke: #c3c2b7; }
+  }
+  text { font-family: system-ui, -apple-system, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }
+  .num { font-variant-numeric: tabular-nums; }
+</style>
+<rect class="bg" width="960" height="328" rx="12"/>
+<text class="ink" x="24" y="38" font-size="20" font-weight="600">Encode time vs bc7enc_rdo</text>
+<text class="ink2" x="24" y="60" font-size="13">Mean seconds per λ setting over the RDO sweep, Kodak (24 images, 20 threads each), lower is faster. Oodle Texture is closed source: no timing.</text>
+<line class="s0" x1="24" y1="84" x2="42" y2="84" stroke-width="2" stroke-linecap="round"/><circle class="f0 ring" cx="33" cy="84" r="4" stroke-width="2"/>
+<text class="ink2" x="50" y="88.5" font-size="13">mipple</text>
+<line class="s1" x1="116.4" y1="84" x2="134.4" y2="84" stroke-width="2" stroke-linecap="round"/><circle class="f1 ring" cx="125.4" cy="84" r="4" stroke-width="2"/>
+<text class="ink2" x="142.4" y="88.5" font-size="13">bc7enc_rdo</text>
+<line class="grid" x1="240.0" x2="240.0" y1="98" y2="274" stroke-width="1"/>
+<text class="mute num" x="240.0" y="290" font-size="11" text-anchor="middle">0 s</text>
+<line class="grid" x1="334.0" x2="334.0" y1="98" y2="274" stroke-width="1"/>
+<text class="mute num" x="334.0" y="290" font-size="11" text-anchor="middle">10 s</text>
+<line class="grid" x1="428.0" x2="428.0" y1="98" y2="274" stroke-width="1"/>
+<text class="mute num" x="428.0" y="290" font-size="11" text-anchor="middle">20 s</text>
+<line class="grid" x1="522.0" x2="522.0" y1="98" y2="274" stroke-width="1"/>
+<text class="mute num" x="522.0" y="290" font-size="11" text-anchor="middle">30 s</text>
+<line class="grid" x1="616.1" x2="616.1" y1="98" y2="274" stroke-width="1"/>
+<text class="mute num" x="616.1" y="290" font-size="11" text-anchor="middle">40 s</text>
+<line class="grid" x1="710.1" x2="710.1" y1="98" y2="274" stroke-width="1"/>
+<text class="mute num" x="710.1" y="290" font-size="11" text-anchor="middle">50 s</text>
+<text class="ink" x="228" y="125.0" font-size="13" text-anchor="end">BC1</text>
+<rect class="f0" x="240" y="109.0" width="90.7" height="11" rx="3"><title>mipple: 9.7 s mean per λ (7.8-11.7 s)</title></rect>
+<text class="ink2 num" x="336.7" y="118.5" font-size="11">9.7 s</text>
+<rect class="f1" x="240" y="122.0" width="120.6" height="11" rx="3"><title>bc7enc_rdo: 12.8 s mean per λ (11.9-13.3 s)</title></rect>
+<text class="ink2 num" x="366.6" y="131.5" font-size="11">12.8 s</text>
+<text class="good num" x="936" y="125.0" font-size="13" font-weight="600" text-anchor="end">1.33× faster</text>
+<text class="ink" x="228" y="159.0" font-size="13" text-anchor="end">BC4</text>
+<rect class="f0" x="240" y="143.0" width="49.2" height="11" rx="3"><title>mipple: 5.2 s mean per λ (4.1-5.9 s)</title></rect>
+<text class="ink2 num" x="295.2" y="152.5" font-size="11">5.2 s</text>
+<rect class="f1" x="240" y="156.0" width="83.6" height="11" rx="3"><title>bc7enc_rdo: 8.9 s mean per λ (8.3-9.4 s)</title></rect>
+<text class="ink2 num" x="329.6" y="165.5" font-size="11">8.9 s</text>
+<text class="good num" x="936" y="159.0" font-size="13" font-weight="600" text-anchor="end">1.70× faster</text>
+<text class="ink" x="228" y="193.0" font-size="13" text-anchor="end">BC5</text>
+<rect class="f0" x="240" y="177.0" width="83.1" height="11" rx="3"><title>mipple: 8.8 s mean per λ (6.6-9.8 s)</title></rect>
+<text class="ink2 num" x="329.1" y="186.5" font-size="11">8.8 s</text>
+<rect class="f1" x="240" y="190.0" width="107.8" height="11" rx="3"><title>bc7enc_rdo: 11.5 s mean per λ (10.8-12.3 s)</title></rect>
+<text class="ink2 num" x="353.8" y="199.5" font-size="11">11.5 s</text>
+<text class="good num" x="936" y="193.0" font-size="13" font-weight="600" text-anchor="end">1.30× faster</text>
+<text class="ink" x="228" y="227.0" font-size="13" text-anchor="end">BC7  vs bc7e</text>
+<rect class="f0" x="240" y="211.0" width="213.8" height="11" rx="3"><title>mipple: 22.7 s mean per λ (17.1-28.5 s)</title></rect>
+<text class="ink2 num" x="459.8" y="220.5" font-size="11">22.7 s</text>
+<rect class="f1" x="240" y="224.0" width="520.0" height="11" rx="3"><title>bc7enc_rdo (bc7e): 55.3 s mean per λ (51.8-57.8 s)</title></rect>
+<text class="ink2 num" x="766.0" y="233.5" font-size="11">55.3 s</text>
+<text class="good num" x="936" y="227.0" font-size="13" font-weight="600" text-anchor="end">2.43× faster</text>
+<text class="ink" x="228" y="261.0" font-size="13" text-anchor="end">BC7  vs -e</text>
+<rect class="f0" x="240" y="245.0" width="213.8" height="11" rx="3"><title>mipple: 22.7 s mean per λ (17.1-28.5 s)</title></rect>
+<text class="ink2 num" x="459.8" y="254.5" font-size="11">22.7 s</text>
+<rect class="f1" x="240" y="258.0" width="395.7" height="11" rx="3"><title>bc7enc_rdo (-e): 42.1 s mean per λ (38.1-44.4 s)</title></rect>
+<text class="ink2 num" x="641.7" y="267.5" font-size="11">42.1 s</text>
+<text class="good num" x="936" y="261.0" font-size="13" font-weight="600" text-anchor="end">1.85× faster</text>
+<line class="axis" x1="240" x2="240" y1="98" y2="274" stroke-width="1"/>
+<text class="mute" x="24" y="314" font-size="11">Generated by scripts/readme_charts.py · details in docs/BENCHMARKS.md</text>
+</svg>

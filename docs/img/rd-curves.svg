@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="806" viewBox="0 0 960 806" role="img" aria-labelledby="t d">
+<title id="t">Rate-distortion curves: mipple vs bc7enc_rdo</title>
+<desc id="d">Per format, Zstd-19 bits per texel against PSNR for mipple's λ sweep and bc7enc_rdo's strongest mode on the Kodak images.</desc>
+<style>
+  .bg { fill: #fcfcfb; } .ink { fill: #0b0b0b; } .ink2 { fill: #52514e; } .mute { fill: #898781; }
+  .grid { stroke: #e1e0d9; } .axis { stroke: #c3c2b7; } .ring { stroke: #fcfcfb; }
+  .s0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; }
+  .s1 { stroke: #eb6834; } .f1 { fill: #eb6834; }
+  .s2 { stroke: #1baf7a; } .f2 { fill: #1baf7a; }
+  .good { fill: #006300; } .wh { stroke: #52514e; }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #1a1a19; } .ink { fill: #f0efec; } .ink2 { fill: #c3c2b7; }
+    .grid { stroke: #2c2c2a; } .axis { stroke: #383835; } .ring { stroke: #1a1a19; }
+    .s0 { stroke: #3987e5; } .f0 { fill: #3987e5; }
+    .s1 { stroke: #d95926; } .f1 { fill: #d95926; }
+    .s2 { stroke: #199e70; } .f2 { fill: #199e70; }
+    .good { fill: #0ca30c; } .wh { stroke: #c3c2b7; }
+  }
+  text { font-family: system-ui, -apple-system, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }
+  .num { font-variant-numeric: tabular-nums; }
+</style>
+<rect class="bg" width="960" height="806" rx="12"/>
+<text class="ink" x="24" y="38" font-size="20" font-weight="600">Rate-distortion: mipple vs bc7enc_rdo</text>
+<text class="ink2" x="24" y="60" font-size="13">Kodak, 24 images · Zstd-19 bits per texel (lower is better) vs PSNR (higher is better) · each point is one λ setting</text>
+<line class="s0" x1="24" y1="82" x2="42" y2="82" stroke-width="2" stroke-linecap="round"/><circle class="f0 ring" cx="33" cy="82" r="4" stroke-width="2"/>
+<text class="ink2" x="50" y="86.5" font-size="13">mipple</text>
+<line class="s1" x1="116.4" y1="82" x2="134.4" y2="82" stroke-width="2" stroke-linecap="round"/><circle class="f1 ring" cx="125.4" cy="82" r="4" stroke-width="2"/>
+<text class="ink2" x="142.4" y="86.5" font-size="13">bc7enc_rdo (its strongest mode per format)</text>
+<text class="ink" x="24" y="116" font-size="15" font-weight="600">BC1<tspan class="ink2" font-weight="400" font-size="13">  RGB color</tspan></text>
+<text class="good num" x="24" y="136" font-size="13" font-weight="600">26.8% fewer bits than bc7enc_rdo at equal PSNR</text>
+<line class="grid" x1="64" x2="454" y1="339.4" y2="339.4" stroke-width="1"/>
+<text class="mute num" x="58" y="343.4" font-size="11" text-anchor="end">34</text>
+<line class="grid" x1="64" x2="454" y1="277.6" y2="277.6" stroke-width="1"/>
+<text class="mute num" x="58" y="281.6" font-size="11" text-anchor="end">35</text>
+<line class="grid" x1="64" x2="454" y1="215.8" y2="215.8" stroke-width="1"/>
+<text class="mute num" x="58" y="219.8" font-size="11" text-anchor="end">36</text>
+<text class="mute num" x="90.1" y="398" font-size="11" text-anchor="middle">1.5</text>
+<text class="mute num" x="210.6" y="398" font-size="11" text-anchor="middle">2.0</text>
+<text class="mute num" x="331.1" y="398" font-size="11" text-anchor="middle">2.5</text>
+<text class="mute num" x="451.6" y="398" font-size="11" text-anchor="middle">3.0</text>
+<line class="axis" x1="64" x2="454" y1="382" y2="382" stroke-width="1"/>
+<text class="mute" x="454" y="412" font-size="11" text-anchor="end">bits/texel →</text>
+<text class="mute" x="58" y="150" font-size="11" text-anchor="end">dB</text>
+<path class="s1" d="M271.5,373.9 L326.4,269.1 L375.0,210.4 L410.2,183.9 L429.5,174.5 L441.3,171.0 L450.1,170.1" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="271.5" cy="373.9" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=4: 33.44 dB, 2.253 bits/texel</title></circle>
+<circle class="f1 ring" cx="326.4" cy="269.1" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=2: 35.14 dB, 2.480 bits/texel</title></circle>
+<circle class="f1 ring" cx="375.0" cy="210.4" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=1: 36.09 dB, 2.682 bits/texel</title></circle>
+<circle class="f1 ring" cx="410.2" cy="183.9" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=0.5: 36.51 dB, 2.828 bits/texel</title></circle>
+<circle class="f1 ring" cx="429.5" cy="174.5" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=0.25: 36.67 dB, 2.908 bits/texel</title></circle>
+<circle class="f1 ring" cx="441.3" cy="171.0" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=0.1: 36.72 dB, 2.957 bits/texel</title></circle>
+<circle class="f1 ring" cx="450.1" cy="170.1" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx L18 λ=0: 36.74 dB, 2.994 bits/texel</title></circle>
+<path class="s0" d="M64.0,354.1 L162.9,261.2 L264.1,206.8 L350.0,181.7 L400.3,173.5 L425.1,171.1 L454.0,171.7" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f0 ring" cx="64.0" cy="354.1" r="4" stroke-width="2"><title>mipple e5 λ=8: 33.76 dB, 1.392 bits/texel</title></circle>
+<circle class="f0 ring" cx="162.9" cy="261.2" r="4" stroke-width="2"><title>mipple e5 λ=4: 35.26 dB, 1.802 bits/texel</title></circle>
+<circle class="f0 ring" cx="264.1" cy="206.8" r="4" stroke-width="2"><title>mipple e5 λ=2: 36.14 dB, 2.222 bits/texel</title></circle>
+<circle class="f0 ring" cx="350.0" cy="181.7" r="4" stroke-width="2"><title>mipple e5 λ=1: 36.55 dB, 2.578 bits/texel</title></circle>
+<circle class="f0 ring" cx="400.3" cy="173.5" r="4" stroke-width="2"><title>mipple e5 λ=0.5: 36.68 dB, 2.787 bits/texel</title></circle>
+<circle class="f0 ring" cx="425.1" cy="171.1" r="4" stroke-width="2"><title>mipple e5 λ=0.25: 36.72 dB, 2.890 bits/texel</title></circle>
+<circle class="f0 ring" cx="454.0" cy="171.7" r="4" stroke-width="2"><title>mipple e5 λ=0: 36.71 dB, 3.010 bits/texel</title></circle>
+<text class="ink2" x="74.0" y="358.1" font-size="12">mipple</text>
+<text class="ink2" x="281.5" y="377.9" font-size="12">bc7enc_rdo</text>
+<text class="ink" x="502" y="116" font-size="15" font-weight="600">BC4<tspan class="ink2" font-weight="400" font-size="13">  one channel</tspan></text>
+<text class="good num" x="502" y="136" font-size="13" font-weight="600">20.0% fewer bits than bc7enc_rdo at equal PSNR</text>
+<line class="grid" x1="542" x2="932" y1="356.1" y2="356.1" stroke-width="1"/>
+<text class="mute num" x="536" y="360.1" font-size="11" text-anchor="end">32.5</text>
+<line class="grid" x1="542" x2="932" y1="318.3" y2="318.3" stroke-width="1"/>
+<text class="mute num" x="536" y="322.3" font-size="11" text-anchor="end">35.0</text>
+<line class="grid" x1="542" x2="932" y1="280.5" y2="280.5" stroke-width="1"/>
+<text class="mute num" x="536" y="284.5" font-size="11" text-anchor="end">37.5</text>
+<line class="grid" x1="542" x2="932" y1="242.7" y2="242.7" stroke-width="1"/>
+<text class="mute num" x="536" y="246.7" font-size="11" text-anchor="end">40.0</text>
+<line class="grid" x1="542" x2="932" y1="204.8" y2="204.8" stroke-width="1"/>
+<text class="mute num" x="536" y="208.8" font-size="11" text-anchor="end">42.5</text>
+<line class="grid" x1="542" x2="932" y1="167.0" y2="167.0" stroke-width="1"/>
+<text class="mute num" x="536" y="171.0" font-size="11" text-anchor="end">45.0</text>
+<text class="mute num" x="557.0" y="398" font-size="11" text-anchor="middle">1.0</text>
+<text class="mute num" x="624.5" y="398" font-size="11" text-anchor="middle">1.5</text>
+<text class="mute num" x="691.9" y="398" font-size="11" text-anchor="middle">2.0</text>
+<text class="mute num" x="759.3" y="398" font-size="11" text-anchor="middle">2.5</text>
+<text class="mute num" x="826.7" y="398" font-size="11" text-anchor="middle">3.0</text>
+<text class="mute num" x="894.1" y="398" font-size="11" text-anchor="middle">3.5</text>
+<line class="axis" x1="542" x2="932" y1="382" y2="382" stroke-width="1"/>
+<text class="mute" x="932" y="412" font-size="11" text-anchor="end">bits/texel →</text>
+<text class="mute" x="536" y="150" font-size="11" text-anchor="end">dB</text>
+<path class="s1" d="M740.0,310.5 L777.7,259.8 L818.4,217.1 L860.5,190.9 L898.0,177.3 L922.9,171.2 L930.3,170.1" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="740.0" cy="310.5" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=4: 35.52 dB, 2.357 bits/texel</title></circle>
+<circle class="f1 ring" cx="777.7" cy="259.8" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=2: 38.87 dB, 2.636 bits/texel</title></circle>
+<circle class="f1 ring" cx="818.4" cy="217.1" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=1: 41.69 dB, 2.939 bits/texel</title></circle>
+<circle class="f1 ring" cx="860.5" cy="190.9" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0.5: 43.42 dB, 3.251 bits/texel</title></circle>
+<circle class="f1 ring" cx="898.0" cy="177.3" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0.25: 44.32 dB, 3.529 bits/texel</title></circle>
+<circle class="f1 ring" cx="922.9" cy="171.2" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0.1: 44.72 dB, 3.713 bits/texel</title></circle>
+<circle class="f1 ring" cx="930.3" cy="170.1" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0: 44.79 dB, 3.769 bits/texel</title></circle>
+<path class="s0" d="M542.0,373.9 L601.9,325.9 L676.7,270.8 L742.1,228.7 L807.0,199.8 L873.4,180.7 L932.0,172.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f0 ring" cx="542.0" cy="373.9" r="4" stroke-width="2"><title>mipple e5 λ=8: 31.33 dB, 0.888 bits/texel</title></circle>
+<circle class="f0 ring" cx="601.9" cy="325.9" r="4" stroke-width="2"><title>mipple e5 λ=4: 34.50 dB, 1.333 bits/texel</title></circle>
+<circle class="f0 ring" cx="676.7" cy="270.8" r="4" stroke-width="2"><title>mipple e5 λ=2: 38.14 dB, 1.887 bits/texel</title></circle>
+<circle class="f0 ring" cx="742.1" cy="228.7" r="4" stroke-width="2"><title>mipple e5 λ=1: 40.92 dB, 2.373 bits/texel</title></circle>
+<circle class="f0 ring" cx="807.0" cy="199.8" r="4" stroke-width="2"><title>mipple e5 λ=0.5: 42.83 dB, 2.854 bits/texel</title></circle>
+<circle class="f0 ring" cx="873.4" cy="180.7" r="4" stroke-width="2"><title>mipple e5 λ=0.25: 44.10 dB, 3.346 bits/texel</title></circle>
+<circle class="f0 ring" cx="932.0" cy="172.3" r="4" stroke-width="2"><title>mipple e5 λ=0: 44.65 dB, 3.781 bits/texel</title></circle>
+<text class="ink2" x="750.0" y="314.5" font-size="12">bc7enc_rdo</text>
+<text class="ink2" x="552.0" y="377.9" font-size="12">mipple</text>
+<text class="ink" x="24" y="456" font-size="15" font-weight="600">BC5<tspan class="ink2" font-weight="400" font-size="13">  normal maps (two channels)</tspan></text>
+<text class="good num" x="24" y="476" font-size="13" font-weight="600">26.1% fewer bits than bc7enc_rdo at equal PSNR</text>
+<line class="grid" x1="64" x2="454" y1="694.1" y2="694.1" stroke-width="1"/>
+<text class="mute num" x="58" y="698.1" font-size="11" text-anchor="end">32.5</text>
+<line class="grid" x1="64" x2="454" y1="656.5" y2="656.5" stroke-width="1"/>
+<text class="mute num" x="58" y="660.5" font-size="11" text-anchor="end">35.0</text>
+<line class="grid" x1="64" x2="454" y1="619.0" y2="619.0" stroke-width="1"/>
+<text class="mute num" x="58" y="623.0" font-size="11" text-anchor="end">37.5</text>
+<line class="grid" x1="64" x2="454" y1="581.4" y2="581.4" stroke-width="1"/>
+<text class="mute num" x="58" y="585.4" font-size="11" text-anchor="end">40.0</text>
+<line class="grid" x1="64" x2="454" y1="543.8" y2="543.8" stroke-width="1"/>
+<text class="mute num" x="58" y="547.8" font-size="11" text-anchor="end">42.5</text>
+<line class="grid" x1="64" x2="454" y1="506.3" y2="506.3" stroke-width="1"/>
+<text class="mute num" x="58" y="510.3" font-size="11" text-anchor="end">45.0</text>
+<text class="mute num" x="102.6" y="738" font-size="11" text-anchor="middle">2</text>
+<text class="mute num" x="169.2" y="738" font-size="11" text-anchor="middle">3</text>
+<text class="mute num" x="235.9" y="738" font-size="11" text-anchor="middle">4</text>
+<text class="mute num" x="302.6" y="738" font-size="11" text-anchor="middle">5</text>
+<text class="mute num" x="369.3" y="738" font-size="11" text-anchor="middle">6</text>
+<text class="mute num" x="436.0" y="738" font-size="11" text-anchor="middle">7</text>
+<line class="axis" x1="64" x2="454" y1="722" y2="722" stroke-width="1"/>
+<text class="mute" x="454" y="752" font-size="11" text-anchor="end">bits/texel →</text>
+<text class="mute" x="58" y="490" font-size="11" text-anchor="end">dB</text>
+<path class="s1" d="M291.2,641.6 L323.7,589.4 L358.2,550.3 L395.4,527.9 L428.6,516.0 L448.7,511.0 L453.3,510.1" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="291.2" cy="641.6" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=4: 36.00 dB, 4.828 bits/texel</title></circle>
+<circle class="f1 ring" cx="323.7" cy="589.4" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=2: 39.47 dB, 5.316 bits/texel</title></circle>
+<circle class="f1 ring" cx="358.2" cy="550.3" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=1: 42.07 dB, 5.833 bits/texel</title></circle>
+<circle class="f1 ring" cx="395.4" cy="527.9" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0.5: 43.56 dB, 6.390 bits/texel</title></circle>
+<circle class="f1 ring" cx="428.6" cy="516.0" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0.25: 44.35 dB, 6.889 bits/texel</title></circle>
+<circle class="f1 ring" cx="448.7" cy="511.0" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0.1: 44.69 dB, 7.189 bits/texel</title></circle>
+<circle class="f1 ring" cx="453.3" cy="510.1" r="4" stroke-width="2"><title>bc7enc_rdo rgbcx hr5 λ=0: 44.74 dB, 7.260 bits/texel</title></circle>
+<path class="s0" d="M64.0,713.9 L115.3,666.7 L180.3,614.8 L240.5,575.3 L306.5,545.4 L379.1,523.7 L454.0,512.2" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f0 ring" cx="64.0" cy="713.9" r="4" stroke-width="2"><title>mipple e5 λ=8: 31.18 dB, 1.422 bits/texel</title></circle>
+<circle class="f0 ring" cx="115.3" cy="666.7" r="4" stroke-width="2"><title>mipple e5 λ=4: 34.32 dB, 2.191 bits/texel</title></circle>
+<circle class="f0 ring" cx="180.3" cy="614.8" r="4" stroke-width="2"><title>mipple e5 λ=2: 37.78 dB, 3.166 bits/texel</title></circle>
+<circle class="f0 ring" cx="240.5" cy="575.3" r="4" stroke-width="2"><title>mipple e5 λ=1: 40.41 dB, 4.068 bits/texel</title></circle>
+<circle class="f0 ring" cx="306.5" cy="545.4" r="4" stroke-width="2"><title>mipple e5 λ=0.5: 42.39 dB, 5.058 bits/texel</title></circle>
+<circle class="f0 ring" cx="379.1" cy="523.7" r="4" stroke-width="2"><title>mipple e5 λ=0.25: 43.84 dB, 6.146 bits/texel</title></circle>
+<circle class="f0 ring" cx="454.0" cy="512.2" r="4" stroke-width="2"><title>mipple e5 λ=0: 44.60 dB, 7.270 bits/texel</title></circle>
+<text class="ink2" x="301.2" y="645.6" font-size="12">bc7enc_rdo</text>
+<text class="ink2" x="74.0" y="717.9" font-size="12">mipple</text>
+<text class="ink" x="502" y="456" font-size="15" font-weight="600">BC7<tspan class="ink2" font-weight="400" font-size="13">  high-quality RGB(A)</tspan></text>
+<text class="good num" x="502" y="476" font-size="13" font-weight="600">30.5% fewer bits than bc7enc_rdo (-e) at equal PSNR</text>
+<line class="grid" x1="542" x2="932" y1="684.5" y2="684.5" stroke-width="1"/>
+<text class="mute num" x="536" y="688.5" font-size="11" text-anchor="end">35.0</text>
+<line class="grid" x1="542" x2="932" y1="642.5" y2="642.5" stroke-width="1"/>
+<text class="mute num" x="536" y="646.5" font-size="11" text-anchor="end">37.5</text>
+<line class="grid" x1="542" x2="932" y1="600.4" y2="600.4" stroke-width="1"/>
+<text class="mute num" x="536" y="604.4" font-size="11" text-anchor="end">40.0</text>
+<line class="grid" x1="542" x2="932" y1="558.4" y2="558.4" stroke-width="1"/>
+<text class="mute num" x="536" y="562.4" font-size="11" text-anchor="end">42.5</text>
+<line class="grid" x1="542" x2="932" y1="516.4" y2="516.4" stroke-width="1"/>
+<text class="mute num" x="536" y="520.4" font-size="11" text-anchor="end">45.0</text>
+<text class="mute num" x="567.5" y="738" font-size="11" text-anchor="middle">2</text>
+<text class="mute num" x="637.9" y="738" font-size="11" text-anchor="middle">3</text>
+<text class="mute num" x="708.3" y="738" font-size="11" text-anchor="middle">4</text>
+<text class="mute num" x="778.7" y="738" font-size="11" text-anchor="middle">5</text>
+<text class="mute num" x="849.2" y="738" font-size="11" text-anchor="middle">6</text>
+<text class="mute num" x="919.6" y="738" font-size="11" text-anchor="middle">7</text>
+<line class="axis" x1="542" x2="932" y1="722" y2="722" stroke-width="1"/>
+<text class="mute" x="932" y="752" font-size="11" text-anchor="end">bits/texel →</text>
+<text class="mute" x="536" y="490" font-size="11" text-anchor="end">dB</text>
+<path class="s1" d="M749.5,649.8 L791.5,602.1 L829.1,567.0 L860.5,544.7 L871.4,538.8 L877.9,536.1" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="749.5" cy="649.8" r="4" stroke-width="2"><title>bc7enc_rdo bc7enc.cpp -e λ=1: 37.06 dB, 4.585 bits/texel</title></circle>
+<circle class="f1 ring" cx="791.5" cy="602.1" r="4" stroke-width="2"><title>bc7enc_rdo bc7enc.cpp -e λ=0.5: 39.90 dB, 5.181 bits/texel</title></circle>
+<circle class="f1 ring" cx="829.1" cy="567.0" r="4" stroke-width="2"><title>bc7enc_rdo bc7enc.cpp -e λ=0.25: 41.99 dB, 5.715 bits/texel</title></circle>
+<circle class="f1 ring" cx="860.5" cy="544.7" r="4" stroke-width="2"><title>bc7enc_rdo bc7enc.cpp -e λ=0.1: 43.31 dB, 6.160 bits/texel</title></circle>
+<circle class="f1 ring" cx="871.4" cy="538.8" r="4" stroke-width="2"><title>bc7enc_rdo bc7enc.cpp -e λ=0.05: 43.66 dB, 6.316 bits/texel</title></circle>
+<circle class="f1 ring" cx="877.9" cy="536.1" r="4" stroke-width="2"><title>bc7enc_rdo bc7enc.cpp -e λ=0: 43.83 dB, 6.408 bits/texel</title></circle>
+<path class="s0" d="M542.0,713.9 L594.0,661.1 L641.0,621.9 L695.4,588.8 L788.3,544.7 L847.1,523.7 L932.0,510.1" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f0 ring" cx="542.0" cy="713.9" r="4" stroke-width="2"><title>mipple e5 λ=8: 33.25 dB, 1.638 bits/texel</title></circle>
+<circle class="f0 ring" cx="594.0" cy="661.1" r="4" stroke-width="2"><title>mipple e5 λ=4: 36.39 dB, 2.377 bits/texel</title></circle>
+<circle class="f0 ring" cx="641.0" cy="621.9" r="4" stroke-width="2"><title>mipple e5 λ=2: 38.72 dB, 3.045 bits/texel</title></circle>
+<circle class="f0 ring" cx="695.4" cy="588.8" r="4" stroke-width="2"><title>mipple e5 λ=1: 40.69 dB, 3.816 bits/texel</title></circle>
+<circle class="f0 ring" cx="788.3" cy="544.7" r="4" stroke-width="2"><title>mipple e5 λ=0.5: 43.32 dB, 5.135 bits/texel</title></circle>
+<circle class="f0 ring" cx="847.1" cy="523.7" r="4" stroke-width="2"><title>mipple e5 λ=0.25: 44.56 dB, 5.970 bits/texel</title></circle>
+<circle class="f0 ring" cx="932.0" cy="510.1" r="4" stroke-width="2"><title>mipple e5 λ=0: 45.37 dB, 7.176 bits/texel</title></circle>
+<text class="ink2" x="759.5" y="653.8" font-size="12">bc7enc_rdo (-e)</text>
+<text class="ink2" x="552.0" y="717.9" font-size="12">mipple</text>
+<text class="mute" x="24" y="792" font-size="11">Generated by scripts/readme_charts.py from bench-results/compete-kodak24-rdo/rows.csv (20 threads per encoder). Details: docs/BENCHMARKS.md</text>
+</svg>

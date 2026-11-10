@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mipple: texture encoder in the browser</title>
+  <meta name="description" content="Try mipple, a rate-distortion optimized BC1/BC4/BC5/BC7 texture encoder with KTX2 + Zstd output, compiled to WebAssembly. Drop an image, move the sliders, compare pixels.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' rx='1.5' fill='%237c6cff'/%3E%3Crect x='9' width='7' height='7' rx='1.5' fill='%2322b8a6'/%3E%3Crect y='9' width='7' height='7' rx='1.5' fill='%2322b8a6'/%3E%3Crect x='9' y='9' width='7' height='7' rx='1.5' fill='%237c6cff' opacity='.55'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-label="mipple demo home">
+        <svg class="logo" viewBox="0 0 16 16" aria-hidden="true">
+          <rect width="7" height="7" rx="1.5" class="l1"/><rect x="9" width="7" height="7" rx="1.5" class="l2"/>
+          <rect y="9" width="7" height="7" rx="1.5" class="l2"/><rect x="9" y="9" width="7" height="7" rx="1.5" class="l3"/>
+        </svg>
+        <span class="name">mipple</span>
+        <span class="badge">WebAssembly demo</span>
+      </a>
+      <a class="gh" href="https://github.com/Azazel-Labs/mipple" rel="noopener">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>Source on GitHub</span>
+      </a>
+    </div>
+    <p class="lede">
+      mipple is a GPU texture encoder written in Rust: BC1, BC4, BC5 and BC7 with
+      <strong>rate-distortion optimization</strong>, written to KTX2 with Zstd. RDO nudges each block toward
+      bytes Zstd already saw, trading a little error for a smaller file. This page runs the real encoder,
+      compiled to WebAssembly, on your machine. Pick a sample or drop your own image, move the sliders, and zoom
+      in to see the blocks.
+    </p>
+  </header>
+
+  <main class="layout">
+    <section class="stage" aria-label="Image and comparison">
+      <div class="gallery" id="gallery" role="radiogroup" aria-label="Image">
+        <label class="tile upload" id="upload-tile" tabindex="0" role="button" aria-label="Choose your own image">
+          <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/avif,image/gif,image/bmp,.tga" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M5 15v3.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Your image</span>
+        </label>
+      </div>
+
+      <div class="viewer card">
+        <div class="viewer-bar">
+          <div class="seg" role="radiogroup" aria-label="Comparison" id="mode">
+            <button type="button" data-mode="split" aria-pressed="true">Split</button>
+            <button type="button" data-mode="side" aria-pressed="false">Side by side</button>
+            <button type="button" data-mode="diff" aria-pressed="false">Difference</button>
+          </div>
+          <label class="diff-gain" id="diff-gain-wrap" hidden>
+            <span>Gain</span>
+            <select id="diff-gain">
+              <option value="1">×1</option>
+              <option value="4">×4</option>
+              <option value="16" selected>×16</option>
+            </select>
+          </label>
+          <div class="spacer"></div>
+          <button type="button" class="icon-btn" id="grid" aria-pressed="false" title="4×4 block grid (G)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h14v14H3zM3 10h14M10 3v14" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+            <span class="sr">Block grid</span>
+          </button>
+          <div class="zoom">
+            <button type="button" class="icon-btn" id="zoom-out" title="Zoom out (−)" aria-label="Zoom out">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </button>
+            <button type="button" class="zoom-level" id="zoom-level" title="Fit (0) / 1:1 (1)">100%</button>
+            <button type="button" class="icon-btn" id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10M10 5v10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="view" id="view">
+          <canvas id="canvas" aria-label="Original and encoded image comparison"></canvas>
+          <span class="tag tag-left" id="tag-left">Original</span>
+          <span class="tag tag-right" id="tag-right">Encoded</span>
+          <div class="busy" id="busy" hidden><span class="spinner"></span><span id="busy-text">Encoding…</span></div>
+          <div class="placeholder" id="placeholder">Loading the encoder…</div>
+        </div>
+        <p class="hint">Drag to pan · scroll or pinch to zoom · drag the handle to compare · <kbd>0</kbd> fit · <kbd>1</kbd>–<kbd>4</kbd> 1:1 to 8:1 · <kbd>G</kbd> block grid</p>
+      </div>
+    </section>
+
+    <aside class="panel" aria-label="Encoder settings and results">
+      <section class="card controls" aria-labelledby="h-encoder">
+        <div class="card-head">
+          <h2 id="h-encoder">Encoder</h2>
+          <button type="button" class="link-btn" id="reset">Reset</button>
+        </div>
+
+        <div class="field">
+          <div class="field-label">Format</div>
+          <div class="seg seg-fill" role="radiogroup" aria-label="Format" id="format">
+            <button type="button" data-format="bc1" aria-pressed="true">BC1</button>
+            <button type="button" data-format="bc4" aria-pressed="false">BC4</button>
+            <button type="button" data-format="bc5" aria-pressed="false">BC5</button>
+            <button type="button" data-format="bc7" aria-pressed="false">BC7</button>
+          </div>
+          <p class="note" id="format-note"></p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="lambda">RDO lambda <output id="lambda-out"></output></label>
+          <input type="range" id="lambda" min="0" max="15" step="1" value="0">
+          <p class="note">How much error to accept per bit saved. 0 turns RDO off. <code>-l</code></p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="effort">Effort <output id="effort-out"></output></label>
+          <input type="range" id="effort" min="0" max="9" step="1" value="5">
+          <p class="note">Base encoder search, 0 fastest to 9 best. <code>-e</code></p>
+        </div>
+
+        <div class="field" id="entropy-field">
+          <div class="field-label">BC7 entropy reduction</div>
+          <div class="seg seg-fill" role="radiogroup" aria-label="BC7 entropy reduction" id="entropy">
+            <button type="button" data-entropy="auto" aria-pressed="true">Auto</button>
+            <button type="button" data-entropy="on" aria-pressed="false">On</button>
+            <button type="button" data-entropy="off" aria-pressed="false">Off</button>
+          </div>
+          <p class="note">Auto turns it on from λ 1. <code>--entropy</code></p>
+        </div>
+
+        <div class="checks">
+          <label class="check"><input type="checkbox" id="mips"><span>Mip chain</span></label>
+          <label class="check"><input type="checkbox" id="normal"><span>Normal map</span></label>
+        </div>
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="field">
+            <label class="field-label" for="smooth-scale">Smooth-block weight <output id="smooth-scale-out"></output></label>
+            <input type="range" id="smooth-scale" min="1" max="12" step="0.5" value="5">
+            <p class="note">Extra distortion weight on flat blocks, which protects gradients. <code>--smooth-scale</code></p>
+          </div>
+          <div class="field">
+            <label class="field-label" for="smooth-max-std">Smooth threshold <output id="smooth-max-std-out"></output></label>
+            <input type="range" id="smooth-max-std" min="0" max="40" step="1" value="14">
+            <p class="note">Blocks with a channel deviation this high or more get no extra weight. <code>--smooth-max-std</code></p>
+          </div>
+          <div class="field">
+            <label class="field-label" for="max-rms-ratio">Max error ratio <output id="max-rms-ratio-out"></output></label>
+            <input type="range" id="max-rms-ratio" min="1" max="20" step="0.5" value="10">
+            <p class="note">RDO may pick a block with up to this multiple of the base RMS error… <code>--max-rms-ratio</code></p>
+          </div>
+          <div class="field">
+            <label class="field-label" for="min-rms">Error floor <output id="min-rms-out"></output></label>
+            <input type="range" id="min-rms" min="0" max="8" step="0.5" value="3">
+            <p class="note">…or this RMS error per channel, whichever is larger. <code>--min-rms</code></p>
+          </div>
+          <div class="field two">
+            <label class="field-label" for="zstd">Zstd level</label>
+            <select id="zstd">
+              <option value="0">Off (raw)</option>
+              <option value="3">3</option>
+              <option value="9">9</option>
+              <option value="19" selected>19</option>
+              <option value="22">22</option>
+            </select>
+          </div>
+          <div class="field two">
+            <label class="field-label" for="max-size">Downscale to</label>
+            <select id="max-size">
+              <option value="256">256 px</option>
+              <option value="512">512 px</option>
+              <option value="1024" selected>1024 px</option>
+              <option value="2048">2048 px</option>
+              <option value="0">Full size</option>
+            </select>
+          </div>
+          <p class="note">Images larger than this are resized before encoding. The encoder runs on one thread here, so big images take a while.</p>
+        </details>
+      </section>
+
+      <section class="card stats" id="stats" aria-labelledby="h-result" aria-live="polite">
+        <div class="card-head">
+          <h2 id="h-result">Result</h2>
+          <span class="pill" id="status">idle</span>
+        </div>
+        <div class="hero">
+          <div class="hero-main">
+            <span class="hero-num" id="s-bpt">–</span>
+            <span class="hero-unit">bits per texel</span>
+          </div>
+          <span class="delta" id="d-bpt"></span>
+        </div>
+        <p class="hero-sub" id="s-size">Level 0 after Zstd</p>
+        <dl class="grid">
+          <div><dt>PSNR</dt><dd><span id="s-psnr">–</span><span class="delta" id="d-psnr"></span></dd></div>
+          <div><dt>RMSE</dt><dd><span id="s-rmse">–</span><span class="delta" id="d-rmse"></span></dd></div>
+          <div><dt>SSIM</dt><dd><span id="s-ssim">–</span><span class="delta" id="d-ssim"></span></dd></div>
+          <div id="normal-stat" hidden><dt>Normal error</dt><dd><span id="s-normal">–</span></dd></div>
+          <div><dt>Encode time</dt><dd><span id="s-time">–</span></dd></div>
+          <div><dt>RDO changed</dt><dd><span id="s-rdo">–</span></dd></div>
+          <div><dt>Raw blocks</dt><dd><span id="s-raw">–</span></dd></div>
+          <div><dt>.ktx2 file</dt><dd><span id="s-file">–</span></dd></div>
+        </dl>
+        <p class="note" id="s-detail"></p>
+        <a class="btn" id="download" aria-disabled="true">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10m0 0-4-4m4 4 4-4M4 15.5V17h12v-1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Download .ktx2</span>
+        </a>
+        <div class="cmd">
+          <code id="cmd"></code>
+          <button type="button" class="link-btn" id="copy-cmd">Copy</button>
+        </div>
+        <p class="note">The same command gives a byte-identical file from the native CLI.</p>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="foot">
+    <p>Everything runs locally: dropped images never leave your browser. Sample textures from
+      <a href="https://polyhaven.com/textures" rel="noopener">Poly Haven</a> (CC0), downscaled to 512×512.
+      Metrics follow <code>mipple score</code>: level 0, over the channels each format stores.
+      mipple is MIT-0 licensed, © 2026 Azazel Labs LLC.</p>
+  </footer>
+
+  <div class="drop-overlay" id="drop-overlay" hidden><div>Drop an image to encode it</div></div>
+</body>
+</html>

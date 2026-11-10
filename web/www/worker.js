@@ -1,0 +1,92 @@
+// Runs mipple (WebAssembly) off the main thread. The page terminates and respawns this worker to
+// cancel a stale encode, so it holds no state beyond the instantiated module.
+import init, { Settings, decodeImage, encode, fitImage } from "./pkg/mipple_web.js";
+
+let ready = null;
+
+function imageMessage(img) {
+  const rgba = img.rgba;
+  const msg = {
+    width: img.width,
+    height: img.height,
+    sourceWidth: img.source_width,
+    sourceHeight: img.source_height,
+    rgba,
+  };
+  img.free();
+  return [msg, [rgba.buffer]];
+}
+
+function runEncode({ rgba, width, height, settings: o }) {
+  const s = new Settings(o.format, o.entropy);
+  s.effort = o.effort;
+  s.lambda = o.lambda;
+  s.smooth_scale = o.smoothScale;
+  s.smooth_max_std = o.smoothMaxStd;
+  s.max_rms_ratio = o.maxRmsRatio;
+  s.min_rms = o.minRms;
+  s.zstd = o.zstd;
+  s.mips = o.mips;
+  s.normal = o.normal;
+  const command = s.command(o.inputName);
+  const t0 = performance.now();
+  let e;
+  try {
+    e = encode(rgba, width, height, s);
+  } finally {
+    s.free();
+  }
+  const totalMs = performance.now() - t0;
+  const ktx2 = e.take_ktx2();
+  const original = e.take_original();
+  const decoded = e.take_decoded();
+  const msg = {
+    command,
+    totalMs,
+    width: e.width,
+    height: e.height,
+    levels: e.levels,
+    rawBytes: e.raw_bytes,
+    storedBytes: e.stored_bytes,
+    fileBytes: e.file_bytes,
+    psnr: e.psnr,
+    rmse: e.rmse,
+    ssim: e.ssim,
+    normalDeg: e.normal_deg,
+    baseMs: e.base_ms,
+    rdoMs: e.rdo_ms,
+    rdoChanged: e.rdo_changed,
+    blocks: e.blocks,
+    ktx2,
+    original,
+    decoded,
+  };
+  e.free();
+  return [msg, [ktx2.buffer, original.buffer, decoded.buffer]];
+}
+
+self.onmessage = async ({ data }) => {
+  const { id, type } = data;
+  try {
+    if (type === "init") {
+      ready ??= init({ module_or_path: data.module });
+      await ready;
+      self.postMessage({ id, ok: true, result: {} });
+      return;
+    }
+    await ready;
+    let out;
+    if (type === "decode") {
+      out = imageMessage(decodeImage(new Uint8Array(data.bytes), data.maxSize));
+    } else if (type === "fit") {
+      out = imageMessage(fitImage(data.rgba, data.width, data.height, data.maxSize));
+    } else if (type === "encode") {
+      out = runEncode(data);
+    } else {
+      throw new Error(`unknown request ${type}`);
+    }
+    self.postMessage({ id, ok: true, result: out[0] }, out[1]);
+  } catch (err) {
+    self.postMessage({ id, ok: false, error: String(err?.message ?? err) });
+  }
+};

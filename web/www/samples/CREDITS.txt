@@ -1,0 +1,9 @@
+Sample textures from Poly Haven (https://polyhaven.com/textures), CC0 1.0 (public domain).
+Downscaled to 512x512 with Lanczos by web/make_samples.py.
+
+blue_painted_planks_diff.png   https://polyhaven.com/a/blue_painted_planks
+castle_brick_01_diff.png       https://polyhaven.com/a/castle_brick_01
+cobblestone_floor_13_nor.png   https://polyhaven.com/a/cobblestone_floor_13 (normal map, OpenGL)
+pine_bark_diff.png             https://polyhaven.com/a/pine_bark
+white_rough_plaster_diff.png   https://polyhaven.com/a/white_rough_plaster
+wood_table_worn_diff.png       https://polyhaven.com/a/wood_table_worn
