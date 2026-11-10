@@ -119,6 +119,31 @@ pub fn foliage(size: u32) -> Surface {
     })
 }
 
+/// Foliage cutout: leaf clusters with an alpha-0 background that still holds the busy colour the
+/// leaves were cut from, as exported cards often do.
+pub fn cutout(size: u32) -> Surface {
+    generate(size, |u, v| {
+        let a = fbm(u * 24.0, v * 24.0, 5, 21);
+        let b = fbm(u * 48.0 + 3.0, v * 48.0, 4, 22);
+        let mask = fbm(u * 6.0 + 7.0, v * 6.0, 4, 23) + 0.15 * fbm(u * 40.0, v * 40.0, 3, 24);
+        if mask > 0.62 {
+            let veins = ((u * 90.0 + a * 12.0).sin() * 0.5 + 0.5).powf(6.0);
+            let r = 0.15 + 0.35 * b + 0.3 * veins;
+            let g = 0.35 + 0.45 * a;
+            let bl = 0.10 + 0.25 * (1.0 - a) * b;
+            [to_u8(r), to_u8(g), to_u8(bl), 255]
+        } else {
+            let h = |s: u32| value_noise(u * 160.0, v * 160.0, s);
+            [
+                to_u8(0.2 + 0.7 * h(25)),
+                to_u8(0.2 + 0.6 * h(26)),
+                to_u8(0.1 + 0.8 * h(27)),
+                0,
+            ]
+        }
+    })
+}
+
 /// Grayscale roughness-style mask with sharp spots.
 pub fn roughness(size: u32) -> Surface {
     generate(size, |u, v| {

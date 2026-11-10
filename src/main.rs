@@ -175,6 +175,15 @@ struct EncodeArgs {
     /// Only encode the top level.
     #[arg(long)]
     no_mips: bool,
+    /// What alpha means. transparency: the colour under alpha 0 is bled from the visible colour
+    /// around it (no dark mip fringes) and costs no bits; data: an independent channel; auto:
+    /// transparency for BC7 colour textures.
+    #[arg(long, value_enum, default_value_t = mipple::alpha::AlphaMode::Auto)]
+    alpha: mipple::alpha::AlphaMode,
+    /// Alpha-test cutoff (0-1) whose coverage every mip keeps, for cutouts (foliage, fences)
+    /// that would otherwise thin out at a distance.
+    #[arg(long, value_parser = parse_unit)]
+    alpha_cutoff: Option<f32>,
     /// Zstd level for KTX2 supercompression; 0 stores raw blocks.
     #[arg(long, default_value_t = 19)]
     zstd: i32,
@@ -455,6 +464,14 @@ fn load_encoded(path: &std::path::Path) -> Result<mipple::EncodedTexture> {
     }
 }
 
+/// A number in 0-1 (`--alpha-cutoff`).
+fn parse_unit(s: &str) -> std::result::Result<f32, String> {
+    match s.parse::<f32>() {
+        Ok(v) if (0.0..=1.0).contains(&v) => Ok(v),
+        _ => Err(format!("expected a number from 0 to 1, got {s}")),
+    }
+}
+
 fn encode(a: EncodeArgs) -> Result<()> {
     let surface = Surface::load(&a.input)?;
     let mut opts = EncodeOptions::new(a.format);
@@ -469,6 +486,8 @@ fn encode(a: EncodeArgs) -> Result<()> {
         a.format.default_srgb()
     };
     opts.mips = !a.no_mips;
+    opts.alpha = a.alpha;
+    opts.alpha_cutoff = a.alpha_cutoff;
     opts.gpu = if a.cpu {
         mipple::GpuMode::Off
     } else if a.gpu {

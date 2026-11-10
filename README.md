@@ -106,7 +106,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 | Command | What it does |
 | --- | --- |
-| `encode IN -o OUT.ktx2\|OUT.dds [-f bc7] [-e 0-3] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw) or DDS by extension |
+| `encode IN -o OUT.ktx2\|OUT.dds [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw) or DDS by extension |
 | `decode IN.ktx2\|IN.dds -o OUT.png [--level N] [--normal]` | Decode one mip level |
 | `info IN.ktx2` | Header, per-level offsets and sizes, key/value data |
 | `compare A B [--normal]` | PSNR (RGB, per channel, luma), SSIM, normal angular error |
@@ -118,6 +118,13 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 RDO knobs (on `encode`, `bench` and `check`): `--window`, `--max-back`, `--span-back`, `--chunk-bytes`, `--smooth-scale`,
 `--max-rms-ratio`, `--min-rms`.
+
+**Alpha.** For BC7 colour textures alpha is transparency by default (`--alpha data` turns it off). The colour left under
+alpha-0 texels is replaced by a push-pull bleed of the visible colour around it, and mips average RGB weighted by alpha,
+so cutout edges get no dark or coloured fringes at a distance. Texels more than 2 texels from a visible one cost no bits:
+blocks that are hidden throughout become identical constant blocks. On a 1024² foliage cutout with busy colour under its
+mask (`synth::cutout`), files are 54% smaller without RDO and 72-78% smaller at λ 1-4, and encoding is 2-4× faster.
+`--alpha-cutoff 0.5` keeps each mip's alpha-test coverage equal to the top level's, so foliage and fences don't thin out.
 GPU compute encoders (wgpu) write exactly the CPU encoder's blocks, so the backend only changes speed. By default
 each format runs wherever it is faster (`mipple gpu` lists them); `--gpu` forces the GPU for every format that has
 a kernel and `--cpu` forces the CPU. BC4/BC5 (every effort), BC1 (efforts 0-1) and BC7 (efforts 0-5) have GPU kernels, but the

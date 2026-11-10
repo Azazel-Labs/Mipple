@@ -1,4 +1,5 @@
-//! Mip chain generation: 2x2 box filter in linear light for sRGB data, with normal renormalization.
+//! Mip chain generation: 2x2 box filter in linear light for sRGB data, with normal renormalization,
+//! and alpha as transparency or coverage ([`MipAlpha`], [`crate::alpha`]).
 
 use crate::color::{linear_to_srgb, srgb_to_linear};
 use crate::surface::Surface;
@@ -14,21 +15,47 @@ pub enum MipFilter {
     Normal,
 }
 
+/// How mips treat alpha.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MipAlpha {
+    /// Alpha is transparency: RGB is averaged weighted by alpha, so the colour under transparent
+    /// texels never reaches a visible one, and each level's hidden colour is bled from the
+    /// visible colour around it ([`crate::alpha::bleed`]).
+    pub transparency: bool,
+    /// An alpha-test cutoff (0-1): each level's alpha is scaled so as many of its texels pass the
+    /// test as of the top level's ([`crate::alpha::preserve_coverage`]).
+    pub coverage_cutoff: Option<f32>,
+}
+
 /// Full mip chain down to 1x1, starting with a copy of `top`.
 pub fn chain(top: &Surface, filter: MipFilter) -> Vec<Surface> {
+    chain_with(top, filter, MipAlpha::default())
+}
+
+/// Full mip chain down to 1x1 with `alpha`'s treatment of alpha, starting with a copy of `top`
+/// (which is not bled: callers bleed the top level they encode).
+pub fn chain_with(top: &Surface, filter: MipFilter, alpha: MipAlpha) -> Vec<Surface> {
+    let target = alpha.coverage_cutoff.map(|c| (c, crate::alpha::coverage_at(top, c)));
     let mut levels = vec![top.clone()];
     while let Some(last) = levels.last() {
         if last.width == 1 && last.height == 1 {
             break;
         }
-        let next = downsample(last, filter);
+        let mut next = downsample(last, filter, alpha.transparency);
+        if let Some((cutoff, cov)) = target {
+            crate::alpha::preserve_coverage(&mut next, cutoff, cov);
+        }
+        if alpha.transparency {
+            crate::alpha::bleed(&mut next);
+        }
         levels.push(next);
     }
     levels
 }
 
-/// One 2x2 box-filter step (odd edges clamp).
-pub fn downsample(s: &Surface, filter: MipFilter) -> Surface {
+/// One 2x2 box-filter step (odd edges clamp). With `weighted`, RGB is averaged weighted by alpha
+/// (plainly where all four texels are transparent); normal maps are never weighted.
+pub fn downsample(s: &Surface, filter: MipFilter, weighted: bool) -> Surface {
     let w = (s.width / 2).max(1);
     let h = (s.height / 2).max(1);
     let mut out = Surface::new(w, h);
@@ -44,20 +71,25 @@ pub fn downsample(s: &Surface, filter: MipFilter) -> Surface {
             ];
             let a = taps.iter().map(|t| t[3] as u32).sum::<u32>();
             let alpha = ((a + 2) / 4) as u8;
+            // Per-tap weights: alpha when weighted and some tap is visible but not all opaque
+            // (opaque texels average exactly as unweighted), else equal.
+            let by_alpha = weighted && a > 0 && a < 4 * 255;
+            let wt = |t: &crate::surface::Rgba| if by_alpha { u32::from(t[3]) } else { 1 };
+            let wsum: u32 = taps.iter().map(wt).sum();
             let rgb = match filter {
                 MipFilter::Linear => {
                     let mut c = [0u8; 3];
                     for (ch, v) in c.iter_mut().enumerate() {
-                        let sum = taps.iter().map(|t| t[ch] as u32).sum::<u32>();
-                        *v = ((sum + 2) / 4) as u8;
+                        let sum = taps.iter().map(|t| t[ch] as u32 * wt(t)).sum::<u32>();
+                        *v = ((sum + wsum / 2) / wsum) as u8;
                     }
                     c
                 }
                 MipFilter::Srgb => {
                     let mut c = [0u8; 3];
                     for (ch, v) in c.iter_mut().enumerate() {
-                        let sum: f32 = taps.iter().map(|t| srgb_to_linear(t[ch])).sum();
-                        *v = linear_to_srgb(sum / 4.0);
+                        let sum: f32 = taps.iter().map(|t| srgb_to_linear(t[ch]) * wt(t) as f32).sum();
+                        *v = linear_to_srgb(sum / wsum as f32);
                     }
                     c
                 }
@@ -99,7 +131,20 @@ mod tests {
     fn flat_normal_stays_flat() {
         let mut s = Surface::new(8, 8);
         s.pixels.iter_mut().for_each(|p| *p = [128, 128, 255, 255]);
-        let d = downsample(&s, MipFilter::Normal);
+        let d = downsample(&s, MipFilter::Normal, false);
         assert!(d.pixels.iter().all(|p| p[2] == 255 && p[0].abs_diff(128) <= 1));
+    }
+
+    /// Hidden colour under alpha 0 stays out of visible mips with transparency, and leaks in
+    /// without it.
+    #[test]
+    fn weighted_mips_keep_hidden_colour_out() {
+        let mut s = Surface::new(2, 2);
+        s.pixels = vec![[200, 100, 50, 255], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+        for filter in [MipFilter::Linear, MipFilter::Srgb] {
+            let d = downsample(&s, filter, true);
+            assert_eq!(d.pixels[0], [200, 100, 50, 64], "{filter:?}");
+            assert!(downsample(&s, filter, false).pixels[0][0] < 150, "{filter:?}");
+        }
     }
 }

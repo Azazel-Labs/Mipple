@@ -17,7 +17,8 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | --- | --- |
 | `src/surface.rs` | RGBA8 image, 4x4 block read/write with edge replication, weighted SSE |
 | `src/color.rs` | sRGB ⇄ linear, luma |
-| `src/mips.rs` | 2x2 box mip chain: linear, sRGB-correct (filter in linear light), or normal (renormalized) |
+| `src/mips.rs` | 2x2 box mip chain: linear, sRGB-correct (filter in linear light), or normal (renormalized); RGB weighted by alpha for transparency, alpha scaled to keep alpha-test coverage |
+| `src/alpha.rs` | Alpha as transparency: push-pull bleed of the colour under alpha 0, freeing hidden colour beyond a 2-texel ring before encoding, coverage-preserving alpha scaling |
 | `src/fit.rs` | PCA line fit, line-fit residual, least-squares endpoint refit (scalar) |
 | `src/simd.rs` | 8-lane SIMD types named after `std::simd`, portable and AVX2 backends, runtime dispatch |
 | `src/bc1.rs`, `src/bc1/batch.rs` | BC1 decoder, scalar reference encoder and split tables; SIMD batch encoder for every effort (line fit, 3- and 4-color cluster fits, endpoint refinement) |
@@ -215,6 +216,7 @@ first. Supercompressed files use scheme 2 (Zstandard, one frame per level) and a
 | --- | --- |
 | `tests/cross_decode.rs` | Every block we encode (all formats; efforts 0, 1 and 2, and effort 1 with entropy reduction, so both BC7 encoders) decodes identically in the independent `texture2ddecoder` crate; our BC7 decoder (including the mode-6 fast path) matches it on 16,000 random blocks across all 8 modes; entropy-reduced mode-6 blocks use only the 64 allowed levels, the right p-bits, and keep opaque blocks at alpha 255 |
 | `tests/ktx2_container.rs` | Files round-trip through our reader; the `ktx2` crate parses header, levels, DFD and writer string; DFD equals the crate's generator; mips are smallest-first and aligned |
+| `tests/alpha.rs` | Alpha as transparency on a foliage cutout: at least 20% smaller, visible texels no worse, no hidden colour in the mips |
 | `tests/quality.rs` | PSNR floors per format; effort 3 never worse than effort 0; RDO never grows real Zstd size, λ = 0 is a no-op, and the per-block error cap holds |
 | unit tests | PCA/LS math, sRGB round-trip, mip chain sizes, BC7 pack/unpack round-trip for every mode, projected vs exhaustive index search, SIMD backends bit-identical, SIMD partition fits vs the scalar line fit (single block and 8-block batch), LZ model behavior, BD-rate math (incl. a non-monotonic sweep) and the check's gates |
 | `mipple check` | No size/quality regression vs the committed baseline (CI, Linux) |

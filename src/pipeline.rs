@@ -1,8 +1,9 @@
 //! End-to-end encode/decode: image -> mips -> base blocks -> RDO -> [`EncodedTexture`].
 
+use crate::alpha::{self, AlphaMode};
 use crate::format::{BlockOpts, EntropyMode, Format};
 use crate::metrics::normal_from_rg;
-use crate::mips::{self, MipFilter};
+use crate::mips::{self, MipAlpha, MipFilter};
 use crate::rdo::{self, RdoParams, RdoStats};
 use crate::surface::{Block, Surface};
 use rayon::prelude::*;
@@ -26,6 +27,13 @@ pub struct EncodeOptions {
     pub entropy: EntropyMode,
     /// Generate a full mip chain.
     pub mips: bool,
+    /// What alpha means: with transparency, the colour under transparent texels is bled from the
+    /// visible colour around it and freed for the encoder, and mips weight RGB by alpha
+    /// ([`crate::alpha`]). [`AlphaMode::Auto`] (default) picks it for BC7 colour textures.
+    pub alpha: AlphaMode,
+    /// An alpha-test cutoff (0-1) whose coverage every mip keeps (cutouts drawn with alpha test or
+    /// alpha to coverage); `None` averages alpha plainly.
+    pub alpha_cutoff: Option<f32>,
     /// RDO settings (`lambda == 0` disables RDO).
     pub rdo: RdoParams,
     /// Where base encoding runs: [`GpuMode::Auto`] (default) uses the GPU where its encoder is the
@@ -56,6 +64,8 @@ impl EncodeOptions {
             normal_map: false,
             entropy: EntropyMode::default(),
             mips: true,
+            alpha: AlphaMode::Auto,
+            alpha_cutoff: None,
             rdo: RdoParams::default(),
             gpu: GpuMode::Auto,
         }
@@ -66,6 +76,26 @@ impl EncodeOptions {
         BlockOpts {
             effort: self.effort,
             reduce_entropy: self.entropy.resolve(self.rdo.lambda),
+        }
+    }
+
+    /// Whether alpha is treated as transparency ([`Self::alpha`]): only for formats that keep
+    /// alpha (BC7) and never for normal maps.
+    pub fn alpha_transparency(&self) -> bool {
+        self.format == Format::Bc7
+            && !self.normal_map
+            && match self.alpha {
+                AlphaMode::Auto => self.srgb,
+                AlphaMode::Transparency => true,
+                AlphaMode::Data => false,
+            }
+    }
+
+    /// How mips treat alpha.
+    pub fn mip_alpha(&self) -> MipAlpha {
+        MipAlpha {
+            transparency: self.alpha_transparency(),
+            coverage_cutoff: self.alpha_cutoff,
         }
     }
 
@@ -238,8 +268,20 @@ pub fn flatten(format: Format, blocks: &[[u8; 16]]) -> Vec<u8> {
 
 /// Encodes a surface (and optionally its mip chain).
 pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
+    // With alpha as transparency, the top level's hidden colour is bled (the mips bleed their
+    // own) and each level's colour beyond the visible texels' ring is freed before encoding.
+    let transparency = opts.alpha_transparency() && surface.has_alpha();
+    let bled;
+    let surface = if transparency {
+        let mut s = surface.clone();
+        alpha::bleed(&mut s);
+        bled = s;
+        &bled
+    } else {
+        surface
+    };
     let chain = if opts.mips {
-        mips::chain(surface, opts.mip_filter())
+        mips::chain_with(surface, opts.mip_filter(), opts.mip_alpha())
     } else {
         Vec::new()
     };
@@ -270,6 +312,8 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         .flatten()
         .filter(|g| g.encodes(opts.format));
     for level in levels_in {
+        let hidden = if transparency { alpha::hide(level) } else { None };
+        let level = hidden.as_ref().unwrap_or(level);
         let t0 = Instant::now();
         let on_gpu = gpu.and_then(|g| g.encode_surface(level, opts.format, opts.block_opts()));
         if on_gpu.is_some() {

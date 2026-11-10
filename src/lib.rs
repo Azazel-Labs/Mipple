@@ -10,6 +10,7 @@
 //! Covers BC1, BC4, BC5 and BC7 (every mode encoded and decoded),
 //! a byte-level LZ rate model shared by every format, and a KTX2 writer/reader.
 
+pub mod alpha;
 pub mod bc1;
 mod bc1_order;
 pub mod bc4;

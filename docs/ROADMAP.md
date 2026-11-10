@@ -136,7 +136,11 @@ Open for v0.9.x:
 - [ ] RDO rate model for the split layout (`--prep`), so RDO and the transform stop fighting; a KTX2
   key/value flag for the layout and a GPU (compute shader) inverse, so loaders can undo it after hardware
   decompression.
-- [ ] Better mip filters (Kaiser/Lanczos), alpha-coverage-preserving mips for cutouts.
+- [x] Alpha as transparency (BC7 colour textures by default): alpha-weighted mips, push-pull bleed of hidden colour,
+  hidden texels beyond a 2-texel ring freed for the encoder; alpha-coverage-preserving mips (`--alpha-cutoff`).
+- [ ] Alpha-weighted RGB error for partly transparent texels (per-texel weights in the BC7 encoders and RDO), and
+  RDO matching of hidden texels to anything (now they are pinned to the visible mean).
+- [ ] Better mip filters (Kaiser/Lanczos).
 - [ ] Per-role presets (`--role albedo|normal|mask|ui`) choosing format, λ and smooth protection.
 - [ ] Rate models for Kraken (if licensed) and GDeflate; `--backend` switch for verification.
 - [ ] `ktx validate` (KTX-Software) in CI.
