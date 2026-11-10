@@ -1551,12 +1551,12 @@ struct M5<V: SimdF32> {
     err: V,
 }
 
-/// Nearest 7-bit level of 8-bit targets (bit replication `2q + q / 64`): the rounded level and
-/// its neighbours. Returns (level, value).
+/// Nearest 7-bit level of 8-bit targets (multiples of 1/16; bit replication `2q + q / 64`): the
+/// exactly rounded level ([`round_level`]) and its neighbours. Returns (level, value).
 #[inline(always)]
 fn quant7<V: SimdF32>(x: V) -> (V, V) {
     let zero = V::splat(0.0);
-    let c = floor((x * V::splat(127.0 / 255.0) + V::splat(0.5)).simd_max(zero));
+    let c = round_level(x, zero, 127.0, false);
     let (mut bq, mut bv, mut be) = (zero, zero, V::splat(f32::INFINITY));
     let mut off = -1;
     while off <= 1 {
@@ -1573,105 +1573,23 @@ fn quant7<V: SimdF32>(x: V) -> (V, V) {
     (bq, bv)
 }
 
-/// Exact 2-bit indices of the channels `ch` (1 or 2 of them) between endpoint values `a` and
-/// `b`: the better of the two entries around the projection. Returns indices and error.
-#[inline(always)]
-fn index_plane<V: SimdF32, const N: usize>(t: &Texels<V>, ch: [usize; N], a: [V; N], b: [V; N]) -> ([V; 16], V) {
-    let zero = V::splat(0.0);
-    let mut dd = zero;
-    let mut d = [zero; N];
-    let mut c = 0;
-    while c < N {
-        d[c] = b[c] - a[c];
-        dd = d[c].mul_add(d[c], dd);
-        c += 1;
-    }
-    let scale = V::select(zero.simd_lt(dd), V::splat(3.0) / dd.simd_max(V::splat(1.0)), zero);
-    let inv64 = V::splat(1.0 / 64.0);
-    let mut d64 = [zero; N];
-    let mut c = 0;
-    while c < N {
-        d64[c] = d[c] * inv64;
-        c += 1;
-    }
-    let mut idx = [zero; 16];
-    let mut err = zero;
-    let mut i = 0;
-    while i < 16 {
-        let mut s = zero;
-        let mut c = 0;
-        while c < N {
-            s = (t[ch[c]][i] - a[c]).mul_add(d[c], s);
-            c += 1;
-        }
-        let j = floor((s * scale).simd_max(zero)).simd_min(V::splat(2.0));
-        let w0 = weight(j, 4);
-        let w1 = weight(j + V::splat(1.0), 4);
-        let (e0, e1) = pair_err(t, ch, i, &a, &d64, w0, w1);
-        let up = e1.simd_lt(e0);
-        idx[i] = V::select(up, j + V::splat(1.0), j);
-        err += e0.simd_min(e1);
-        i += 1;
-    }
-    (idx, err)
-}
-
-/// Least-squares endpoints of channels `ch` for 2-bit indices (unclamped lanes with a singular
-/// system keep `prev`).
-#[inline(always)]
-fn ls_plane<V: SimdF32, const N: usize>(
-    t: &Texels<V>,
-    ch: [usize; N],
-    idx: &[V; 16],
-    prev: ([V; N], [V; N]),
-) -> ([V; N], [V; N]) {
-    let zero = V::splat(0.0);
-    let one = V::splat(1.0);
-    let (mut aa, mut ab, mut bb) = (zero, zero, zero);
-    let mut ax = [zero; N];
-    let mut bx = [zero; N];
-    let inv64 = V::splat(1.0 / 64.0);
-    let mut i = 0;
-    while i < 16 {
-        let wb = weight(idx[i], 4) * inv64;
-        let wa = one - wb;
-        aa = wa.mul_add(wa, aa);
-        ab = wa.mul_add(wb, ab);
-        bb = wb.mul_add(wb, bb);
-        let mut c = 0;
-        while c < N {
-            ax[c] = wa.mul_add(t[ch[c]][i], ax[c]);
-            bx[c] = wb.mul_add(t[ch[c]][i], bx[c]);
-            c += 1;
-        }
-        i += 1;
-    }
-    let det = aa * bb - ab * ab;
-    let ok = V::splat(1e-3).simd_lt(det);
-    let inv = one / V::select(ok, det, one);
-    let full = V::splat(255.0);
-    let (mut a, mut b) = prev;
-    let mut c = 0;
-    while c < N {
-        a[c] = V::select(ok, ((bb * ax[c] - ab * bx[c]) * inv).simd_clamp(zero, full), a[c]);
-        b[c] = V::select(ok, ((aa * bx[c] - ab * ax[c]) * inv).simd_clamp(zero, full), b[c]);
-        c += 1;
-    }
-    (a, b)
-}
-
-/// Mode 5 with channel `r` in the scalar (alpha) plane: min/max then a least-squares refit for
-/// the scalar plane (8-bit endpoints), principal axis extremes then a refit for the other two
-/// channels (7-bit), each with exact 2-bit indices.
+/// Mode 5 with channel `r` in the scalar (alpha) plane, in exact integers like the mode-1 subset
+/// fits (so a GPU kernel can match it): the scalar plane's min/max (8-bit endpoints), then a
+/// least-squares refit rounded to integers; the other two channels' principal axis, endpoints at
+/// the extreme projections and one refit (7-bit levels). Both planes get exact 2-bit indices,
+/// computed on texels with the other channels zeroed, so the 3-channel helpers serve both.
 #[inline(always)]
 fn encode_m5<V: SimdF32>(t: &Texels<V>, r: usize) -> M5<V> {
     let zero = V::splat(0.0);
+    let half = V::splat(0.5);
+    let ones = [V::splat(1.0); 16];
     let (u, w) = match r {
         0 => (1, 2),
         1 => (0, 2),
         _ => (0, 1),
     };
     // Scalar plane.
+    let ts: Texels<V> = [t[r], [zero; 16], [zero; 16]];
     let (mut lo, mut hi) = (t[r][0], t[r][0]);
     let mut i = 1;
     while i < 16 {
@@ -1679,11 +1597,13 @@ fn encode_m5<V: SimdF32>(t: &Texels<V>, r: usize) -> M5<V> {
         hi = hi.simd_max(t[r][i]);
         i += 1;
     }
-    let (mut aidx, mut aerr) = index_plane(t, [r], [lo], [hi]);
+    let plane = |a: V, b: V| [[a, zero, zero], [b, zero, zero]];
+    let (mut aidx, mut aerr) = index_two(&ts, &ones, &plane(lo, hi), Two::M2);
     let mut av = [lo, hi];
-    let (na, nb) = ls_plane(t, [r], &aidx, ([lo], [hi]));
-    let (na, nb) = (floor(na[0] + V::splat(0.5)), floor(nb[0] + V::splat(0.5)));
-    let (cidx2, cerr2) = index_plane(t, [r], [na], [nb]);
+    let (na, nb, _) = ls_ends(&ts, &ones, &aidx, 4, ([lo, zero, zero], [hi, zero, zero]));
+    // Multiples of 1/16 in 0..=255: rounding is exact.
+    let (na, nb) = (floor(na[0] + half), floor(nb[0] + half));
+    let (cidx2, cerr2) = index_two(&ts, &ones, &plane(na, nb), Two::M2);
     let take = cerr2.simd_lt(aerr);
     av = [V::select(take, na, av[0]), V::select(take, nb, av[1])];
     aerr = V::select(take, cerr2, aerr);
@@ -1692,82 +1612,46 @@ fn encode_m5<V: SimdF32>(t: &Texels<V>, r: usize) -> M5<V> {
         aidx[i] = V::select(take, cidx2[i], aidx[i]);
         i += 1;
     }
-    // Color plane (channels u, w).
+    // Color plane (channels u, w): n Σxy - Σx Σy over all 16 texels, the 3-channel principal
+    // axis with the third channel empty, a 7-bit axis and the extreme projections.
+    let tc: Texels<V> = [t[u], t[w], [zero; 16]];
+    let n = V::splat(16.0);
+    let sum = [sum16!(|i| tc[0][i]), sum16!(|i| tc[1][i]), zero];
+    let cov = [
+        dot16!(|i| tc[0][i], tc[0][i]) * n - sum[0] * sum[0],
+        dot16!(|i| tc[0][i], tc[1][i]) * n - sum[0] * sum[1],
+        zero,
+        dot16!(|i| tc[1][i], tc[1][i]) * n - sum[1] * sum[1],
+        zero,
+        zero,
+    ];
+    let v = principal_axis(cov, 3);
+    let ws = {
+        let s = shrink(abs_max(&v), 6);
+        [floor(v[0] * s), floor(v[1] * s), floor(v[2] * s)]
+    };
+    let (ehi, elo) = subset_ends(&tc, &ones, n, &sum, &ws);
     let inv16 = V::splat(1.0 / 16.0);
-    let (mut mu, mut mw) = (zero, zero);
-    let mut i = 0;
-    while i < 16 {
-        mu += t[u][i];
-        mw += t[w][i];
-        i += 1;
-    }
-    let (mu, mw) = (mu * inv16, mw * inv16);
-    let (mut cuu, mut cuw, mut cww) = (zero, zero, zero);
-    let mut i = 0;
-    while i < 16 {
-        let (du, dw) = (t[u][i] - mu, t[w][i] - mw);
-        cuu = du.mul_add(du, cuu);
-        cuw = du.mul_add(dw, cuw);
-        cww = dw.mul_add(dw, cww);
-        i += 1;
-    }
-    // Principal axis of the 2x2 scatter by power iteration from the larger diagonal.
-    let big_u = cww.simd_lt(cuu);
-    let mut ax = [V::select(big_u, cuu, cuw), V::select(big_u, cuw, cww)];
-    let mut it = 0;
-    while it < 3 {
-        let n = [cuu.mul_add(ax[0], cuw * ax[1]), cuw.mul_add(ax[0], cww * ax[1])];
-        let mx = n[0].simd_max(zero - n[0]).simd_max(n[1].simd_max(zero - n[1]));
-        let s = V::select(V::splat(1e-20).simd_lt(mx), V::splat(1.0) / mx, zero);
-        ax = [n[0] * s, n[1] * s];
-        it += 1;
-    }
-    let n2 = ax[0].mul_add(ax[0], ax[1] * ax[1]);
-    let flat = n2.simd_lt(V::splat(1e-12));
-    ax = [
-        V::select(flat, V::splat(1.0), ax[0]),
-        V::select(flat, V::splat(1.0), ax[1]),
-    ];
-    let n2 = V::select(flat, V::splat(2.0), n2);
-    let (mut plo, mut phi) = (V::splat(f32::MAX), V::splat(f32::MIN));
-    let mut i = 0;
-    while i < 16 {
-        let s = (t[u][i] - mu).mul_add(ax[0], (t[w][i] - mw) * ax[1]);
-        plo = plo.simd_min(s);
-        phi = phi.simd_max(s);
-        i += 1;
-    }
-    let full = V::splat(255.0);
-    let (plo, phi) = (plo / n2, phi / n2);
-    let mut e0 = [
-        ax[0].mul_add(plo, mu).simd_clamp(zero, full),
-        ax[1].mul_add(plo, mw).simd_clamp(zero, full),
-    ];
-    let mut e1 = [
-        ax[0].mul_add(phi, mu).simd_clamp(zero, full),
-        ax[1].mul_add(phi, mw).simd_clamp(zero, full),
-    ];
+    let mut e0 = [elo[0] * inv16, elo[1] * inv16, zero];
+    let mut e1 = [ehi[0] * inv16, ehi[1] * inv16, zero];
     let mut best_q = [[zero; 2]; 2];
-    let mut best_v = [[zero; 2]; 2];
     let mut cidx = [zero; 16];
     let mut cerr = V::splat(f32::INFINITY);
-    let mut pass = 0;
-    while pass < 2 {
+    let mut it = 0;
+    while it < 2 {
         let (q00, v00) = quant7(e0[0]);
         let (q01, v01) = quant7(e0[1]);
         let (q10, v10) = quant7(e1[0]);
         let (q11, v11) = quant7(e1[1]);
-        let (ix, er) = index_plane(t, [u, w], [v00, v01], [v10, v11]);
+        let (ix, er) = index_two(&tc, &ones, &[[v00, v01, zero], [v10, v11, zero]], Two::M2);
         let take = er.simd_lt(cerr);
         cerr = V::select(take, er, cerr);
         let qs = [[q00, q01], [q10, q11]];
-        let vs = [[v00, v01], [v10, v11]];
         let mut k = 0;
         while k < 2 {
             let mut c = 0;
             while c < 2 {
                 best_q[k][c] = V::select(take, qs[k][c], best_q[k][c]);
-                best_v[k][c] = V::select(take, vs[k][c], best_v[k][c]);
                 c += 1;
             }
             k += 1;
@@ -1777,10 +1661,11 @@ fn encode_m5<V: SimdF32>(t: &Texels<V>, r: usize) -> M5<V> {
             cidx[i] = V::select(take, ix[i], cidx[i]);
             i += 1;
         }
-        if pass == 0 {
-            (e0, e1) = ls_plane(t, [u, w], &cidx, (e0, e1));
+        if it == 0 {
+            let (a, b, _) = ls_ends(&tc, &ones, &cidx, 4, (e0, e1));
+            (e0, e1) = ([a[0], a[1], zero], [b[0], b[1], zero]);
         }
-        pass += 1;
+        it += 1;
     }
     let seven = V::splat(127.0);
     let mut cq = [[seven; 3]; 2];
