@@ -666,8 +666,10 @@ fn candidates(
                 let mut e = *base;
                 e[..4].copy_from_slice(&prev[..4]);
                 let mut c = [0u8; 16];
-                c[..8].copy_from_slice(&bc1::reindex(&e[..8], src, w));
-                out.push((c, UNKNOWN));
+                let (r, err) = bc1::reindex_err(&e[..8], src, w);
+                c[..8].copy_from_slice(&r);
+                // block_err scores BC1 by RGB alone when alpha is unweighted, as reindex does.
+                out.push((c, if w[3] == 0 { err } else { UNKNOWN }));
             }
             if fields.indices.insert(field_key(&prev[4..8])) {
                 let mut ix = *base;
@@ -1503,18 +1505,15 @@ fn optimize_chunk(
                 // The value SAD and the refit residual each narrow the nearest `LOCAL7_REACH`
                 // blocks to `LOCAL7_M`; the ranker picks `local_k` of their union.
                 let rs = RankSrc7::new(s, &base, base_err, smooth as f32, lambda as f32);
-                pre7.clear();
-                res7.clear();
-                for d in back + 1..=i.min(LOCAL7_REACH) {
-                    let (v, r) = rs.prefilter(&rblocks7[i - d]);
-                    pre7.push((v, d));
-                    res7.push((r, d));
-                }
-                for l in [&mut pre7, &mut res7] {
-                    if LOCAL7_M < l.len() {
-                        l.select_nth_unstable(LOCAL7_M);
-                        l.truncate(LOCAL7_M);
-                    }
+                rs.prefilter_top(
+                    &rblocks7,
+                    i,
+                    back + 1..=i.min(LOCAL7_REACH),
+                    LOCAL7_M,
+                    &mut pre7,
+                    &mut res7,
+                );
+                for l in [&pre7, &res7] {
                     scored.extend(l.iter().map(|&(_, d)| (0.0, d)));
                 }
                 scored.sort_unstable_by_key(|e| e.1);

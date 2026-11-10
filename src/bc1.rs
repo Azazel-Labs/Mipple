@@ -13,7 +13,7 @@ use crate::fit::{V4, ls_endpoints, pca_endpoints};
 #[cfg(target_arch = "x86_64")]
 use crate::simd::Level;
 use crate::simd::{LANES, SimdF32, SimdI32, f32x8};
-use crate::surface::{Block, texel_sse};
+use crate::surface::Block;
 use std::sync::OnceLock;
 
 #[inline]
@@ -89,6 +89,15 @@ pub fn decode(raw: &[u8], out: &mut Block) {
 /// above `bound`); otherwise it is exact.
 #[inline]
 pub fn sse_bounded(raw: &[u8], px: &Block, w: [u32; 3], bound: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if w == [1, 1, 1] && crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 is available (checked above).
+        return unsafe { avx2::sse(raw, px) };
+    }
+    sse_bounded_generic(raw, px, w, bound)
+}
+
+fn sse_bounded_generic(raw: &[u8], px: &Block, w: [u32; 3], bound: u64) -> u64 {
     let c0 = u16::from_le_bytes([raw[0], raw[1]]);
     let c1 = u16::from_le_bytes([raw[2], raw[3]]);
     let pal = palette(c0, c1);
@@ -112,23 +121,162 @@ pub fn sse_bounded(raw: &[u8], px: &Block, w: [u32; 3], bound: u64) -> u64 {
     e
 }
 
-/// Picks the best index per texel for a fixed palette. Returns (index bits, weighted SSE).
+/// Picks the best index per texel for a fixed palette (the first of equally good entries).
+/// Returns (index bits, weighted RGB SSE). Planar so the 16 texels vectorize.
 fn assign(px: &Block, pal: &[[u8; 4]; 4], w: &[u32; 4]) -> (u32, u64) {
-    let wrgb = [w[0], w[1], w[2], 0];
-    let mut bits = 0u32;
-    let mut err = 0u64;
+    #[cfg(target_arch = "x86_64")]
+    if w[..3] == [1, 1, 1] && crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 is available (checked above).
+        return unsafe { avx2::assign(px, pal) };
+    }
+    assign_generic(px, pal, w)
+}
+
+fn assign_generic(px: &Block, pal: &[[u8; 4]; 4], w: &[u32; 4]) -> (u32, u64) {
+    let mut ch = [[0i32; 16]; 3];
     for (i, t) in px.iter().enumerate() {
-        let mut best = (u32::MAX, 0u32);
-        for (k, p) in pal.iter().enumerate() {
-            let e = texel_sse(t, p, &wrgb);
-            if e < best.0 {
-                best = (e, k as u32);
+        for c in 0..3 {
+            ch[c][i] = i32::from(t[c]);
+        }
+    }
+    let mut best = [u32::MAX; 16];
+    let mut idx = [0u32; 16];
+    for (k, p) in pal.iter().enumerate() {
+        let mut e = [0u32; 16];
+        for c in 0..3 {
+            let (pc, wc) = (i32::from(p[c]), w[c]);
+            for (e, &t) in e.iter_mut().zip(&ch[c]) {
+                let d = t - pc;
+                *e += wc * (d * d) as u32;
             }
         }
-        bits |= best.1 << (2 * i);
-        err += best.0 as u64;
+        for i in 0..16 {
+            if e[i] < best[i] {
+                best[i] = e[i];
+                idx[i] = k as u32;
+            }
+        }
     }
-    (bits, err)
+    let bits = idx.iter().enumerate().fold(0u32, |b, (i, &k)| b | k << (2 * i));
+    (bits, best.iter().map(|&e| u64::from(e)).sum())
+}
+
+/// AVX2 kernels for unit RGB weights, the 16 texels of a block as i16 lanes. Same results as
+/// the scalar code.
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use super::palette;
+    use crate::surface::Block;
+    use std::arch::x86_64::*;
+
+    /// Index byte `b` of a BC1 block spread to four bytes, one 2-bit index each.
+    static SPREAD: [u32; 256] = {
+        let mut t = [0u32; 256];
+        let mut b = 0;
+        while b < 256 {
+            let b32 = b as u32;
+            t[b] = (b32 & 3) | ((b32 >> 2) & 3) << 8 | ((b32 >> 4) & 3) << 16 | (b32 >> 6) << 24;
+            b += 1;
+        }
+        t
+    };
+
+    /// R, G and B of the 16 texels.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn planar(px: &Block) -> [__m256i; 3] {
+        // SAFETY: a Block is 64 bytes; unaligned loads.
+        let (a, b) = unsafe {
+            let p = px.as_ptr().cast::<__m256i>();
+            (_mm256_loadu_si256(p), _mm256_loadu_si256(p.add(1)))
+        };
+        // Per 128-bit lane (4 texels): RRRR GGGG BBBB AAAA; then qwords R0-7 G0-7 B0-7 A0-7.
+        let m = _mm256_setr_epi8(
+            0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
+        );
+        let perm = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        let a = _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(a, m), perm);
+        let b = _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(b, m), perm);
+        let rb = _mm256_unpacklo_epi64(a, b);
+        let ga = _mm256_unpackhi_epi64(a, b);
+        [
+            _mm256_cvtepu8_epi16(_mm256_castsi256_si128(rb)),
+            _mm256_cvtepu8_epi16(_mm256_castsi256_si128(ga)),
+            _mm256_cvtepu8_epi16(_mm256_extracti128_si256::<1>(rb)),
+        ]
+    }
+
+    /// Per-texel RGB SSE against `p`, as i32 lanes for texels [0-3, 8-11] and [4-7, 12-15].
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn err16(t: &[__m256i; 3], p: &[__m256i; 3]) -> [__m256i; 2] {
+        let dr = _mm256_sub_epi16(t[0], p[0]);
+        let dg = _mm256_sub_epi16(t[1], p[1]);
+        let db = _mm256_sub_epi16(t[2], p[2]);
+        let z = _mm256_setzero_si256();
+        let sq = |x: __m256i| _mm256_madd_epi16(x, x);
+        [
+            _mm256_add_epi32(sq(_mm256_unpacklo_epi16(dr, dg)), sq(_mm256_unpacklo_epi16(db, z))),
+            _mm256_add_epi32(sq(_mm256_unpackhi_epi16(dr, dg)), sq(_mm256_unpackhi_epi16(db, z))),
+        ]
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn hsum(v: __m256i) -> u32 {
+        let v = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+        let v = _mm_add_epi32(v, _mm_shuffle_epi32::<0b01_00_11_10>(v));
+        let v = _mm_add_epi32(v, _mm_shuffle_epi32::<0b10_11_00_01>(v));
+        _mm_cvtsi128_si32(v) as u32
+    }
+
+    /// `super::assign` with weights [1, 1, 1, _].
+    #[target_feature(enable = "avx2")]
+    pub fn assign(px: &Block, pal: &[[u8; 4]; 4]) -> (u32, u64) {
+        let t = planar(px);
+        let mut best = [_mm256_set1_epi32(i32::MAX); 2];
+        let mut idx = [_mm256_setzero_si256(); 2];
+        for (k, p) in pal.iter().enumerate() {
+            let pv = [0, 1, 2].map(|c| _mm256_set1_epi16(i16::from(p[c])));
+            let e = err16(&t, &pv);
+            let kv = _mm256_set1_epi32(k as i32);
+            for h in 0..2 {
+                // Strictly better only: the first of equally good entries wins.
+                let m = _mm256_cmpgt_epi32(best[h], e[h]);
+                best[h] = _mm256_min_epi32(best[h], e[h]);
+                idx[h] = _mm256_blendv_epi8(idx[h], kv, m);
+            }
+        }
+        let lo = _mm256_sllv_epi32(idx[0], _mm256_setr_epi32(0, 2, 4, 6, 16, 18, 20, 22));
+        let hi = _mm256_sllv_epi32(idx[1], _mm256_setr_epi32(8, 10, 12, 14, 24, 26, 28, 30));
+        let v = _mm256_or_si256(lo, hi);
+        let v = _mm_or_si128(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+        let v = _mm_or_si128(v, _mm_shuffle_epi32::<0b01_00_11_10>(v));
+        let v = _mm_or_si128(v, _mm_shuffle_epi32::<0b10_11_00_01>(v));
+        let bits = _mm_cvtsi128_si32(v) as u32;
+        (bits, u64::from(hsum(_mm256_add_epi32(best[0], best[1]))))
+    }
+
+    /// Exact RGB SSE of an encoded block (`super::sse_bounded` with unit weights).
+    #[target_feature(enable = "avx2")]
+    pub fn sse(raw: &[u8], px: &Block) -> u64 {
+        let pal = palette(
+            u16::from_le_bytes([raw[0], raw[1]]),
+            u16::from_le_bytes([raw[2], raw[3]]),
+        );
+        let ix = _mm_setr_epi32(
+            SPREAD[raw[4] as usize] as i32,
+            SPREAD[raw[5] as usize] as i32,
+            SPREAD[raw[6] as usize] as i32,
+            SPREAD[raw[7] as usize] as i32,
+        );
+        let p = [0, 1, 2].map(|c| {
+            let lut = _mm_cvtsi32_si128(i32::from_le_bytes([pal[0][c], pal[1][c], pal[2][c], pal[3][c]]));
+            _mm256_cvtepu8_epi16(_mm_shuffle_epi8(lut, ix))
+        });
+        let e = err16(&planar(px), &p);
+        u64::from(hsum(_mm256_add_epi32(e[0], e[1])))
+    }
 }
 
 fn to_bytes(c0: u16, c1: u16, bits: u32) -> [u8; 8] {
@@ -220,7 +368,7 @@ fn encode_solid(px: &Block, w: &[u32; 4]) -> ([u8; 8], u64) {
 const T4: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
 
 fn refit_from_bits(bits: u32, pts: &[V4]) -> Option<(V4, V4)> {
-    let t: Vec<f32> = (0..16).map(|i| T4[((bits >> (2 * i)) & 3) as usize]).collect();
+    let t: [f32; 16] = std::array::from_fn(|i| T4[((bits >> (2 * i)) & 3) as usize]);
     ls_endpoints(pts, &t, 3)
 }
 
@@ -741,10 +889,15 @@ fn refine_neighbors(mut best: ([u8; 8], u64), px: &Block, w: &[u32; 4], passes: 
 
 /// Keeps the endpoint bytes of `raw` and re-chooses every index. Used by RDO.
 pub fn reindex(raw: &[u8], px: &Block, w: &[u32; 4]) -> [u8; 8] {
+    reindex_err(raw, px, w).0
+}
+
+/// [`reindex`] plus the result's weighted RGB SSE (alpha ignored).
+pub fn reindex_err(raw: &[u8], px: &Block, w: &[u32; 4]) -> ([u8; 8], u64) {
     let c0 = u16::from_le_bytes([raw[0], raw[1]]);
     let c1 = u16::from_le_bytes([raw[2], raw[3]]);
-    let (bits, _) = assign(px, &palette(c0, c1), w);
-    to_bytes(c0, c1, bits)
+    let (bits, err) = assign(px, &palette(c0, c1), w);
+    (to_bytes(c0, c1, bits), err)
 }
 
 /// Keeps the index bytes of `raw` and least-squares refits the endpoints. Used by RDO.
@@ -756,10 +909,7 @@ pub fn refit(raw: &[u8], px: &Block) -> Option<[u8; 8]> {
         return None;
     }
     let bits = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-    let pts: Vec<V4> = px
-        .iter()
-        .map(|t| [t[0] as f32, t[1] as f32, t[2] as f32, 0.0])
-        .collect();
+    let pts: [V4; 16] = std::array::from_fn(|i| [px[i][0] as f32, px[i][1] as f32, px[i][2] as f32, 0.0]);
     let (a, b) = refit_from_bits(bits, &pts)?;
     let (n0, n1) = (pack565(quant565(&a)), pack565(quant565(&b)));
     if n0 <= n1 {
@@ -788,6 +938,48 @@ mod tests {
                     }
                 }
                 assert_eq!(table[v as usize], (best.1 as u8, best.2 as u8), "levels {levels} v {v}");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_kernels_match_generic() {
+        if crate::simd::level() != crate::simd::Level::Avx2 {
+            return;
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let w = [1, 1, 1, 0];
+        for n in 0..20_000 {
+            // Mix noisy blocks with near-flat ones so ties between palette entries happen.
+            let spread = [255u64, 8, 1][n % 3];
+            let base = next();
+            let px: Block = std::array::from_fn(|_| {
+                std::array::from_fn(|c| ((base >> (8 * c)) as u8).wrapping_add((next() % (spread + 1)) as u8))
+            });
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&next().to_le_bytes());
+            if n % 5 == 0 {
+                raw.copy_within(..2, 2);
+            }
+            let pal = palette(
+                u16::from_le_bytes([raw[0], raw[1]]),
+                u16::from_le_bytes([raw[2], raw[3]]),
+            );
+            // SAFETY: AVX2 checked above.
+            unsafe {
+                assert_eq!(avx2::assign(&px, &pal), assign_generic(&px, &pal, &w), "block {n}");
+                assert_eq!(
+                    avx2::sse(&raw, &px),
+                    sse_bounded_generic(&raw, &px, [1, 1, 1], u64::MAX),
+                    "block {n}"
+                );
             }
         }
     }

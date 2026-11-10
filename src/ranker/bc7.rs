@@ -222,6 +222,48 @@ fn cross_sq(s: &RankBlock7, p: &RankBlock7) -> [u32; 4] {
     }
 }
 
+/// [`RankSrc7::prefilter_top`] with the key function `key`. Each list collects pairs below its
+/// current `m`-th smallest, and is cut back to `m` whenever it holds `4m`.
+#[inline(always)]
+fn top_with(
+    blocks: &[RankBlock7],
+    i: usize,
+    ds: std::ops::RangeInclusive<usize>,
+    m: usize,
+    pre: &mut Vec<(u32, usize)>,
+    res: &mut Vec<(u32, usize)>,
+    mut key: impl FnMut(&RankBlock7) -> (u32, u32),
+) {
+    let cap = 4 * m.max(1);
+    let (mut tp, mut tr) = ((u32::MAX, usize::MAX), (u32::MAX, usize::MAX));
+    let cut = |l: &mut Vec<(u32, usize)>, t: &mut (u32, usize)| {
+        l.select_nth_unstable(m - 1);
+        l.truncate(m);
+        *t = l[m - 1];
+    };
+    for d in ds {
+        let (v, r) = key(&blocks[i - d]);
+        if (v, d) < tp {
+            pre.push((v, d));
+            if pre.len() == cap {
+                cut(pre, &mut tp);
+            }
+        }
+        if (r, d) < tr {
+            res.push((r, d));
+            if res.len() == cap {
+                cut(res, &mut tr);
+            }
+        }
+    }
+    for l in [pre, res] {
+        if m < l.len() {
+            l.select_nth_unstable(m);
+            l.truncate(m);
+        }
+    }
+}
+
 impl RankSrc7 {
     /// `s`: the source texels; `base`: the base encoding; `base_err`: its weighted SSE;
     /// `smooth`: the block's distortion multiplier; `lambda`: the RDO lambda.
@@ -267,6 +309,77 @@ impl RankSrc7 {
             r += self.resid(sq[c], p, c);
         }
         (sad64(&self.b.vals, &p.vals), r as u32)
+    }
+
+    /// The `m` lowest of each prefilter key over the earlier blocks `blocks[i - d]`, `d` in
+    /// `ds`, as `(key, d)` into `pre` (value SAD) and `res` (refit residual), unordered. Exactly
+    /// the `m` smallest pairs of each, as a full sort would pick (ties go to the nearer block).
+    pub fn prefilter_top(
+        &self,
+        blocks: &[RankBlock7],
+        i: usize,
+        ds: std::ops::RangeInclusive<usize>,
+        m: usize,
+        pre: &mut Vec<(u32, usize)>,
+        res: &mut Vec<(u32, usize)>,
+    ) {
+        pre.clear();
+        res.clear();
+        if m == 0 {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was just detected.
+            unsafe { self.top_avx2(blocks, i, ds, m, pre, res) };
+            return;
+        }
+        top_with(blocks, i, ds, m, pre, res, |p| self.prefilter(p));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn top_avx2(
+        &self,
+        blocks: &[RankBlock7],
+        i: usize,
+        ds: std::ops::RangeInclusive<usize>,
+        m: usize,
+        pre: &mut Vec<(u32, usize)>,
+        res: &mut Vec<(u32, usize)>,
+    ) {
+        use std::arch::x86_64::*;
+        let ld = |a: &[u8; 64], k: usize| {
+            // SAFETY: an unaligned 32-byte load within a 64-byte array.
+            unsafe { _mm256_loadu_si256(a.as_ptr().add(k * 32).cast::<__m256i>()) }
+        };
+        let (s0, s1) = (ld(&self.b.vals, 0), ld(&self.b.vals, 1));
+        let ones = _mm256_set1_epi16(1);
+        top_with(blocks, i, ds, m, pre, res, |p| {
+            let (v0, v1) = (ld(&p.vals, 0), ld(&p.vals, 1));
+            let sad = _mm256_add_epi64(_mm256_sad_epu8(s0, v0), _mm256_sad_epu8(s1, v1));
+            let sad = _mm_add_epi64(_mm256_castsi256_si128(sad), _mm256_extracti128_si256::<1>(sad));
+            let sad = _mm_cvtsi128_si64(_mm_add_epi64(sad, _mm_unpackhi_epi64(sad, sad))) as u32;
+            // Source values (u8) times shape (0..=63, so a valid i8): pair sums stay under
+            // 2·255·63 < 2^15, so the saturating multiply-add is exact.
+            let c0 = _mm256_madd_epi16(_mm256_maddubs_epi16(s0, ld(&p.shape, 0)), ones);
+            let c1 = _mm256_madd_epi16(_mm256_maddubs_epi16(s1, ld(&p.shape, 1)), ones);
+            // c0: channel 0 in the low 128 bits, 1 in the high; c1: channels 2 and 3.
+            let h = _mm256_hadd_epi32(c0, c1);
+            let h = _mm256_hadd_epi32(h, h);
+            let (lo, hi) = (_mm256_castsi256_si128(h), _mm256_extracti128_si256::<1>(h));
+            let sq = [
+                _mm_cvtsi128_si32(lo) as u32,
+                _mm_cvtsi128_si32(hi) as u32,
+                _mm_extract_epi32::<1>(lo) as u32,
+                _mm_extract_epi32::<1>(hi) as u32,
+            ];
+            let mut r = 0f32;
+            for (c, &x) in sq.iter().enumerate() {
+                r += self.resid(x, p, c);
+            }
+            (sad, r as u32)
+        });
     }
 
     /// Channel `c`'s least-squares residual of the source's values against `p`'s shape; `sq`:
