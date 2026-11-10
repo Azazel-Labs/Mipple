@@ -16,9 +16,10 @@
 //!   faster: it is memory-bound at a few ms per megapixel on a desktop CPU, under the GPU's
 //!   upload, dispatch and readback alone (1024 x 1553 BC5, 20 threads vs an Intel Arc iGPU:
 //!   1-3 ms vs 14 ms at efforts 0-3, 24 vs 22 ms at effort 9).
-//! - `bc7.wgsl`: BC7 efforts 0-2 without entropy reduction: mode 6 from the exact line fit of
+//! - `bc7.wgsl`: BC7 efforts 0-3 without entropy reduction: mode 6 from the exact line fit of
 //!   `crate::bc7::fast` (covariance, power iterations and endpoints in integers), its
-//!   least-squares refits, and mode 1 on bc7f's partition estimate for busy blocks. Blocks with
+//!   least-squares refits, and mode 1 for busy blocks on bc7f's partition estimate (efforts 1-2)
+//!   or the best line-fit-ranked partition (effort 3). Blocks with
 //!   alpha are re-encoded on the CPU, as the CPU encoder sends them to its scalar path, and BC7
 //!   RDO keeps its bases on the CPU (they start at effort 8). The CPU is faster here as well
 //!   (4096 x 4096, 20 AVX2 threads vs an Intel Arc iGPU: 12 vs 72 ms at effort 0, 18 vs 79 ms
@@ -90,7 +91,7 @@ impl Gpu {
     pub fn kernel_scope(format: Format) -> &'static str {
         match format {
             Format::Bc1 => "efforts 0-1",
-            Format::Bc7 => "efforts 0-2 without entropy reduction",
+            Format::Bc7 => "efforts 0-3 without entropy reduction",
             _ => "every effort",
         }
     }
@@ -143,11 +144,12 @@ impl Gpu {
 }
 
 /// Whether the format's kernel covers `opts`: every BC4/BC5 effort, BC1 efforts 0-1, and BC7
-/// efforts 0-2 without entropy reduction (mode 6 with refits, mode 1 on bc7f's estimate).
+/// efforts 0-3 without entropy reduction (mode 6 with refits, mode 1 on estimated or ranked
+/// partitions).
 fn covers(format: Format, opts: BlockOpts) -> bool {
     match format {
         Format::Bc1 => opts.effort <= 1,
-        Format::Bc7 => opts.effort <= 2 && !opts.reduce_entropy,
+        Format::Bc7 => opts.effort <= 3 && !opts.reduce_entropy,
         _ => true,
     }
 }
@@ -296,7 +298,7 @@ mod imp {
             Some(words.iter().flat_map(|w| w.to_le_bytes()).collect())
         }
 
-        /// BC7 blocks of `surface` at `opts` (efforts 0-2: mode 6, its refits, mode 1). Blocks with alpha are re-encoded
+        /// BC7 blocks of `surface` at `opts` (efforts 0-3: mode 6, its refits, mode 1). Blocks with alpha are re-encoded
         /// on the CPU by the scalar encoder, as the CPU's fast encoder does.
         pub(super) fn bc7(&self, surface: &Surface, opts: BlockOpts) -> Option<Vec<u8>> {
             use rayon::prelude::*;
@@ -334,7 +336,7 @@ mod imp {
                     count,
                     u32::from(cfg.power),
                     first,
-                    u32::from(cfg.refits) | parts << 8,
+                    u32::from(cfg.refits) | parts << 8 | u32::from(cfg.rank == 1) << 16,
                     cfg.busy_err as u32,
                 ]
             };
@@ -612,7 +614,7 @@ mod tests {
                 opts.rdo.lambda = lambda;
                 // Covered by every kernel; BC7 RDO always encodes its base on the CPU.
                 opts.effort = match format {
-                    Format::Bc7 => 2, // the kernel covers efforts 0-2
+                    Format::Bc7 => 3, // the kernel covers efforts 0-3
                     _ => 1,
                 };
                 opts.gpu = GpuMode::On;

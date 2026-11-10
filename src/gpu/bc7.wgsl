@@ -15,7 +15,7 @@ struct Params {
     count: u32,  // blocks in this dispatch
     power: u32,  // power iterations of the mode-6 fit
     first: u32,  // first block of this dispatch; block g writes output words 4g..4g + 3
-    stages: u32, // mode-6 refits | mode-1 partition candidates << 8 (0: mode 6 only)
+    stages: u32, // mode-6 refits | mode-1 partition candidates << 8 (0: mode 6 only) | ranked << 16
     busy: u32,   // mode 1 is tried when the mode-6 error exceeds this (and the block has spread)
 }
 
@@ -46,6 +46,11 @@ fn load(block: u32) {
 
 // floor(a / d) for d > 0 (WGSL division truncates).
 fn floor_div(a: i32, d: i32) -> i32 {
+    let q = a / d;
+    return select(q, q - 1, q * d > a);
+}
+
+fn floor_div3(a: vec3<i32>, d: i32) -> vec3<i32> {
     let q = a / d;
     return select(q, q - 1, q * d > a);
 }
@@ -86,9 +91,11 @@ fn axis(c: array<vec3<i32>, 3>, power: u32) -> vec3<i32> {
 
 // One channel of a line's endpoint in 1/16 units: E = s + q k + floor(r k / d) for a ratio
 // q + r / d times k, clamped to 0..=255 n, then floor(16 E / n) (`line_point`).
-fn line_point(s: i32, q: i32, r: i32, k: i32, d: i32, n: i32) -> i32 {
-    let e = clamp(s + q * k + floor_div(r * k, d), 0, 255 * n);
-    return floor_div(16 * e, n);
+// Per channel. (No loops writing vector components by a variable index: D3D's FXC cannot address
+// them and would have to unroll the loop.)
+fn line_point(s: vec3<i32>, q: vec3<i32>, r: vec3<i32>, k: vec3<i32>, d: i32, n: i32) -> vec3<i32> {
+    let e = clamp(s + q * k + floor_div3(r * k, d), vec3(0), vec3(255 * n));
+    return floor_div3(16 * e, n);
 }
 
 // A quantized mode-6 endpoint pair: 7-bit RGB levels, p-bits, 8-bit values 2q + p.
@@ -153,13 +160,16 @@ fn project6(e: Ends) -> Fit6 {
     f.err = 0;
     let d = e.v1 - e.v0;
     let dd = max(dot(d, d), 1);
+    // A local array: FXC cannot write a struct's array member by a variable index in a loop.
+    var idx: array<i32, 16>;
     for (var i = 0u; i < 16u; i++) {
         let j = clamp(floor_div(15 * dot(t[i] - e.v0, d), dd), 0, 14);
         let e0 = entry_err(i, e.v0, d, W4[j]);
         let e1 = entry_err(i, e.v0, d, W4[j + 1]);
-        f.idx[i] = select(j, j + 1, e1 < e0);
+        idx[i] = select(j, j + 1, e1 < e0);
         f.err += min(e0, e1);
     }
+    f.idx = idx;
     return f;
 }
 
@@ -188,20 +198,12 @@ fn ls_ends(w: array<i32, 16>, mask: u32, n: i32, s: vec3<i32>) -> Ls {
     let sh = shrink(d, 12);
     let ds = max(d >> sh, 1);
     let num = (n * swt - sw * s) >> vec3(sh);
-    var q = vec3(0);
-    var r = vec3(0);
-    for (var c = 0; c < 3; c++) {
-        q[c] = floor_div(num[c], ds);
-        r[c] = num[c] - q[c] * ds;
-    }
+    let q = floor_div3(num, ds);
+    let r = num - q * ds;
     var o: Ls;
     o.ok = d >= 5 && abs_max(q) <= 4096;
-    let k0 = -sw;
-    let k1 = 64 * n - sw;
-    for (var c = 0; c < 3; c++) {
-        o.lo[c] = line_point(s[c], q[c], r[c], k0, ds, n);
-        o.hi[c] = line_point(s[c], q[c], r[c], k1, ds, n);
-    }
+    o.lo = line_point(s, q, r, vec3(-sw), ds, n);
+    o.hi = line_point(s, q, r, vec3(64 * n - sw), ds, n);
     return o;
 }
 
@@ -230,6 +232,14 @@ fn quant6p(e16: i32, p: i32) -> vec2<i32> {
         }
     }
     return best;
+}
+
+// quant6p per channel: the levels and the summed error.
+fn quant6p3(e16: vec3<i32>, p: i32) -> vec4<i32> {
+    let x = quant6p(e16.x, p);
+    let y = quant6p(e16.y, p);
+    let z = quant6p(e16.z, p);
+    return vec4(x.x, y.x, z.x, x.y + y.y + z.y);
 }
 
 // Expands a 6-bit level with p-bit to 8 bits: (v7 << 1) | (v7 >> 6) of v7 = 2q + p.
@@ -274,42 +284,35 @@ fn encode_two(mask: u32) -> Sub {
     let rh = pmax * n - pm - qh * n2;
     let ql = floor_div(pmin * n - pm, n2);
     let rl = pmin * n - pm - ql * n2;
-    var hi = vec3(0);
-    var lo = vec3(0);
-    for (var k = 0; k < 3; k++) {
-        hi[k] = line_point(s[k], qh, rh, ws[k], n2, n);
-        lo[k] = line_point(s[k], ql, rl, ws[k], n2, n);
-    }
+    let hi = line_point(s, vec3(qh), vec3(rh), ws, n2, n);
+    let lo = line_point(s, vec3(ql), vec3(rl), ws, n2, n);
     // The shared p-bit with the lower total endpoint error (0 on ties).
-    var q = array<array<vec3<i32>, 2>, 2>();
-    var err = vec2(0);
-    for (var p = 0; p < 2; p++) {
-        for (var k = 0; k < 3; k++) {
-            let a = quant6p(lo[k], p);
-            let b = quant6p(hi[k], p);
-            q[p][0][k] = a.x;
-            q[p][1][k] = b.x;
-            err[p] += a.y + b.y;
-        }
-    }
+    let a0 = quant6p3(lo, 0);
+    let b0 = quant6p3(hi, 0);
+    let a1 = quant6p3(lo, 1);
+    let b1 = quant6p3(hi, 1);
+    let one = a1.w + b1.w < a0.w + b0.w;
     var o: Sub;
-    o.p = select(0, 1, err.y < err.x);
-    o.q0 = q[o.p][0];
-    o.q1 = q[o.p][1];
+    o.p = select(0, 1, one);
+    o.q0 = select(a0.xyz, a1.xyz, one);
+    o.q1 = select(b0.xyz, b1.xyz, one);
     // Indices: j = floor(7 (x - a)·d / |d|²) clamped to 0..=6, then j or j + 1 (`index_two`).
     let a = dequant6p(o.q0, o.p);
     let d = dequant6p(o.q1, o.p) - a;
     let dd = max(dot(d, d), 1);
     o.err = 0;
+    var idx: array<i32, 16>;
     for (var i = 0u; i < 16u; i++) {
+        idx[i] = 0;
         if (mask & (1u << i)) != 0u {
             let j = clamp(floor_div(7 * dot(t[i] - a, d), dd), 0, 6);
             let e0 = entry_err(i, a, d, W3[j]);
             let e1 = entry_err(i, a, d, W3[j + 1]);
-            o.idx[i] = select(j, j + 1, e1 < e0);
+            idx[i] = select(j, j + 1, e1 < e0);
             o.err += min(e0, e1);
         }
     }
+    o.idx = idx;
     return o;
 }
 
@@ -363,23 +366,17 @@ fn pack6(f: Fit6) -> array<u32, 4> {
 fn pack1(part: u32, s0: Sub, s1: Sub) -> array<u32, 4> {
     let anchor = ANCHOR2[part];
     let code = PART2[part];
-    var e = array<array<vec3<i32>, 2>, 2>(array(s0.q0, s0.q1), array(s1.q0, s1.q1));
+    let sw0 = s0.idx[0] >= 4;
+    let sw1 = s1.idx[anchor] >= 4;
+    let e = array<array<vec3<i32>, 2>, 2>(
+        array(select(s0.q0, s0.q1, sw0), select(s0.q1, s0.q0, sw0)),
+        array(select(s1.q0, s1.q1, sw1), select(s1.q1, s1.q0, sw1)),
+    );
     var idx: array<i32, 16>;
     for (var i = 0u; i < 16u; i++) {
-        idx[i] = select(s0.idx[i], s1.idx[i], ((code >> i) & 1u) != 0u);
-    }
-    let anc = array<u32, 2>(0u, anchor);
-    for (var s = 0u; s < 2u; s++) {
-        if idx[anc[s]] >= 4 {
-            let tq = e[s][0];
-            e[s][0] = e[s][1];
-            e[s][1] = tq;
-            for (var i = 0u; i < 16u; i++) {
-                if ((code >> i) & 1u) == s {
-                    idx[i] = 7 - idx[i];
-                }
-            }
-        }
+        let in1 = ((code >> i) & 1u) != 0u;
+        let j = select(s0.idx[i], s1.idx[i], in1);
+        idx[i] = select(j, 7 - j, select(sw0, sw1, in1));
     }
     var o = array<u32, 4>(0u, 0u, 0u, 0u);
     put(&o, 0u, 2u, 2u);
@@ -402,6 +399,68 @@ fn pack1(part: u32, s0: Sub, s1: Sub) -> array<u32, 4> {
         pos += n;
     }
     return o;
+}
+
+// One subset's 3-bit ranking estimate and its scale shift (`rank_fits`): n S = n Σttᵀ - Σt Σtᵀ
+// (n texels, sums s, products q0 = (rr, rg, rb) and q1 = (gg, gb, bb)) cut to 10 bits by its
+// largest diagonal, one power step from the axis cut to 5 bits, λ = floor(v1·v2 / |v1|²), then
+// floor(16 (49 tr - 48 λ) / n).
+fn subset_est(n: i32, s: vec3<i32>, q0: vec3<i32>, q1: vec3<i32>, ax: vec3<i32>) -> vec2<i32> {
+    let c0 = n * q0 - s.x * s;
+    let c1 = vec3(c0.y, n * q1.x - s.y * s.y, n * q1.y - s.y * s.z);
+    let c2 = vec3(c0.z, c1.z, n * q1.z - s.z * s.z);
+    let sh = shrink(max(c0.x, max(c1.y, c2.z)), 9);
+    let r0 = c0 >> vec3(sh);
+    let r1 = c1 >> vec3(sh);
+    let r2 = c2 >> vec3(sh);
+    var v1 = vec3(dot(r0, ax), dot(r1, ax), dot(r2, ax));
+    v1 = v1 >> vec3(shrink(abs_max(v1), 4));
+    let v2 = vec3(dot(r0, v1), dot(r1, v1), dot(r2, v1));
+    let lam = max(floor_div(dot(v1, v2), max(dot(v1, v1), 1)), 0);
+    let x = max(49 * (r0.x + r1.y + r2.z) - 48 * lam, 0);
+    return vec2(16 * x / n, i32(sh));
+}
+
+// The K best 2-subset partitions for 3-bit indices by the subsets' estimates, each scaled back
+// by its shift and summed with one f32 rounding (the products are exact), as `rank_fits`.
+fn rank_fits(ax: vec3<i32>, parts: u32) -> array<u32, 4> {
+    var tq0 = vec3(0);
+    var tq1 = vec3(0);
+    for (var i = 0u; i < 16u; i++) {
+        tq0 += t[i].x * t[i];
+        tq1 += vec3(t[i].y * t[i].y, t[i].y * t[i].z, t[i].z * t[i].z);
+    }
+    var best = array<f32, 4>(3e38, 3e38, 3e38, 3e38);
+    var best_p = array<u32, 4>(0u, 0u, 0u, 0u);
+    for (var p = 0u; p < 64u; p++) {
+        let bits = PART2[p];
+        var s = vec3(0);
+        var q0 = vec3(0);
+        var q1 = vec3(0);
+        for (var i = 0u; i < 16u; i++) {
+            if (bits & (1u << i)) != 0u {
+                s += t[i];
+                q0 += t[i].x * t[i];
+                q1 += vec3(t[i].y * t[i].y, t[i].y * t[i].z, t[i].z * t[i].z);
+            }
+        }
+        let n1 = i32(countOneBits(bits));
+        let e0 = subset_est(16 - n1, sum - s, tq0 - q0, tq1 - q1, ax);
+        let e1 = subset_est(n1, s, q0, q1, ax);
+        var e = f32(e0.x) * f32(1 << u32(e0.y)) + f32(e1.x) * f32(1 << u32(e1.y));
+        var id = p;
+        for (var k = 0u; k < parts; k++) {
+            if e < best[k] {
+                let ob = best[k];
+                let op = best_p[k];
+                best[k] = e;
+                best_p[k] = id;
+                e = ob;
+                id = op;
+            }
+        }
+    }
+    return best_p;
 }
 
 fn encode() -> array<u32, 4> {
@@ -427,12 +486,8 @@ fn encode() -> array<u32, 4> {
     }
     let pm = dot(sum, ws);
     let n2 = dot(ws, ws);
-    var hi = vec3(0);
-    var lo = vec3(0);
-    for (var k = 0; k < 3; k++) {
-        hi[k] = clamp(sum[k] + floor_div(ws[k] * (16 * pmax - pm), n2), 0, 4080);
-        lo[k] = clamp(sum[k] + floor_div(ws[k] * (16 * pmin - pm), n2), 0, 4080);
-    }
+    let hi = clamp(sum + floor_div3(ws * (16 * pmax - pm), n2), vec3(0), vec3(4080));
+    let lo = clamp(sum + floor_div3(ws * (16 * pmin - pm), n2), vec3(0), vec3(4080));
     var f = project6(quantize(lo, hi));
     // Least-squares refits, each kept when it lowers the error.
     let refits = P.stages & 255u;
@@ -453,31 +508,35 @@ fn encode() -> array<u32, 4> {
     }
     // Mode 1 for blocks with error left and some spread, on the K partitions nearest (in
     // Hamming distance, either polarity) to the split by the side of the mean along the axis.
-    let parts = P.stages >> 8u;
+    let parts = (P.stages >> 8u) & 255u;
     let busy = i32(P.busy) < f.err && 1024 < max(c[0].x, max(c[1].y, c[2].z));
     if parts == 0u || !busy {
         return pack6(f);
     }
-    var bits = 0u;
-    for (var i = 0u; i < 16u; i++) {
-        if dot(16 * t[i] - sum, v) > 0 {
-            bits |= 1u << i;
-        }
-    }
-    var best = array<i32, 4>(99, 99, 99, 99);
     var best_p = array<u32, 4>(0u, 0u, 0u, 0u);
-    for (var p = 0u; p < 64u; p++) {
-        let h = i32(countOneBits(bits ^ PART2[p]));
-        var d = min(h, 16 - h);
-        var id = p;
-        for (var k = 0u; k < parts; k++) {
-            if d < best[k] {
-                let ob = best[k];
-                let op = best_p[k];
-                best[k] = d;
-                best_p[k] = id;
-                d = ob;
-                id = op;
+    if (P.stages >> 16u) != 0u {
+        best_p = rank_fits(v, parts);
+    } else {
+        var bits = 0u;
+        for (var i = 0u; i < 16u; i++) {
+            if dot(16 * t[i] - sum, v) > 0 {
+                bits |= 1u << i;
+            }
+        }
+        var best = array<i32, 4>(99, 99, 99, 99);
+        for (var p = 0u; p < 64u; p++) {
+            let h = i32(countOneBits(bits ^ PART2[p]));
+            var d = min(h, 16 - h);
+            var id = p;
+            for (var k = 0u; k < parts; k++) {
+                if d < best[k] {
+                    let ob = best[k];
+                    let op = best_p[k];
+                    best[k] = d;
+                    best_p[k] = id;
+                    d = ob;
+                    id = op;
+                }
             }
         }
     }

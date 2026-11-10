@@ -30,7 +30,7 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | `src/format.rs` | `Format` enum (block size, vkFormat, error weights, encode/decode dispatch) and `BlockOpts` |
 | `src/rdo.rs` | The RDO pass and `LzModel` rate estimator |
 | `src/pipeline.rs` | Encode/decode a whole texture (mips → blocks → RDO → `EncodedTexture`) |
-| `src/gpu/` | Optional wgpu backend: adapter probe, kernel dispatch and readback (`mod.rs`); WGSL ports of the CPU encoders that write the same blocks (`bc1.wgsl`: BC1 efforts 0-1; `bc4.wgsl`: BC4/BC5; `bc7.wgsl`: BC7 efforts 0-2, mode 6 with refits and mode 1) |
+| `src/gpu/` | Optional wgpu backend: adapter probe, kernel dispatch and readback (`mod.rs`); WGSL ports of the CPU encoders that write the same blocks (`bc1.wgsl`: BC1 efforts 0-1; `bc4.wgsl`: BC4/BC5; `bc7.wgsl`: BC7 efforts 0-3, mode 6 with refits and mode 1 on estimated or ranked partitions) |
 | `src/ktx2.rs` | KTX2 writer/reader (DFD, key/value data, smallest-mip-first layout, Zstd scheme 2) |
 | `src/dds.rs` | DDS reader (legacy FourCC + DX10) and DX10 writer, for scoring other encoders' output |
 | `src/metrics.rs` | PSNR, luma PSNR, SSIM, normal-map angular error |
