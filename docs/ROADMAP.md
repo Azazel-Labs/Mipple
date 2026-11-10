@@ -1,8 +1,8 @@
 # Roadmap
 
-Each item should land with a benchmark delta (see `bench-results/`). The version in `Cargo.toml` names the
-milestone in progress; CI tags a release (`vX.Y.Z`, with binaries) when that version changes on a green main,
-and refreshes the `nightly` prerelease on every green push (`.github/workflows/release.yml`).
+Each item should land with a benchmark delta (see `bench-results/`). Major and minor in `Cargo.toml` name the
+milestone in progress; every green push to main is released as the next patch (`vX.Y.Z`, with binaries;
+`.github/workflows/release.yml`).
 
 ## v0.1 (pre-release): encoder and container
 
@@ -69,7 +69,7 @@ Shipped:
 - [x] **Learned BC1 ranker** (tried, not merged): the whole chunk holds little for BC1 (an exhaustive 2048-block
   search gains −0.09% BD-rate at 4.65× the time).
 - [x] **Tooling:** `cargo xtask fmt|clippy|ci`, rustfmt at 120 columns, clippy lints in `Cargo.toml`, CI on
-  Linux/Windows/macOS, tagged and nightly releases.
+  Linux/Windows/macOS, a release for every green push.
 
 Open for v0.9.x:
 

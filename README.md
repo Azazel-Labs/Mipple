@@ -48,8 +48,8 @@ Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads 
 ## Quick start
 
 Prebuilt binaries for Linux, Windows and macOS are on the
-[releases page](https://github.com/Azazel-Labs/mipple/releases): `vX.Y.Z` releases, plus a `nightly` built from
-every main commit that passes CI. To build from source you need Rust 1.85+ (stable).
+[releases page](https://github.com/Azazel-Labs/mipple/releases): one `vX.Y.Z` release for every main commit that
+passes CI. To build from source you need Rust 1.85+ (stable).
 
 ```sh
 cargo build --release

@@ -1,9 +1,9 @@
 name: Release
 
-# After CI passes on a push to main:
-#   - the Cargo.toml version has no tag yet -> tag vX.Y.Z and publish a release with binaries;
-#   - always -> refresh the rolling `nightly` prerelease to that commit.
-# Bump `version` in Cargo.toml to cut a release.
+# After CI passes on a push to main, tag vX.Y.Z and publish a release with binaries. X.Y come from
+# Cargo.toml (edit it to change major/minor); Z is the next patch after the highest vX.Y.* tag, or
+# the Cargo.toml patch if that is higher. The build stamps that version into Cargo.toml (not
+# committed) so `mipple --version` matches the tag. A commit that already has a tag is skipped.
 on:
   workflow_run:
     workflows: [CI]
@@ -24,24 +24,31 @@ jobs:
     outputs:
       sha: ${{ steps.v.outputs.sha }}
       version: ${{ steps.v.outputs.version }}
-      tagged: ${{ steps.v.outputs.tagged }}
+      skip: ${{ steps.v.outputs.skip }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - id: v
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
-            echo "tagged=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tagged=false" >> "$GITHUB_OUTPUT"
-          fi
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          IFS=. read -r major minor patch <<< "${base%%-*}"
+          tags=$(git ls-remote --tags --refs origin 'refs/tags/v*')
+          # A re-run of an already released commit publishes nothing.
+          skip=false
+          if grep -q "^$SHA[[:space:]]refs/tags/v" <<< "$tags"; then skip=true; fi
+          last=$(sed -n "s|.*refs/tags/v$major\.$minor\.\([0-9][0-9]*\)$|\1|p" <<< "$tags" | sort -n | tail -n1)
+          if [ -n "$last" ] && [ $((last + 1)) -gt "$patch" ]; then patch=$((last + 1)); fi
+          echo "version=$major.$minor.$patch" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "version $major.$minor.$patch (Cargo.toml $base, last tag v$major.$minor.${last:-none}), skip=$skip"
 
   build:
     needs: meta
+    if: needs.meta.outputs.skip == 'false'
     strategy:
       matrix:
         include:
@@ -62,6 +69,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
+      - name: Stamp version
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
+          perl -0pi -e 's/(name = "mipple"\r?\nversion = )"[^"]*"/$1"$ENV{VERSION}"/' Cargo.lock
+          grep -m1 '^version' Cargo.toml
+          grep -A1 '^name = "mipple"' Cargo.lock
       - run: cargo build --release --locked --bin mipple --target ${{ matrix.target }}
       - name: Package
         shell: bash
@@ -90,12 +106,5 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum mipple-* > SHA256SUMS
-      - name: Versioned release
-        if: needs.meta.outputs.tagged == 'false'
-        run: |
-          gh release create "v$VERSION" dist/* --target "$SHA" --title "mipple $VERSION" --generate-notes
-      - name: Nightly prerelease
-        run: |
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly dist/* --target "$SHA" --prerelease --title "mipple nightly ($VERSION, ${SHA::7})" \
-            --notes "Built from $SHA on main after CI passed. Rebuilt on every green push; for a fixed version use the latest vX.Y.Z release."
+      - name: Release
+        run: gh release create "v$VERSION" dist/* --target "$SHA" --title "mipple $VERSION" --generate-notes
