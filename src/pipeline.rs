@@ -251,8 +251,15 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
     let w = opts.format.error_weights();
     let mut report = EncodeReport::default();
     let mut levels = Vec::with_capacity(levels_in.len());
+    let rdo_params = RdoParams {
+        reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
+        ..opts.rdo
+    };
     // GPU base encoding only where the device has an encoder for this format; RDO stays on the CPU.
-    let use_gpu = crate::gpu::Gpu::has_kernel(opts.format, opts.block_opts())
+    // BC7 RDO starts from a higher-effort base and alternate bases, which the GPU does not make.
+    let bc7_rdo = opts.format == Format::Bc7 && rdo_params.enabled();
+    let use_gpu = !bc7_rdo
+        && crate::gpu::Gpu::has_kernel(opts.format, opts.block_opts())
         && match opts.gpu {
             GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.block_opts()),
             GpuMode::On => true,
@@ -262,10 +269,6 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         .then(crate::gpu::Gpu::shared)
         .flatten()
         .filter(|g| g.encodes(opts.format));
-    let rdo_params = RdoParams {
-        reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
-        ..opts.rdo
-    };
     for level in levels_in {
         let t0 = Instant::now();
         let on_gpu = gpu.and_then(|g| g.encode_surface(level, opts.format, opts.block_opts()));

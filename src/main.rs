@@ -434,9 +434,9 @@ fn main() -> Result<()> {
                         "CPU by default (faster); GPU encoder with --gpu"
                     },
                     if gpu.encodes(f) && !Gpu::has_kernel(f, mipple::BlockOpts::from(9u8)) {
-                        " (efforts 0-1)"
+                        format!(" ({})", Gpu::kernel_scope(f))
                     } else {
-                        ""
+                        String::new()
                     }
                 );
             }
@@ -547,7 +547,14 @@ fn encode(a: EncodeArgs) -> Result<()> {
         None if !Gpu::built() => println!("  base encode: CPU (built without the gpu feature)"),
         None if !Gpu::has_encoder(a.format) => println!("  base encode: CPU (no GPU {} encoder yet)", a.format),
         None if !Gpu::has_kernel(a.format, opts.block_opts()) => {
-            println!("  base encode: CPU (the GPU {} encoder covers efforts 0-1)", a.format);
+            println!(
+                "  base encode: CPU (the GPU {} encoder covers {})",
+                a.format,
+                Gpu::kernel_scope(a.format)
+            );
+        }
+        None if a.format == Format::Bc7 && report.rdo_secs > 0.0 => {
+            println!("  base encode: CPU (BC7 RDO starts from CPU-only bases)");
         }
         None if !a.gpu && !Gpu::preferred(a.format, opts.block_opts()) => {
             println!(

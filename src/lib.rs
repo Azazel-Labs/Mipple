@@ -18,6 +18,7 @@ pub mod bench;
 pub mod check;
 pub mod color;
 pub mod dds;
+mod exact;
 pub mod fit;
 pub mod format;
 pub mod gpu;

@@ -5,7 +5,7 @@
 //! exact 8-bit value `2q + p`) and 4-bit indices. Per batch:
 //!
 //! * endpoints: the principal axis by power iteration (unnormalized; only its direction
-//!   matters), the extreme projections inset by [`Cfg::inset`] of their range;
+//!   matters), at the extreme projections;
 //! * quantization: for each endpoint and p-bit the nearest levels are one rounding; the p-bit
 //!   with the lower endpoint error wins (alpha included, so opaque blocks keep alpha 255 unless
 //!   p = 0 is clearly better for RGB);
@@ -17,6 +17,7 @@
 //! Blocks with alpha go to the scalar encoder. Every value is a small integer or an IEEE result
 //! in a fixed order, so both backends agree bit for bit.
 
+use crate::exact::{div_floor, reduce16, shrink, sum16};
 use crate::format::BlockOpts;
 #[cfg(target_arch = "x86_64")]
 use crate::simd::Level;
@@ -28,8 +29,6 @@ use crate::surface::Surface;
 pub struct Cfg {
     /// Power iterations for the principal axis.
     pub power: u8,
-    /// Fraction of the projection range the endpoints are moved inward (each side).
-    pub inset: f32,
     /// Least-squares refits, each kept per lane when it lowers the exact error.
     pub refits: u8,
     /// Keep both p-bits at 1 so alpha decodes to exactly 255 (otherwise each endpoint takes the
@@ -213,10 +212,19 @@ fn project<V: SimdF32>(t: &Texels<V>, e: &Ends<V>, exact: bool) -> ([V; 16], V) 
     let d64 = [d[0] * inv64, d[1] * inv64, d[2] * inv64];
     let mut idx = [zero; 16];
     let mut err = zero;
+    // Exact: j = floor(15 (x - a)·d / |d|²) in integers (|15 (x - a)·d| < 2^22).
+    let (dd1, fifteen) = (dd.simd_max(V::splat(1.0)), V::splat(15.0));
+    let inv_dd = V::splat(1.0) / dd1;
     let mut i = 0;
     while i < 16 {
-        let s = t[0][i].mul_add(k[0], t[1][i].mul_add(k[1], t[2][i].mul_add(k[2], bias)));
-        let j = floor(s.simd_max(zero)).simd_min(top);
+        let j = if exact {
+            let xa = [t[0][i] - a3[0], t[1][i] - a3[1], t[2][i] - a3[2]];
+            let num = (xa[0] * d[0] + xa[1] * d[1] + xa[2] * d[2]) * fifteen;
+            div_floor(num, dd1, inv_dd).0.simd_max(zero).simd_min(top)
+        } else {
+            let s = t[0][i].mul_add(k[0], t[1][i].mul_add(k[1], t[2][i].mul_add(k[2], bias)));
+            floor(s.simd_max(zero)).simd_min(top)
+        };
         if exact {
             let (e0, e1) = pair_err(t, [0, 1, 2], i, &a3, &d64, weight(j, 16), weight(j + V::splat(1.0), 16));
             let up = e1.simd_lt(e0);
@@ -1928,95 +1936,137 @@ fn pack<V: SimdF32>(e: &Ends<V>, idx: &[V; 16]) -> [V::Int; 4] {
     [w0, w1, w2, w3]
 }
 
+/// Largest absolute component.
+#[inline(always)]
+fn abs_max<V: SimdF32>(v: &[V; 3]) -> V {
+    let z = V::splat(0.0);
+    v[0].simd_max(z - v[0])
+        .simd_max(v[1].simd_max(z - v[1]))
+        .simd_max(v[2].simd_max(z - v[2]))
+}
+
+/// The endpoints (high, low) of an integer axis `ws` (|ws| < 2^7, not all 0) through the mean,
+/// in 1/16 units (floored) clamped to 0..=4080: with p = t·ws, the extreme projections relative
+/// to the mean's are τ = (16 pmax - Σp) / 16 and (16 pmin - Σp) / 16, and the endpoints are
+/// mean + ws τ / |ws|². Exact integers ([`div_floor`]): |16 p - Σp| < 2^21, |ws|² < 3 * 2^14.
+#[inline(always)]
+fn line_ends<V: SimdF32>(t: &Texels<V>, sum: &[V; 3], ws: &[V; 3]) -> ([V; 3], [V; 3]) {
+    let pmin = reduce16!(|i| t[0][i] * ws[0] + t[1][i] * ws[1] + t[2][i] * ws[2], |a, b| a
+        .simd_min(b));
+    let pmax = reduce16!(|i| t[0][i] * ws[0] + t[1][i] * ws[1] + t[2][i] * ws[2], |a, b| a
+        .simd_max(b));
+    let pm = sum[0] * ws[0] + sum[1] * ws[1] + sum[2] * ws[2];
+    let n2 = ws[0] * ws[0] + ws[1] * ws[1] + ws[2] * ws[2];
+    let inv = V::splat(1.0) / n2;
+    let s16 = V::splat(16.0);
+    let (qh, rh) = div_floor(pmax * s16 - pm, n2, inv);
+    let (ql, rl) = div_floor(pmin * s16 - pm, n2, inv);
+    (
+        [
+            axis_point(sum[0], ws[0], qh, rh, n2, inv),
+            axis_point(sum[1], ws[1], qh, rh, n2, inv),
+            axis_point(sum[2], ws[2], qh, rh, n2, inv),
+        ],
+        [
+            axis_point(sum[0], ws[0], ql, rl, n2, inv),
+            axis_point(sum[1], ws[1], ql, rl, n2, inv),
+            axis_point(sum[2], ws[2], ql, rl, n2, inv),
+        ],
+    )
+}
+
+/// One channel of a [`line_ends`] endpoint: sc + floor(wc τ16 / n2) for τ16 = q n2 + r (every
+/// term below 2^23), clamped to 0..=4080.
+#[inline(always)]
+fn axis_point<V: SimdF32>(sc: V, wc: V, q: V, r: V, n2: V, inv: V) -> V {
+    (sc + wc * q + div_floor(wc * r, n2, inv).0).simd_clamp(V::splat(0.0), V::splat(4080.0))
+}
+
 /// Encodes eight opaque blocks; returns the four 32-bit words of each lane's mode-6 block and,
 /// for lanes where a 2-subset mode won, that block instead.
 #[inline(always)]
 fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16]>; LANES]) {
-    let zero = V::splat(0.0);
+    // The line fit is exact integer arithmetic (every value an integer below 2^24 in f32, see
+    // `crate::exact`), so it does not depend on rounding, summation order or fused
+    // multiply-adds: the GPU kernel (`src/gpu/bc7.wgsl`) computes the same endpoints.
+    let sum = [sum16!(|i| t[0][i]), sum16!(|i| t[1][i]), sum16!(|i| t[2][i])];
     let inv16 = V::splat(1.0 / 16.0);
-    let mut mean = [zero; 3];
-    let mut i = 0;
-    while i < 16 {
-        mean[0] += t[0][i];
-        mean[1] += t[1][i];
-        mean[2] += t[2][i];
-        i += 1;
-    }
-    mean = [mean[0] * inv16, mean[1] * inv16, mean[2] * inv16];
-    let (mut rr, mut rg, mut rb, mut gg, mut gb, mut bb) = (zero, zero, zero, zero, zero, zero);
-    let mut i = 0;
-    while i < 16 {
-        let (r, g, b) = (t[0][i] - mean[0], t[1][i] - mean[1], t[2][i] - mean[2]);
-        rr = r.mul_add(r, rr);
-        rg = r.mul_add(g, rg);
-        rb = r.mul_add(b, rb);
-        gg = g.mul_add(g, gg);
-        gb = g.mul_add(b, gb);
-        bb = b.mul_add(b, bb);
-        i += 1;
-    }
-    // Power iteration from the largest-diagonal row; rescaled each step by its largest
-    // component so it cannot overflow.
-    let mut v = [rr, rg, rb];
+    let mean = [sum[0] * inv16, sum[1] * inv16, sum[2] * inv16];
+    // Covariance scaled by 16: 16 Σxy - Σx Σy.
+    let s16 = V::splat(16.0);
+    let rr = sum16!(|i| t[0][i] * t[0][i]) * s16 - sum[0] * sum[0];
+    let rg = sum16!(|i| t[0][i] * t[1][i]) * s16 - sum[0] * sum[1];
+    let rb = sum16!(|i| t[0][i] * t[2][i]) * s16 - sum[0] * sum[2];
+    let gg = sum16!(|i| t[1][i] * t[1][i]) * s16 - sum[1] * sum[1];
+    let gb = sum16!(|i| t[1][i] * t[2][i]) * s16 - sum[1] * sum[2];
+    let bb = sum16!(|i| t[2][i] * t[2][i]) * s16 - sum[2] * sum[2];
+    // Power iteration from the largest-diagonal row (the first on ties), on the covariance cut
+    // to 11 bits (the largest diagonal bounds every entry); each step's vector is cut to 10 bits,
+    // so every product stays below 2^24.
+    let cs = shrink(rr.simd_max(gg).simd_max(bb), 10);
+    let (srr, srg, srb, sgg, sgb, sbb) = (
+        floor(rr * cs),
+        floor(rg * cs),
+        floor(rb * cs),
+        floor(gg * cs),
+        floor(gb * cs),
+        floor(bb * cs),
+    );
+    let mut v = [srr, srg, srb];
     let mut big = rr;
     let m = big.simd_lt(gg);
-    v = [V::select(m, rg, v[0]), V::select(m, gg, v[1]), V::select(m, gb, v[2])];
+    v = [
+        V::select(m, srg, v[0]),
+        V::select(m, sgg, v[1]),
+        V::select(m, sgb, v[2]),
+    ];
     big = big.simd_max(gg);
     let m = big.simd_lt(bb);
-    v = [V::select(m, rb, v[0]), V::select(m, gb, v[1]), V::select(m, bb, v[2])];
+    v = [
+        V::select(m, srb, v[0]),
+        V::select(m, sgb, v[1]),
+        V::select(m, sbb, v[2]),
+    ];
     let mut it = 0;
     while it < cfg.power {
         let w = [
-            rr.mul_add(v[0], rg.mul_add(v[1], rb * v[2])),
-            rg.mul_add(v[0], gg.mul_add(v[1], gb * v[2])),
-            rb.mul_add(v[0], gb.mul_add(v[1], bb * v[2])),
+            srr * v[0] + srg * v[1] + srb * v[2],
+            srg * v[0] + sgg * v[1] + sgb * v[2],
+            srb * v[0] + sgb * v[1] + sbb * v[2],
         ];
-        let mx = w[0]
-            .simd_max(zero - w[0])
-            .simd_max(w[1].simd_max(zero - w[1]))
-            .simd_max(w[2].simd_max(zero - w[2]));
-        let s = V::select(V::splat(1e-20).simd_lt(mx), V::splat(1.0) / mx, zero);
-        v = [w[0] * s, w[1] * s, w[2] * s];
+        let s = shrink(abs_max(&w), 9);
+        v = [floor(w[0] * s), floor(w[1] * s), floor(w[2] * s)];
         it += 1;
     }
     // Degenerate (flat) lanes: any axis works.
-    let n2 = v[0].mul_add(v[0], v[1].mul_add(v[1], v[2] * v[2]));
-    let flat = n2.simd_lt(V::splat(1e-12));
+    let flat = abs_max(&v).simd_lt(V::splat(0.5));
     v = [
         V::select(flat, V::splat(1.0), v[0]),
         V::select(flat, V::splat(1.0), v[1]),
         V::select(flat, V::splat(1.0), v[2]),
     ];
-    let n2 = V::select(flat, V::splat(3.0), n2);
-    let (mut lo, mut hi) = (V::splat(f32::MAX), V::splat(f32::MIN));
-    let mut i = 0;
-    while i < 16 {
-        let s = (t[0][i] - mean[0]).mul_add(v[0], (t[1][i] - mean[1]).mul_add(v[1], (t[2][i] - mean[2]) * v[2]));
-        lo = lo.simd_min(s);
-        hi = hi.simd_max(s);
-        i += 1;
-    }
-    let inset = (hi - lo) * V::splat(cfg.inset);
-    let inv = V::splat(1.0) / n2;
-    let (lo, hi) = ((lo + inset) * inv, (hi - inset) * inv);
-    let full = V::splat(255.0);
-    let mut e0 = [zero; 3];
-    let mut e1 = [zero; 3];
+    // The axis cut to 7 bits, and the endpoints: the points of the axis line through the mean
+    // that the extreme projections project from (in 1/16 units, see [`line_ends`]).
+    let ws = {
+        let s = shrink(abs_max(&v), 6);
+        [floor(v[0] * s), floor(v[1] * s), floor(v[2] * s)]
+    };
+    let (hi, lo) = line_ends(t, &sum, &ws);
+    let mut e0 = [lo[0] * inv16, lo[1] * inv16, lo[2] * inv16];
+    let mut e1 = [hi[0] * inv16, hi[1] * inv16, hi[2] * inv16];
     // Solid lanes with p-bits 1: an even channel value c is the middle of the odd endpoints
     // c - 1 and c + 1 (indices 7 and 8 decode to c); an odd one is exact.
-    let solid = (rr + gg + bb).simd_lt(V::splat(0.5));
-    let mut c = 0;
-    while c < 3 {
-        e0[c] = v[c].mul_add(lo, mean[c]).simd_clamp(zero, full);
-        e1[c] = v[c].mul_add(hi, mean[c]).simd_clamp(zero, full);
-        if cfg.opaque_pbits {
+    if cfg.opaque_pbits {
+        let solid = (rr + gg + bb).simd_lt(V::splat(0.5));
+        let mut c = 0;
+        while c < 3 {
             let m = mean[c];
             let even = (m - floor(m * V::splat(0.5)) * V::splat(2.0)).simd_lt(V::splat(0.5));
             let fix = solid & even & V::splat(0.5).simd_lt(m);
             e0[c] = V::select(fix, m - V::splat(1.0), e0[c]);
             e1[c] = V::select(fix, m + V::splat(1.0), e1[c]);
+            c += 1;
         }
-        c += 1;
     }
     let op = cfg.opaque_pbits;
     let mut ends = quantize(&e0, &e1, op);
@@ -2067,7 +2117,8 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
             err = error(t, &ends, &idx);
         }
         // Lanes worth a second subset: some error left and some spread (as the batch encoder).
-        let busy = V::splat(cfg.busy_err).simd_lt(err) & V::splat(16.0 * 4.0).simd_lt(rr.simd_max(gg).simd_max(bb));
+        let busy =
+            V::splat(cfg.busy_err).simd_lt(err) & V::splat(16.0 * 16.0 * 4.0).simd_lt(rr.simd_max(gg).simd_max(bb));
         if V::mask_any(busy) && cfg.polish_modes && cfg.exact {
             if cfg.uber > 0 {
                 uber6(t, &mut ends, &mut idx, &mut err, busy, cfg.uber, cfg.opaque_pbits);
@@ -2469,7 +2520,6 @@ mod tests {
         for cfg in [
             Cfg {
                 power: 2,
-                inset: 0.0,
                 refits: 0,
                 opaque_pbits: false,
                 exact: false,
@@ -2491,7 +2541,6 @@ mod tests {
             },
             Cfg {
                 power: 3,
-                inset: 1.0 / 32.0,
                 refits: 2,
                 opaque_pbits: true,
                 exact: true,
@@ -2596,7 +2645,6 @@ mod tests {
         let s = Surface::load(std::path::Path::new("test-images/kodak/kodim01.png")).unwrap();
         let cfg = Cfg {
             power: 3,
-            inset: 0.0,
             refits: 2,
             opaque_pbits: false,
             exact: true,

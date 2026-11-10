@@ -16,13 +16,18 @@
 //!   faster: it is memory-bound at a few ms per megapixel on a desktop CPU, under the GPU's
 //!   upload, dispatch and readback alone (1024 x 1553 BC5, 20 threads vs an Intel Arc iGPU:
 //!   1-3 ms vs 14 ms at efforts 0-3, 24 vs 22 ms at effort 9).
+//! - `bc7.wgsl`: BC7 effort 0 without entropy reduction: mode 6 from the exact line fit of
+//!   `crate::bc7::fast` (covariance, power iterations and endpoints in integers). Blocks with
+//!   alpha are re-encoded on the CPU, as the CPU encoder sends them to its scalar path, and BC7
+//!   RDO keeps its bases on the CPU (they start at effort 8). The CPU is faster here as well
+//!   (4096 x 4096: 14 vs 59 ms on an Intel Arc iGPU).
 
 use crate::format::{BlockOpts, Format};
 use crate::surface::Surface;
 use std::sync::OnceLock;
 
 /// Formats with a GPU encoder. Each one is added with its compute kernel.
-const ENCODERS: &[Format] = &[Format::Bc1, Format::Bc4, Format::Bc5];
+const ENCODERS: &[Format] = &[Format::Bc1, Format::Bc4, Format::Bc5, Format::Bc7];
 
 /// What an adapter is and what it supports.
 #[derive(Clone, Debug)]
@@ -74,9 +79,18 @@ impl Gpu {
         Self::built() && ENCODERS.contains(&format)
     }
 
-    /// Whether this build has a GPU kernel for `format` at `opts` (BC1's covers efforts 0-1).
+    /// Whether this build has a GPU kernel for `format` at `opts` (see [`Gpu::kernel_scope`]).
     pub fn has_kernel(format: Format, opts: BlockOpts) -> bool {
         Self::has_encoder(format) && covers(format, opts)
+    }
+
+    /// The efforts a format's kernel covers, for messages.
+    pub fn kernel_scope(format: Format) -> &'static str {
+        match format {
+            Format::Bc1 => "efforts 0-1",
+            Format::Bc7 => "effort 0 without entropy reduction",
+            _ => "every effort",
+        }
     }
 
     /// Whether [`crate::pipeline::GpuMode::Auto`] picks the GPU encoder for `format` at `opts`:
@@ -84,8 +98,7 @@ impl Gpu {
     pub fn preferred(format: Format, opts: BlockOpts) -> bool {
         let _ = opts;
         match format {
-            Format::Bc1 | Format::Bc4 | Format::Bc5 => false,
-            _ => Self::has_encoder(format),
+            Format::Bc1 | Format::Bc4 | Format::Bc5 | Format::Bc7 => false,
         }
     }
 
@@ -116,7 +129,7 @@ impl Gpu {
                 Format::Bc1 => self.dev.bc1(surface, opts.effort),
                 Format::Bc4 => self.dev.bc4(surface, 1, opts.effort),
                 Format::Bc5 => self.dev.bc4(surface, 2, opts.effort),
-                _ => None,
+                Format::Bc7 => self.dev.bc7(surface, opts),
             }
         }
         #[cfg(not(all(feature = "gpu", not(target_arch = "wasm32"))))]
@@ -127,14 +140,20 @@ impl Gpu {
     }
 }
 
-/// Whether the format's kernel covers `opts` (every effort, except BC1 efforts 0-1 only).
+/// Whether the format's kernel covers `opts`: every BC4/BC5 effort, BC1 efforts 0-1, and BC7
+/// effort 0 without entropy reduction (mode 6).
 fn covers(format: Format, opts: BlockOpts) -> bool {
-    format != Format::Bc1 || opts.effort <= 1
+    match format {
+        Format::Bc1 => opts.effort <= 1,
+        Format::Bc7 => opts.effort == 0 && !opts.reduce_entropy,
+        _ => true,
+    }
 }
 
 #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 mod imp {
     use super::{Gpu, GpuInfo};
+    use crate::format::{BlockOpts, Format};
     use crate::surface::Surface;
     use std::sync::OnceLock;
     use wgpu::util::DeviceExt;
@@ -151,6 +170,7 @@ mod imp {
         queue: wgpu::Queue,
         bc1: OnceLock<wgpu::ComputePipeline>,
         bc4: OnceLock<wgpu::ComputePipeline>,
+        bc7: OnceLock<wgpu::ComputePipeline>,
     }
 
     pub(super) fn open() -> Option<Gpu> {
@@ -197,6 +217,7 @@ mod imp {
                 queue,
                 bc1: OnceLock::new(),
                 bc4: OnceLock::new(),
+                bc7: OnceLock::new(),
             },
         })
     }
@@ -271,6 +292,37 @@ mod imp {
             };
             let words = self.run(pipeline, surface, blocks * channels, 2, params)?;
             Some(words.iter().flat_map(|w| w.to_le_bytes()).collect())
+        }
+
+        /// BC7 blocks of `surface` at `opts` (effort 0: mode 6). Blocks with alpha are re-encoded
+        /// on the CPU by the scalar encoder, as the CPU's fast encoder does.
+        pub(super) fn bc7(&self, surface: &Surface, opts: BlockOpts) -> Option<Vec<u8>> {
+            use rayon::prelude::*;
+            let cfg = crate::bc7::fast_cfg(opts)?;
+            let pipeline = self.bc7.get_or_init(|| self.pipeline("bc7", include_str!("bc7.wgsl")));
+            let params = |first: u32, count: u32| {
+                [
+                    surface.width,
+                    surface.height,
+                    surface.blocks_x(),
+                    count,
+                    u32::from(cfg.power),
+                    first,
+                    0,
+                    0,
+                ]
+            };
+            let words = self.run(pipeline, surface, surface.block_count() as u32, 4, params)?;
+            let mut out: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let bw = surface.blocks_x();
+            let wts = Format::Bc7.error_weights();
+            out.par_chunks_mut(16).enumerate().for_each(|(i, o)| {
+                let b = surface.read_block(i as u32 % bw, i as u32 / bw);
+                if b.iter().any(|p| p[3] != 255) {
+                    o.copy_from_slice(&crate::bc7::encode(&b, &wts, opts));
+                }
+            });
+            Some(out)
         }
 
         /// Runs a kernel over `count` invocations, each writing `words_per` output words, with
@@ -478,7 +530,11 @@ mod tests {
                         Format::Bc1 => crate::bc1::encode_surface(&surf, effort),
                         Format::Bc4 => crate::bc4::encode_surface(&surf, 1, effort),
                         Format::Bc5 => crate::bc4::encode_surface(&surf, 2, effort),
-                        _ => unreachable!(),
+                        Format::Bc7 => crate::bc7::fast::encode_surface(
+                            &surf,
+                            crate::bc7::fast_cfg(opts).expect("plain BC7 has a fast configuration"),
+                            opts,
+                        ),
                     };
                     let got = gpu.encode_surface(&surf, format, opts).expect("GPU encode failed");
                     assert_eq!(got.len(), cpu.len(), "{format} e{effort} {name}");
@@ -521,10 +577,15 @@ mod tests {
             for lambda in [0.0, 1.0] {
                 let mut opts = EncodeOptions::new(format);
                 opts.rdo.lambda = lambda;
-                opts.effort = 1; // covered by every kernel
+                // Covered by every kernel; BC7 RDO always encodes its base on the CPU.
+                opts.effort = match format {
+                    Format::Bc7 => 0, // the kernel covers effort 0
+                    _ => 1,
+                };
                 opts.gpu = GpuMode::On;
                 let (on, report) = encode(&surf, &opts);
-                assert!(report.gpu.is_some(), "{format}: GPU not used");
+                let rdo_on_cpu = format == Format::Bc7 && lambda > 0.0;
+                assert_eq!(report.gpu.is_some(), !rdo_on_cpu, "{format} λ {lambda}: GPU use");
                 opts.gpu = GpuMode::Off;
                 let (off, report) = encode(&surf, &opts);
                 assert!(report.gpu.is_none());

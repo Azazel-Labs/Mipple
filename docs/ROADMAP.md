@@ -112,9 +112,11 @@ Open for v0.9.x:
   uses one only where it beats the CPU, `--gpu` forces it. Done: BC4/BC5 (`bc4.wgsl`; the CPU stays
   the default, since 20 AVX2 threads take 1-3 ms for a 1.6 MP BC5 vs 14 ms on an Intel Arc iGPU);
   BC1 efforts 0-1 (`bc1.wgsl`, after making the CPU line fit and refits exact integer arithmetic;
-  CPU default again: 9 vs 71 ms for 16 MP at effort 0). Next: BC1 efforts 2+ (needs per-lane
-  cluster-fit pruning and exact split scoring), BC7 (mode 6, then the fast path up to effort 8,
-  where the GPU should win), then WebGPU in the web demo when the browser has it.
+  CPU default again: 9 vs 71 ms for 16 MP at effort 0); BC7 effort 0 (`bc7.wgsl`, mode 6, after
+  making the BC7 fast path's line fit, endpoints and index projection exact; 14 vs 59 ms for 16 MP).
+  Next: BC7 refits and multi-subset modes up to effort 8 (where the GPU should win) and the RDO
+  alternates, BC1 efforts 2+ (needs per-lane cluster-fit pruning and exact split scoring), then
+  WebGPU in the web demo when the browser has it.
 
 ## v1.2: "output B": latent-space supercompression + transcoder
 

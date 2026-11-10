@@ -26,7 +26,6 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
     }
     let base = fast::Cfg {
         power: 3,
-        inset: 0.0,
         refits: 1,
         opaque_pbits: false,
         exact: true,
