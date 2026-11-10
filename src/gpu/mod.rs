@@ -16,11 +16,13 @@
 //!   faster: it is memory-bound at a few ms per megapixel on a desktop CPU, under the GPU's
 //!   upload, dispatch and readback alone (1024 x 1553 BC5, 20 threads vs an Intel Arc iGPU:
 //!   1-3 ms vs 14 ms at efforts 0-3, 24 vs 22 ms at effort 9).
-//! - `bc7.wgsl`: BC7 effort 0 without entropy reduction: mode 6 from the exact line fit of
-//!   `crate::bc7::fast` (covariance, power iterations and endpoints in integers). Blocks with
+//! - `bc7.wgsl`: BC7 efforts 0-2 without entropy reduction: mode 6 from the exact line fit of
+//!   `crate::bc7::fast` (covariance, power iterations and endpoints in integers), its
+//!   least-squares refits, and mode 1 on bc7f's partition estimate for busy blocks. Blocks with
 //!   alpha are re-encoded on the CPU, as the CPU encoder sends them to its scalar path, and BC7
 //!   RDO keeps its bases on the CPU (they start at effort 8). The CPU is faster here as well
-//!   (4096 x 4096: 14 vs 59 ms on an Intel Arc iGPU).
+//!   (4096 x 4096, 20 AVX2 threads vs an Intel Arc iGPU: 12 vs 72 ms at effort 0, 18 vs 79 ms
+//!   at effort 1, 46 vs 121 ms at effort 2).
 
 use crate::format::{BlockOpts, Format};
 use crate::surface::Surface;
@@ -88,7 +90,7 @@ impl Gpu {
     pub fn kernel_scope(format: Format) -> &'static str {
         match format {
             Format::Bc1 => "efforts 0-1",
-            Format::Bc7 => "effort 0 without entropy reduction",
+            Format::Bc7 => "efforts 0-2 without entropy reduction",
             _ => "every effort",
         }
     }
@@ -141,11 +143,11 @@ impl Gpu {
 }
 
 /// Whether the format's kernel covers `opts`: every BC4/BC5 effort, BC1 efforts 0-1, and BC7
-/// effort 0 without entropy reduction (mode 6).
+/// efforts 0-2 without entropy reduction (mode 6 with refits, mode 1 on bc7f's estimate).
 fn covers(format: Format, opts: BlockOpts) -> bool {
     match format {
         Format::Bc1 => opts.effort <= 1,
-        Format::Bc7 => opts.effort == 0 && !opts.reduce_entropy,
+        Format::Bc7 => opts.effort <= 2 && !opts.reduce_entropy,
         _ => true,
     }
 }
@@ -294,12 +296,36 @@ mod imp {
             Some(words.iter().flat_map(|w| w.to_le_bytes()).collect())
         }
 
-        /// BC7 blocks of `surface` at `opts` (effort 0: mode 6). Blocks with alpha are re-encoded
+        /// BC7 blocks of `surface` at `opts` (efforts 0-2: mode 6, its refits, mode 1). Blocks with alpha are re-encoded
         /// on the CPU by the scalar encoder, as the CPU's fast encoder does.
         pub(super) fn bc7(&self, surface: &Surface, opts: BlockOpts) -> Option<Vec<u8>> {
             use rayon::prelude::*;
             let cfg = crate::bc7::fast_cfg(opts)?;
-            let pipeline = self.bc7.get_or_init(|| self.pipeline("bc7", include_str!("bc7.wgsl")));
+            let pipeline = self.bc7.get_or_init(|| {
+                // The 2-subset partition codes and second-subset anchors as WGSL constants.
+                let table = |name: &str, v: Vec<u32>| {
+                    let v: Vec<String> = v.iter().map(|x| format!("{x}u")).collect();
+                    format!(
+                        "const {name} = array<u32, {}>({});
+",
+                        v.len(),
+                        v.join(", ")
+                    )
+                };
+                let source = table("PART2", crate::bc7::tables::PART2.to_vec())
+                    + &table(
+                        "ANCHOR2",
+                        crate::bc7::tables::ANCHOR2.iter().map(|&a| u32::from(a)).collect(),
+                    )
+                    + include_str!("bc7.wgsl");
+                self.pipeline("bc7", &source)
+            });
+            // Mode 1 (on bc7f's partition estimate) when the configuration has it.
+            let parts = if cfg.two & 1 != 0 {
+                u32::from(cfg.parts.clamp(1, 4))
+            } else {
+                0
+            };
             let params = |first: u32, count: u32| {
                 [
                     surface.width,
@@ -308,8 +334,8 @@ mod imp {
                     count,
                     u32::from(cfg.power),
                     first,
-                    0,
-                    0,
+                    u32::from(cfg.refits) | parts << 8,
+                    cfg.busy_err as u32,
                 ]
             };
             let words = self.run(pipeline, surface, surface.block_count() as u32, 4, params)?;
@@ -464,7 +490,7 @@ mod tests {
             }
         }
         // Block kinds the photos rarely cover: solid colors (all 256 values per channel),
-        // two colors, full-range gray ramps (the widest axis), pure noise, 0/255 extremes.
+        // two colors, full-range gray ramps (the widest axis), pure noise, 0/255 extremes, low noise.
         let mut seed = 0x9e37_79b9u32;
         let mut rnd = move || {
             seed ^= seed << 13;
@@ -480,7 +506,7 @@ mod tests {
                 let (c0, c1) = (rnd().to_le_bytes(), rnd().to_le_bytes());
                 for i in 0..16u32 {
                     let r = rnd().to_le_bytes();
-                    let p = match k % 6 {
+                    let p = match k % 7 {
                         0 => [(k / 6 % 256) as u8, (k * 7 % 256) as u8, (k * 13 % 256) as u8, 255],
                         1 => {
                             if r[0] & 1 == 0 {
@@ -495,7 +521,14 @@ mod tests {
                         }
                         3 => r,
                         4 => [r[0], r[1], r[2], 255].map(|v| if v & 0x80 != 0 { 255 } else { 0 }),
-                        _ => [c0[0].wrapping_add(r[0] & 3), c0[1].wrapping_add(r[1] & 3), c0[2], r[3]],
+                        5 => [c0[0].wrapping_add(r[0] & 3), c0[1].wrapping_add(r[1] & 3), c0[2], r[3]],
+                        _ => {
+                            // Opaque ±2 noise in every channel: covariance diagonals
+                            // 16 k (16 - k) for k raised texels, around BC7's mode-1 threshold
+                            // of 1024, with error off the axis.
+                            let v = |c: usize, b: u8| c0[c].min(250) + (b & 1) * 4;
+                            [v(0, r[0]), v(1, r[1]), v(2, r[2]), 255]
+                        }
                     };
                     kinds.set(bx * 4 + (i & 3), by * 4 + i / 4, p);
                 }
@@ -579,7 +612,7 @@ mod tests {
                 opts.rdo.lambda = lambda;
                 // Covered by every kernel; BC7 RDO always encodes its base on the CPU.
                 opts.effort = match format {
-                    Format::Bc7 => 0, // the kernel covers effort 0
+                    Format::Bc7 => 2, // the kernel covers efforts 0-2
                     _ => 1,
                 };
                 opts.gpu = GpuMode::On;

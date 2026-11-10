@@ -10,7 +10,7 @@ mod batch;
 pub mod fast;
 mod partition;
 pub use batch::encode_batch;
-mod tables;
+pub(crate) mod tables;
 
 use crate::fit::{V4, ls_endpoints, mean_cov, pca_endpoints};
 use crate::format::BlockOpts;

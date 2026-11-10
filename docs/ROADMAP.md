@@ -114,9 +114,10 @@ Open for v0.9.x:
   BC1 efforts 0-1 (`bc1.wgsl`, after making the CPU line fit and refits exact integer arithmetic;
   CPU default again: 9 vs 71 ms for 16 MP at effort 0); BC7 effort 0 (`bc7.wgsl`, mode 6, after
   making the BC7 fast path's line fit, endpoints and index projection exact; 14 vs 59 ms for 16 MP).
-  The BC7 two-subset fits (principal axis, endpoints, LS refits, quantizer rounding and index
-  projection) are exact integers on the CPU too, at unchanged speed and quality, ready for the kernel.
-  Next: BC7 refits and multi-subset modes up to effort 8 (where the GPU should win) and the RDO
+  BC7 efforts 1-2 on the same kernel (mode-6 least-squares refits, then mode 1 on bc7f's partition
+  estimate), after making the two-subset fits (principal axis, endpoints, LS refits, quantizer
+  rounding and index projection) exact on the CPU at unchanged speed and quality.
+  Next: BC7 ranked partitions, subset refits, refinement and modes 3/0/2/5 up to effort 8 (where the GPU should win) and the RDO
   alternates, BC1 efforts 2+ (needs per-lane cluster-fit pruning and exact split scoring), then
   WebGPU in the web demo when the browser has it.
 
