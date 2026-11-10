@@ -100,6 +100,8 @@ pub trait SimdF32:
     fn mul_add(self, a: Self, b: Self) -> Self;
     /// Lane-wise `f32::floor` (`vroundps` on AVX2).
     fn floor(self) -> Self;
+    /// 2^-floor(log2 x) for normal positive lanes, from the exponent bits (exact).
+    fn pow2_recip(self) -> Self;
 
     #[inline(always)]
     fn simd_gt(self, o: Self) -> Self::Mask {
@@ -277,6 +279,13 @@ impl SimdF32 for f32x8 {
     #[inline(always)]
     fn floor(self) -> Self {
         Self(self.0.map(f32::floor))
+    }
+    #[inline(always)]
+    fn pow2_recip(self) -> Self {
+        Self(
+            self.0
+                .map(|x| f32::from_bits(0x7f00_0000 - (x.to_bits() & 0x7f80_0000))),
+        )
     }
     #[inline(always)]
     fn from_array(a: [f32; LANES]) -> Self {
@@ -548,6 +557,13 @@ pub mod avx2 {
         #[inline(always)]
         fn floor(self) -> Self {
             F(unsafe { _mm256_floor_ps(self.0) })
+        }
+        #[inline(always)]
+        fn pow2_recip(self) -> Self {
+            F(unsafe {
+                let e = _mm256_and_si256(_mm256_castps_si256(self.0), _mm256_set1_epi32(0x7f80_0000));
+                _mm256_castsi256_ps(_mm256_sub_epi32(_mm256_set1_epi32(0x7f00_0000), e))
+            })
         }
         #[inline(always)]
         fn from_array(a: [f32; LANES]) -> Self {

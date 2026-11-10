@@ -17,7 +17,7 @@
 //! Blocks with alpha go to the scalar encoder. Every value is a small integer or an IEEE result
 //! in a fixed order, so both backends agree bit for bit.
 
-use crate::exact::{div_floor, reduce16, shrink, sum16};
+use crate::exact::{div_floor, div_floor_q, dot16, reduce16, shrink, sum16};
 use crate::format::BlockOpts;
 #[cfg(target_arch = "x86_64")]
 use crate::simd::Level;
@@ -212,15 +212,16 @@ fn project<V: SimdF32>(t: &Texels<V>, e: &Ends<V>, exact: bool) -> ([V; 16], V) 
     let d64 = [d[0] * inv64, d[1] * inv64, d[2] * inv64];
     let mut idx = [zero; 16];
     let mut err = zero;
-    // Exact: j = floor(15 (x - a)·d / |d|²) in integers (|15 (x - a)·d| < 2^22).
-    let (dd1, fifteen) = (dd.simd_max(V::splat(1.0)), V::splat(15.0));
-    let inv_dd = V::splat(1.0) / dd1;
+    // Exact: j = floor(15 (x - a)·d / |d|²) in integers (|15 (x - a)·d| < 2^22), the numerator
+    // plus 1/2 ([`div_floor_q`]) in three exact fused steps.
+    let inv_dd = V::splat(1.0) / dd.simd_max(V::splat(1.0));
+    let d15 = [d[0] * V::splat(15.0), d[1] * V::splat(15.0), d[2] * V::splat(15.0)];
+    let xbias = V::splat(0.5) - (a3[0] * d15[0] + a3[1] * d15[1] + a3[2] * d15[2]);
     let mut i = 0;
     while i < 16 {
         let j = if exact {
-            let xa = [t[0][i] - a3[0], t[1][i] - a3[1], t[2][i] - a3[2]];
-            let num = (xa[0] * d[0] + xa[1] * d[1] + xa[2] * d[2]) * fifteen;
-            div_floor(num, dd1, inv_dd).0.simd_max(zero).simd_min(top)
+            let num = t[0][i].mul_add(d15[0], t[1][i].mul_add(d15[1], t[2][i].mul_add(d15[2], xbias)));
+            floor(num * inv_dd).simd_max(zero).simd_min(top)
         } else {
             let s = t[0][i].mul_add(k[0], t[1][i].mul_add(k[1], t[2][i].mul_add(k[2], bias)));
             floor(s.simd_max(zero)).simd_min(top)
@@ -250,45 +251,76 @@ fn error<V: SimdF32>(t: &Texels<V>, e: &Ends<V>, idx: &[V; 16]) -> V {
     err
 }
 
-/// Least-squares RGB endpoints for the indices; lanes with a singular system keep `prev`.
+/// Least-squares RGB endpoints in 8-bit units (multiples of 1/16) for the indices `idx`
+/// (`nidx`-entry palettes) of the texels in `m` (0/1 per texel), in exact integers: the line
+/// t = α + β w through the members' weights w (0..=64) puts the endpoint of weight w at
+/// E(w) = Σt + num (n w - Σw) / D in 1/n units, with num = n Σwt - Σw Σt and D = n Σw² - (Σw)²
+/// (D cut to 13 bits, num by the same shift), clamped to 0..=255 n, then floor(16 E / n). D is
+/// 4096 times the float solver's determinant; lanes with D < 5 (that determinant below 1e-3) or
+/// a slope over 4096 keep `prev`. Every intermediate is an integer below 2^23.
 #[inline(always)]
-fn ls_endpoints<V: SimdF32>(t: &Texels<V>, idx: &[V; 16], prev: ([V; 3], [V; 3])) -> ([V; 3], [V; 3], V::Mask) {
+fn ls_ends<V: SimdF32>(
+    t: &Texels<V>,
+    m: &[V; 16],
+    idx: &[V; 16],
+    nidx: u32,
+    prev: ([V; 3], [V; 3]),
+) -> ([V; 3], [V; 3], V::Mask) {
     let zero = V::splat(0.0);
     let one = V::splat(1.0);
-    let (mut aa, mut ab, mut bb) = (zero, zero, zero);
-    let mut ax = [zero; 3];
-    let mut bx = [zero; 3];
-    let inv64 = V::splat(1.0 / 64.0);
+    // Loops, not `array::from_fn`: closures do not inherit the caller's target features.
+    let mut w = [zero; 16];
     let mut i = 0;
     while i < 16 {
-        let wb = weight(idx[i], 16) * inv64;
-        let wa = one - wb;
-        aa = wa.mul_add(wa, aa);
-        ab = wa.mul_add(wb, ab);
-        bb = wb.mul_add(wb, bb);
-        let mut c = 0;
-        while c < 3 {
-            ax[c] = wa.mul_add(t[c][i], ax[c]);
-            bx[c] = wb.mul_add(t[c][i], bx[c]);
-            c += 1;
-        }
+        w[i] = weight(idx[i], nidx) * m[i];
         i += 1;
     }
-    let det = aa * bb - ab * ab;
-    let ok = V::splat(1e-3).simd_lt(det);
-    let inv = one / V::select(ok, det, one);
-    let full = V::splat(255.0);
+    let n = sum16!(|i| m[i]).simd_max(one);
+    let sw = sum16!(|i| w[i]);
+    let sww = dot16!(|i| w[i], w[i]);
+    let sum = [
+        dot16!(|i| m[i], t[0][i]),
+        dot16!(|i| m[i], t[1][i]),
+        dot16!(|i| m[i], t[2][i]),
+    ];
+    let swt = [
+        dot16!(|i| w[i], t[0][i]),
+        dot16!(|i| w[i], t[1][i]),
+        dot16!(|i| w[i], t[2][i]),
+    ];
+    let d = n * sww - sw * sw;
+    let sh = shrink(d, 12);
+    let ds = floor(d * sh).simd_max(one);
+    let inv = one / ds;
+    let q0 = div_floor(floor((n * swt[0] - sw * sum[0]) * sh), ds, inv);
+    let q1 = div_floor(floor((n * swt[1] - sw * sum[1]) * sh), ds, inv);
+    let q2 = div_floor(floor((n * swt[2] - sw * sum[2]) * sh), ds, inv);
+    let q = [q0, q1, q2];
+    let ok = V::splat(4.5).simd_lt(d) & abs_max(&[q0.0, q1.0, q2.0]).simd_lt(V::splat(4096.5));
+    let (k0, k1) = (zero - sw, n * V::splat(64.0) - sw);
+    let (top, inv_n, inv16) = (n * V::splat(255.0), one / n, V::splat(1.0 / 16.0));
     let mut e0 = prev.0;
     let mut e1 = prev.1;
     let mut c = 0;
     while c < 3 {
-        let a = ((bb * ax[c] - ab * bx[c]) * inv).simd_clamp(zero, full);
-        let b = ((aa * bx[c] - ab * ax[c]) * inv).simd_clamp(zero, full);
+        let (qc, rc) = q[c];
+        let a = line_point(sum[c], qc, rc, k0, ds, inv, top, inv_n) * inv16;
+        let b = line_point(sum[c], qc, rc, k1, ds, inv, top, inv_n) * inv16;
         e0[c] = V::select(ok, a, e0[c]);
         e1[c] = V::select(ok, b, e1[c]);
         c += 1;
     }
     (e0, e1, ok)
+}
+
+/// One channel of a line's endpoint in 1/16 units ([`ls_ends`], [`subset_ends`]):
+/// E = Σt + q k + floor(r k / d) for a ratio q + r / d times k, clamped to 0..=255 n, then
+/// floor(16 E / n).
+#[expect(clippy::too_many_arguments, reason = "per-lane ratio, divisor and clamp")]
+#[inline(always)]
+fn line_point<V: SimdF32>(sc: V, q: V, r: V, k: V, d: V, inv: V, top: V, inv_n: V) -> V {
+    let e = (sc + q * k + div_floor(r * k, d, inv).0).simd_clamp(V::splat(0.0), top);
+    div_floor_q(e * V::splat(16.0), inv_n)
 }
 
 /// A multi-subset opaque mode of the fast encoder.
@@ -361,12 +393,26 @@ struct Sub<V: SimdF32> {
     err: V,
 }
 
+/// The rounded level of an 8-bit target `x` (a multiple of 1/16) on a `full`-step scale:
+/// floor(full x / 255 + 1/2), or with a p-bit floor((full x / 255 - p) / 2 + 1/2), not below 0.
+/// Exact: floor((16 full x - 4080 p + 4080) / 8160) in integers below 2^20.
+#[inline(always)]
+fn round_level<V: SimdF32>(x: V, p: V, full: f32, has_p: bool) -> V {
+    let x16 = x * V::splat(16.0) * V::splat(full);
+    let (num, den) = if has_p {
+        (x16 - p * V::splat(4080.0) + V::splat(4080.0), 8160.0)
+    } else {
+        (x16 + V::splat(2040.0), 4080.0)
+    };
+    div_floor_q(num, V::splat(1.0 / den)).simd_max(V::splat(0.0))
+}
+
 /// Nearest 6-bit levels (with p-bit `p`) of 8-bit targets, as 7-bit values `2q + p` expanded by
 /// bit replication: tries the rounded level and its neighbours.
 #[inline(always)]
 fn quant6p<V: SimdF32>(x: V, p: V) -> (V, V, V) {
     let zero = V::splat(0.0);
-    let c = floor(((x * V::splat(127.0 / 255.0) - p) * V::splat(0.5) + V::splat(0.5)).simd_max(zero));
+    let c = round_level(x, p, 127.0, true);
     let (mut bq, mut bv, mut be) = (zero, zero, V::splat(f32::INFINITY));
     let mut off = -1;
     while off <= 1 {
@@ -393,13 +439,7 @@ fn quant_gen<V: SimdF32>(x: V, p: V, mode: Two) -> (V, V, V) {
     let cb = mode.color_bits() as i32;
     let has_p = mode.pbits() != PBits::None;
     let n = cb + has_p as i32;
-    let full = ((1 << n) - 1) as f32;
-    let t = x * V::splat(full / 255.0);
-    let c = if has_p {
-        floor(((t - p) * V::splat(0.5) + V::splat(0.5)).simd_max(zero))
-    } else {
-        floor((t + V::splat(0.5)).simd_max(zero))
-    };
+    let c = round_level(x, p, ((1 << n) - 1) as f32, has_p);
     let top = V::splat(((1 << cb) - 1) as f32);
     let (mut bq, mut bv, mut be) = (zero, zero, V::splat(f32::INFINITY));
     let mut off = -1;
@@ -552,10 +592,13 @@ fn index_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], v: &[[V; 3]; 2], mode: Two)
     let zero = V::splat(0.0);
     let n = (1u32 << mode.index_bits()) as f32;
     let d = [v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]];
-    let dd = d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2]));
-    let scale = V::select(zero.simd_lt(dd), V::splat(n - 1.0) / dd.simd_max(V::splat(1.0)), zero);
-    let k = [d[0] * scale, d[1] * scale, d[2] * scale];
-    let bias = zero - v[0][0].mul_add(k[0], v[0][1].mul_add(k[1], v[0][2] * k[2]));
+    // j = floor((n - 1) (x - a)·d / |d|²) in integers (|(n - 1) (x - a)·d| < 2^21).
+    let dd1 = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).simd_max(V::splat(1.0));
+    let inv_dd = V::splat(1.0) / dd1;
+    let steps = V::splat(n - 1.0);
+    let ds = [d[0] * steps, d[1] * steps, d[2] * steps];
+    // The numerator plus 1/2 ([`div_floor_q`]) in three exact fused steps per texel.
+    let bias = V::splat(0.5) - (v[0][0] * ds[0] + v[0][1] * ds[1] + v[0][2] * ds[2]);
     let top = V::splat(n - 2.0);
     let inv64 = V::splat(1.0 / 64.0);
     let d64 = [d[0] * inv64, d[1] * inv64, d[2] * inv64];
@@ -563,8 +606,8 @@ fn index_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], v: &[[V; 3]; 2], mode: Two)
     let mut err = zero;
     let mut i = 0;
     while i < 16 {
-        let s = t[0][i].mul_add(k[0], t[1][i].mul_add(k[1], t[2][i].mul_add(k[2], bias)));
-        let j = floor(s.simd_max(zero)).simd_min(top);
+        let num = t[0][i].mul_add(ds[0], t[1][i].mul_add(ds[1], t[2][i].mul_add(ds[2], bias)));
+        let j = floor(num * inv_dd).simd_max(zero).simd_min(top);
         let w0 = weight(j, n as u32);
         let w1 = weight(j + V::splat(1.0), n as u32);
         let (e0, e1) = pair_err(t, [0, 1, 2], i, &v[0], &d64, w0, w1);
@@ -580,127 +623,41 @@ fn index_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], v: &[[V; 3]; 2], mode: Two)
 /// exact indices, then `refits` least-squares refits kept when they lower the error.
 #[inline(always)]
 fn encode_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], mode: Two, refits: u8) -> Sub<V> {
-    let zero = V::splat(0.0);
+    // In exact integers, as the mode-6 line fit: n Σxy - Σx Σy over the members, three power
+    // iterations, a 7-bit axis and the endpoints at the members' extreme projections.
     let one = V::splat(1.0);
-    let mut n = zero;
-    let mut mean = [zero; 3];
+    let n = sum16!(|i| m[i]).simd_max(one);
+    let mut mt = [[one; 16]; 3];
     let mut i = 0;
     while i < 16 {
-        n += m[i];
-        let mut c = 0;
-        while c < 3 {
-            mean[c] = m[i].mul_add(t[c][i], mean[c]);
-            c += 1;
-        }
+        mt[0][i] = m[i] * t[0][i];
+        mt[1][i] = m[i] * t[1][i];
+        mt[2][i] = m[i] * t[2][i];
         i += 1;
     }
-    let inv_n = one / n.simd_max(one);
-    mean = [mean[0] * inv_n, mean[1] * inv_n, mean[2] * inv_n];
-    let (mut rr, mut rg, mut rb, mut gg, mut gb, mut bb) = (zero, zero, zero, zero, zero, zero);
-    let mut i = 0;
-    while i < 16 {
-        let (r, g, b) = (t[0][i] - mean[0], t[1][i] - mean[1], t[2][i] - mean[2]);
-        let (mr, mg) = (m[i] * r, m[i] * g);
-        rr = mr.mul_add(r, rr);
-        rg = mr.mul_add(g, rg);
-        rb = mr.mul_add(b, rb);
-        gg = mg.mul_add(g, gg);
-        gb = mg.mul_add(b, gb);
-        bb = (m[i] * b).mul_add(b, bb);
-        i += 1;
+    let sum = [sum16!(|i| mt[0][i]), sum16!(|i| mt[1][i]), sum16!(|i| mt[2][i])];
+    let mut cov = [one; 6];
+    for (k, (a, b)) in [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)].into_iter().enumerate() {
+        cov[k] = dot16!(|i| mt[a][i], t[b][i]) * n - sum[a] * sum[b];
     }
-    let mut v = [rr, rg, rb];
-    let mut big = rr;
-    let sel = big.simd_lt(gg);
-    v = [
-        V::select(sel, rg, v[0]),
-        V::select(sel, gg, v[1]),
-        V::select(sel, gb, v[2]),
+    let v = principal_axis(cov, 3);
+    let ws = {
+        let s = shrink(abs_max(&v), 6);
+        [floor(v[0] * s), floor(v[1] * s), floor(v[2] * s)]
+    };
+    let (hi, lo) = subset_ends(t, m, n, &sum, &ws);
+    let inv16 = V::splat(1.0 / 16.0);
+    let mut e = [
+        [lo[0] * inv16, lo[1] * inv16, lo[2] * inv16],
+        [hi[0] * inv16, hi[1] * inv16, hi[2] * inv16],
     ];
-    big = big.simd_max(gg);
-    let sel = big.simd_lt(bb);
-    v = [
-        V::select(sel, rb, v[0]),
-        V::select(sel, gb, v[1]),
-        V::select(sel, bb, v[2]),
-    ];
-    let mut it = 0;
-    while it < 3 {
-        let w = [
-            rr.mul_add(v[0], rg.mul_add(v[1], rb * v[2])),
-            rg.mul_add(v[0], gg.mul_add(v[1], gb * v[2])),
-            rb.mul_add(v[0], gb.mul_add(v[1], bb * v[2])),
-        ];
-        let mx = w[0]
-            .simd_max(zero - w[0])
-            .simd_max(w[1].simd_max(zero - w[1]))
-            .simd_max(w[2].simd_max(zero - w[2]));
-        let s = V::select(V::splat(1e-20).simd_lt(mx), one / mx, zero);
-        v = [w[0] * s, w[1] * s, w[2] * s];
-        it += 1;
-    }
-    let n2 = v[0].mul_add(v[0], v[1].mul_add(v[1], v[2] * v[2]));
-    let flat = n2.simd_lt(V::splat(1e-12));
-    v = [
-        V::select(flat, one, v[0]),
-        V::select(flat, one, v[1]),
-        V::select(flat, one, v[2]),
-    ];
-    let n2 = V::select(flat, V::splat(3.0), n2);
-    let (mut lo, mut hi) = (V::splat(f32::MAX), V::splat(f32::MIN));
-    let mut i = 0;
-    while i < 16 {
-        let s = (t[0][i] - mean[0]).mul_add(v[0], (t[1][i] - mean[1]).mul_add(v[1], (t[2][i] - mean[2]) * v[2]));
-        let member = zero.simd_lt(m[i]);
-        lo = V::select(member, lo.simd_min(s), lo);
-        hi = V::select(member, hi.simd_max(s), hi);
-        i += 1;
-    }
-    let (lo, hi) = (lo.simd_min(zero) / n2, hi.simd_max(zero) / n2);
-    let full = V::splat(255.0);
-    let mut e = [[zero; 3]; 2];
-    let mut c = 0;
-    while c < 3 {
-        e[0][c] = v[c].mul_add(lo, mean[c]).simd_clamp(zero, full);
-        e[1][c] = v[c].mul_add(hi, mean[c]).simd_clamp(zero, full);
-        c += 1;
-    }
     let (q, p, vq) = quant_two(&e, mode);
     let (idx, err) = index_two(t, m, &vq, mode);
     let mut best = Sub { q, p, v: vq, idx, err };
     let mut r = 0;
     while r < refits {
-        // Least-squares endpoints over the members for the current indices.
-        let (mut aa, mut ab, mut bbw) = (zero, zero, zero);
-        let mut ax = [zero; 3];
-        let mut bx = [zero; 3];
-        let inv64 = V::splat(1.0 / 64.0);
-        let mut i = 0;
-        while i < 16 {
-            let wb = weight(best.idx[i], 1u32 << mode.index_bits()) * inv64;
-            let wa = (one - wb) * m[i];
-            let wb = wb * m[i];
-            aa = wa.mul_add(wa, aa);
-            ab = wa.mul_add(wb, ab);
-            bbw = wb.mul_add(wb, bbw);
-            let mut c = 0;
-            while c < 3 {
-                ax[c] = wa.mul_add(t[c][i], ax[c]);
-                bx[c] = wb.mul_add(t[c][i], bx[c]);
-                c += 1;
-            }
-            i += 1;
-        }
-        let det = aa * bbw - ab * ab;
-        let ok = V::splat(1e-3).simd_lt(det);
-        let inv = one / V::select(ok, det, one);
-        let mut ne = e;
-        let mut c = 0;
-        while c < 3 {
-            ne[0][c] = V::select(ok, ((bbw * ax[c] - ab * bx[c]) * inv).simd_clamp(zero, full), e[0][c]);
-            ne[1][c] = V::select(ok, ((aa * bx[c] - ab * ax[c]) * inv).simd_clamp(zero, full), e[1][c]);
-            c += 1;
-        }
+        let (a, b, ok) = ls_ends(t, m, &best.idx, 1u32 << mode.index_bits(), (e[0], e[1]));
+        let ne = [a, b];
         let (q, p, vq) = quant_two(&ne, mode);
         let (idx, err) = index_two(t, m, &vq, mode);
         let take = ok & err.simd_lt(best.err);
@@ -1083,7 +1040,7 @@ fn uber6<V: SimdF32>(
                 i += 1;
             }
         }
-        let (a, b, ok) = ls_endpoints(t, &idx2, prev);
+        let (a, b, ok) = ls_ends(t, &[V::splat(1.0); 16], &idx2, 16, prev);
         let cand = quantize(&a, &b, opaque);
         let (cidx, cerr) = project(t, &cand, true);
         let take = active & ok & cerr.simd_lt(*err);
@@ -1982,6 +1939,82 @@ fn axis_point<V: SimdF32>(sc: V, wc: V, q: V, r: V, n2: V, inv: V) -> V {
     (sc + wc * q + div_floor(wc * r, n2, inv).0).simd_clamp(V::splat(0.0), V::splat(4080.0))
 }
 
+/// Principal axis of a covariance scaled to integers, `c` = [rr, rg, rb, gg, gb, bb] (n Σxy - Σx Σy,
+/// below 2^24): the matrix cut to 11 bits (its largest diagonal bounds every entry), then `power`
+/// iterations from the largest-diagonal row (the first on ties), each step's vector cut to
+/// 10 bits so every product stays below 2^24. Flat lanes get (1, 1, 1).
+#[inline(always)]
+fn principal_axis<V: SimdF32>(c: [V; 6], power: u8) -> [V; 3] {
+    let [rr, rg, rb, gg, gb, bb] = c;
+    let cs = shrink(rr.simd_max(gg).simd_max(bb), 10);
+    let (srr, srg, srb, sgg, sgb, sbb) = (
+        floor(rr * cs),
+        floor(rg * cs),
+        floor(rb * cs),
+        floor(gg * cs),
+        floor(gb * cs),
+        floor(bb * cs),
+    );
+    let m = rr.simd_lt(gg);
+    let mut v = [V::select(m, srg, srr), V::select(m, sgg, srg), V::select(m, sgb, srb)];
+    let m = rr.simd_max(gg).simd_lt(bb);
+    v = [
+        V::select(m, srb, v[0]),
+        V::select(m, sgb, v[1]),
+        V::select(m, sbb, v[2]),
+    ];
+    let mut it = 0;
+    while it < power {
+        let w = [
+            srr * v[0] + srg * v[1] + srb * v[2],
+            srg * v[0] + sgg * v[1] + sgb * v[2],
+            srb * v[0] + sgb * v[1] + sbb * v[2],
+        ];
+        let s = shrink(abs_max(&w), 9);
+        v = [floor(w[0] * s), floor(w[1] * s), floor(w[2] * s)];
+        it += 1;
+    }
+    let flat = abs_max(&v).simd_lt(V::splat(0.5));
+    let one = V::splat(1.0);
+    [
+        V::select(flat, one, v[0]),
+        V::select(flat, one, v[1]),
+        V::select(flat, one, v[2]),
+    ]
+}
+
+/// The endpoints (high, low) of the texels in `m` (0/1 per texel; `n` members, channel sums
+/// `sum`) on the integer axis `ws` through their mean, in 1/16 units: as [`line_ends`] in
+/// 1/n units (τ = n p_ext - Σp over the members), clamped to 0..=255 n, then floor(16 E / n).
+#[inline(always)]
+fn subset_ends<V: SimdF32>(t: &Texels<V>, m: &[V; 16], n: V, sum: &[V; 3], ws: &[V; 3]) -> ([V; 3], [V; 3]) {
+    let (zero, big) = (V::splat(0.0), V::splat(1.0e7));
+    let mut p = [zero; 16];
+    let mut i = 0;
+    while i < 16 {
+        p[i] = t[0][i] * ws[0] + t[1][i] * ws[1] + t[2][i] * ws[2];
+        i += 1;
+    }
+    let pmin = reduce16!(|i| V::select(zero.simd_lt(m[i]), p[i], big), |a, b| a.simd_min(b));
+    let pmax = reduce16!(|i| V::select(zero.simd_lt(m[i]), p[i], zero - big), |a, b| a
+        .simd_max(b));
+    let pm = sum[0] * ws[0] + sum[1] * ws[1] + sum[2] * ws[2];
+    let n2 = ws[0] * ws[0] + ws[1] * ws[1] + ws[2] * ws[2];
+    let inv = V::splat(1.0) / n2;
+    let (qh, rh) = div_floor(pmax * n - pm, n2, inv);
+    let (ql, rl) = div_floor(pmin * n - pm, n2, inv);
+    let (top, inv_n) = (n * V::splat(255.0), V::splat(1.0) / n);
+    let mut hi = [zero; 3];
+    let mut lo = [zero; 3];
+    let mut c = 0;
+    while c < 3 {
+        hi[c] = line_point(sum[c], qh, rh, ws[c], n2, inv, top, inv_n);
+        lo[c] = line_point(sum[c], ql, rl, ws[c], n2, inv, top, inv_n);
+        c += 1;
+    }
+    (hi, lo)
+}
+
 /// Encodes eight opaque blocks; returns the four 32-bit words of each lane's mode-6 block and,
 /// for lanes where a 2-subset mode won, that block instead.
 #[inline(always)]
@@ -2000,51 +2033,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
     let gg = sum16!(|i| t[1][i] * t[1][i]) * s16 - sum[1] * sum[1];
     let gb = sum16!(|i| t[1][i] * t[2][i]) * s16 - sum[1] * sum[2];
     let bb = sum16!(|i| t[2][i] * t[2][i]) * s16 - sum[2] * sum[2];
-    // Power iteration from the largest-diagonal row (the first on ties), on the covariance cut
-    // to 11 bits (the largest diagonal bounds every entry); each step's vector is cut to 10 bits,
-    // so every product stays below 2^24.
-    let cs = shrink(rr.simd_max(gg).simd_max(bb), 10);
-    let (srr, srg, srb, sgg, sgb, sbb) = (
-        floor(rr * cs),
-        floor(rg * cs),
-        floor(rb * cs),
-        floor(gg * cs),
-        floor(gb * cs),
-        floor(bb * cs),
-    );
-    let mut v = [srr, srg, srb];
-    let mut big = rr;
-    let m = big.simd_lt(gg);
-    v = [
-        V::select(m, srg, v[0]),
-        V::select(m, sgg, v[1]),
-        V::select(m, sgb, v[2]),
-    ];
-    big = big.simd_max(gg);
-    let m = big.simd_lt(bb);
-    v = [
-        V::select(m, srb, v[0]),
-        V::select(m, sgb, v[1]),
-        V::select(m, sbb, v[2]),
-    ];
-    let mut it = 0;
-    while it < cfg.power {
-        let w = [
-            srr * v[0] + srg * v[1] + srb * v[2],
-            srg * v[0] + sgg * v[1] + sgb * v[2],
-            srb * v[0] + sgb * v[1] + sbb * v[2],
-        ];
-        let s = shrink(abs_max(&w), 9);
-        v = [floor(w[0] * s), floor(w[1] * s), floor(w[2] * s)];
-        it += 1;
-    }
-    // Degenerate (flat) lanes: any axis works.
-    let flat = abs_max(&v).simd_lt(V::splat(0.5));
-    v = [
-        V::select(flat, V::splat(1.0), v[0]),
-        V::select(flat, V::splat(1.0), v[1]),
-        V::select(flat, V::splat(1.0), v[2]),
-    ];
+    let v = principal_axis([rr, rg, rb, gg, gb, bb], cfg.power);
     // The axis cut to 7 bits, and the endpoints: the points of the axis line through the mean
     // that the extreme projections project from (in 1/16 units, see [`line_ends`]).
     let ws = {
@@ -2077,7 +2066,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
         }
         let mut r = 0;
         while r < cfg.refits {
-            let (a, b, ok) = ls_endpoints(t, &idx, (e0, e1));
+            let (a, b, ok) = ls_ends(t, &[V::splat(1.0); 16], &idx, 16, (e0, e1));
             let cand = quantize(&a, &b, op);
             let (cidx, cerr) = project(t, &cand, cfg.exact);
             let cerr = if cfg.exact { cerr } else { error(t, &cand, &cidx) };
