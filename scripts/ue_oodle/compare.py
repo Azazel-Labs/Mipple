@@ -6,6 +6,11 @@ size at Oodle's RMSE and at Oodle's SSIM (log-linear interpolation on mipple's P
 
   python scripts/ue_oodle/compare.py --oodle <run_ue_oodle --out dir> --out bench-results/oodle-ue
 
+Without the cook's dumps, --scores reuses Oodle's scores from an earlier results.json and only re-runs mipple
+(BC1, BC4 and BC7, whose sources are the Kodak PNGs; BC5 needs the cook's R16G16 inputs):
+
+  python scripts/ue_oodle/compare.py --scores bench-results/oodle-ue/results.json --formats bc7       --images kodim03 kodim05 kodim08 kodim13 kodim18 kodim24 --out <scratch dir>
+
 Sources: BC1/BC7 are the PNGs UE imported, unaltered. BC4 is the R channel (UE widens it to 16 bits as R*257,
 which is exact). BC5 goes through UE's normal-map import, which renormalizes to R16G16 before Oodle sees it;
 the reference is that R16G16 input (bc5/inputs/<image>_IN.dds) in 8-bit units, and mipple encodes it rounded
@@ -106,10 +111,13 @@ def job(a, fmt, image, lams):
         src = a.images[image]
         ref = load(src, ch)
     oodle = []
-    for lam in lams:
+    for lam in lams if a.scores is None else []:
         dds = a.oodle / fmt / f"{image}_l{lam:g}.dds"
         r, s = metrics(ref, decoded(a.exe, dds, work / f"oodle_l{lam:g}.png", ch))
         oodle.append({"lambda": lam, "bpt": zstd_bpt(a.exe, src, dds), "rmse": r, "ssim": s})
+    if a.scores is not None:
+        oodle = [{k: o[k] for k in ("lambda", "bpt", "rmse", "ssim")} for o in a.scores[(fmt, image)]
+                 if o["lambda"] in lams]
     mipple = []
     for lam in SWEEP:
         ktx = work / f"mipple_l{lam:g}.ktx2"
@@ -170,16 +178,28 @@ def summarize(results, lams, a):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--oodle", type=Path, required=True, help="run_ue_oodle.py --out directory")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--oodle", type=Path, help="run_ue_oodle.py --out directory")
+    src.add_argument("--scores", type=Path, help="reuse Oodle's scores from this results.json (no dumps needed)")
     p.add_argument("--out", type=Path, default=ROOT / "bench-results" / "oodle-ue")
     p.add_argument("--work", type=Path, help="scratch directory (default: <out>/work, not committed)")
     p.add_argument("--exe", default=str(ROOT / "target" / "release" / "mipple.exe"))
     p.add_argument("--effort", type=int, default=5)
     p.add_argument("--mipple-args", default="")
     p.add_argument("--formats", nargs="+", default=["bc1", "bc7", "bc4", "bc5"])
+    p.add_argument("--images", nargs="+", help="only these images (default: all)")
     p.add_argument("--jobs", type=int, default=6)
     a = p.parse_args()
     a.work = a.work or a.out / "work"
+    if a.scores is not None:
+        prev = json.load(open(a.scores, encoding="utf-8"))
+        lams = prev["settings"]["oodle_lambdas"]
+        a.scores = {(r["format"], r["image"]): r["oodle"] for r in prev["results"]
+                    if r["format"] in a.formats and r["format"] != "bc5"
+                    and (a.images is None or r["image"] in a.images)}
+        a.images = {img: ROOT / "test-images" / "kodak" / f"{img}.png" for _, img in a.scores}
+        run(a, sorted(a.scores), lams)
+        return
     rows = list(csv.DictReader(open(a.oodle / "manifest.csv", newline="")))
     run_info = json.load(open(a.oodle / "run_info.json"))
     a.images = {}
@@ -191,11 +211,14 @@ def main():
             i += 1
     todo = {}
     for r in rows:
-        if r["status"] == "ok" and r["fmt"] in a.formats:
+        if r["status"] == "ok" and r["fmt"] in a.formats and (a.images is None or r["image"] in a.images):
             todo.setdefault((r["fmt"], r["image"]), set()).add(float(r["lambda"]))
-    lams = sorted(set.intersection(*todo.values()))
+    run(a, sorted(todo), sorted(set.intersection(*todo.values())))
+
+
+def run(a, keys, lams):
     with ThreadPoolExecutor(a.jobs) as ex:
-        results = list(ex.map(lambda k: job(a, k[0], k[1], lams), sorted(todo)))
+        results = list(ex.map(lambda k: job(a, k[0], k[1], lams), keys))
     a.out.mkdir(parents=True, exist_ok=True)
     settings = {"oodle": "Oodle Texture 2.9.16 via Unreal Engine 5.8.4 (EncodeSpeed Final, bFinalUsesRDO)",
                 "mipple_effort": a.effort, "mipple_args": a.mipple_args, "sweep": SWEEP, "oodle_lambdas": lams}
