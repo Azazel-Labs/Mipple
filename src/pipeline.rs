@@ -103,6 +103,58 @@ pub fn encode_base(surface: &Surface, format: Format, opts: impl Into<BlockOpts>
 /// BC7 plain-search effort floor for RDO's base encodings (see [`encode`]).
 pub const RDO_BASE_EFFORT: u8 = 8;
 
+/// One surface's starting point for RDO, made as [`encode`] makes it: the base encoding and the
+/// alternate bases each block may start from (BC7 only). `src` is `surface.blocks()`, or empty when
+/// the format reads the surface directly and `rdo` is off.
+pub fn rdo_bases(
+    surface: &Surface,
+    src: &[Block],
+    format: Format,
+    bo: BlockOpts,
+    rdo: bool,
+) -> (Vec<[u8; 16]>, Vec<Vec<[u8; 16]>>) {
+    // BC7 RDO: the plain search at RDO_BASE_EFFORT or more, as the base or (entropy-reduced
+    // base) the second base. Its cost is small next to RDO's, and RDO keeps much of the
+    // quality it adds (Kodak subset vs Oodle 2.9.16 on Zstd-19, λ 10-40 at equal RMSE:
+    // -e 5 +8.3% -> +4.0%).
+    let bc7_rdo = format == Format::Bc7 && rdo;
+    let plain = BlockOpts {
+        reduce_entropy: false,
+        effort: if bc7_rdo {
+            bo.effort.max(RDO_BASE_EFFORT)
+        } else {
+            bo.effort
+        },
+    };
+    let base = if format == Format::Bc7 && !bo.reduce_entropy {
+        plain
+    } else {
+        bo
+    };
+    let encode = |o: BlockOpts| {
+        if direct(format, o) {
+            encode_surface_blocks(surface, format, o)
+        } else {
+            encode_src_blocks(src, format, o)
+        }
+    };
+    let blocks = encode(base);
+    // BC7: with an entropy-reduced base, the plain (error-only) encoding; always, a mode-6-only
+    // encoding, whose blocks share one layout and so give later blocks more to copy (Oodle's RDO
+    // output is mostly mode 6).
+    let mut alts = Vec::new();
+    if bc7_rdo {
+        if bo.reduce_entropy {
+            alts.push(encode(plain));
+        }
+        alts.push(unflatten(
+            format,
+            &crate::bc7::fast::encode_surface(surface, crate::bc7::mode6_cfg(), plain),
+        ));
+    }
+    (blocks, alts)
+}
+
 /// Formats whose encoder reads the surface directly instead of materialized blocks.
 fn direct(format: Format, opts: BlockOpts) -> bool {
     match format {
@@ -209,45 +261,10 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         } else {
             Vec::new()
         };
-        let bo = opts.block_opts();
-        // BC7 RDO: the plain search at RDO_BASE_EFFORT or more, as the base or (entropy-reduced
-        // base) the second base. Its cost is small next to RDO's, and RDO keeps much of the
-        // quality it adds (Kodak subset vs Oodle 2.9.16 on Zstd-19, λ 10-40 at equal RMSE:
-        // -e 5 +8.3% -> +4.0%).
-        let plain = BlockOpts {
-            reduce_entropy: false,
-            effort: if opts.format == Format::Bc7 && rdo_params.enabled() {
-                bo.effort.max(RDO_BASE_EFFORT)
-            } else {
-                bo.effort
-            },
-        };
-        let base = if opts.format == Format::Bc7 && !bo.reduce_entropy {
-            plain
-        } else {
-            bo
-        };
-        let mut blocks = if direct(opts.format, base) {
-            encode_surface_blocks(level, opts.format, base)
-        } else {
-            encode_src_blocks(&src, opts.format, base)
-        };
+        let (mut blocks, alts) = rdo_bases(level, &src, opts.format, opts.block_opts(), rdo_params.enabled());
         let t1 = Instant::now();
         let stats = if rdo_params.enabled() {
             let row = (level.width as usize).div_ceil(4);
-            // BC7: other bases each block may start from. With an entropy-reduced base, the plain
-            // (error-only) encoding; always, a mode-6-only encoding, whose blocks share one layout
-            // and so give later blocks more to copy (Oodle's RDO output is mostly mode 6).
-            let mut alts = Vec::new();
-            if opts.format == Format::Bc7 {
-                if bo.reduce_entropy {
-                    alts.push(encode_surface_blocks(level, opts.format, plain));
-                }
-                alts.push(unflatten(
-                    opts.format,
-                    &crate::bc7::fast::encode_surface(level, crate::bc7::mode6_cfg(), plain),
-                ));
-            }
             rdo::optimize_with_alt(
                 opts.format,
                 &src,

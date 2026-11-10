@@ -5,7 +5,7 @@
 
 use crate::format::{BlockOpts, EntropyMode, Format};
 use crate::metrics;
-use crate::pipeline::{EncodedTexture, decode_blocks, encode_base, flatten};
+use crate::pipeline::{EncodedTexture, decode_blocks, flatten, rdo_bases};
 use crate::rdo::{self, RdoParams};
 use crate::surface::Surface;
 use anyhow::{Context, Result};
@@ -170,8 +170,8 @@ pub fn score(
     })
 }
 
-/// Source blocks, base-encoded blocks, and the seconds the base encode took.
-type BaseEncode = (Vec<crate::surface::Block>, Vec<[u8; 16]>, f64);
+/// Base-encoded blocks, alternate bases (BC7 RDO), and the seconds they took.
+type BaseEncode = (Vec<[u8; 16]>, Vec<Vec<[u8; 16]>>, f64);
 
 /// An in-memory benchmark input.
 #[derive(Clone, Debug)]
@@ -222,26 +222,30 @@ pub fn run_images(
     let mut rows = Vec::new();
     for img in images {
         let (surface, normal, name) = (&img.surface, img.normal, &img.name);
+        let src = surface.blocks();
         for &format in &cfg.formats {
             let w = format.error_weights();
-            // Up to two base encodes per format: plain and entropy-reduced, each made on first use.
-            let mut bases: [Option<BaseEncode>; 2] = [None, None];
-            let mut base_used = [false; 2];
+            // Base encodes, as `mipple encode` makes them, per (entropy-reduced, RDO on): each made
+            // on first use and shared by the λ that need it.
+            let mut bases: [Option<BaseEncode>; 4] = Default::default();
+            let mut base_used = [false; 4];
             for &lambda in &cfg.lambdas {
                 let reduce = cfg.entropy.resolve(lambda);
-                let slot = &mut bases[reduce as usize];
+                let rdo_on = lambda > 0.0;
+                let key = reduce as usize * 2 + rdo_on as usize;
+                let slot = &mut bases[key];
                 if slot.is_none() {
                     let t0 = Instant::now();
                     let opts = BlockOpts {
                         effort: cfg.effort,
                         reduce_entropy: reduce,
                     };
-                    let (src, base) = encode_base(surface, format, opts);
-                    *slot = Some((src, base, t0.elapsed().as_secs_f64()));
+                    let (base, alts) = rdo_bases(surface, &src, format, opts, rdo_on);
+                    *slot = Some((base, alts, t0.elapsed().as_secs_f64()));
                 }
-                let (src, base, base_secs) = slot.as_ref().unwrap();
+                let (base, alts, base_secs) = slot.as_ref().unwrap();
                 let base_secs = *base_secs;
-                let base_new = !std::mem::replace(&mut base_used[reduce as usize], true);
+                let base_new = !std::mem::replace(&mut base_used[key], true);
                 let mut blocks = base.clone();
                 let params = RdoParams {
                     lambda,
@@ -250,7 +254,7 @@ pub fn run_images(
                     ..cfg.rdo
                 };
                 let t1 = Instant::now();
-                let stats = rdo::optimize(format, src, &mut blocks, &w, &params);
+                let stats = rdo::optimize_with_alt(format, &src, &mut blocks, alts, &w, &params);
                 let rdo_secs = t1.elapsed().as_secs_f64();
                 let data = flatten(format, &blocks);
                 let zstd_bytes = zstd::bulk::compress(&data, cfg.zstd_level)?.len();
