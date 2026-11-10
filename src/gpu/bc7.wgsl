@@ -15,7 +15,9 @@ struct Params {
     count: u32,  // blocks in this dispatch
     power: u32,  // power iterations of the mode-6 fit
     first: u32,  // first block of this dispatch; block g writes output words 4g..4g + 3
-    stages: u32, // mode-6 refits | mode-1 partition candidates << 8 (0: mode 6 only) | ranked << 16
+    // Mode-6 refits | mode-1 partition candidates << 8 (0: mode 6 only) | ranked (else bc7f's
+    // estimate) << 16 | mode-1 refits << 20 | refinement passes << 24 | mode-6 refinement << 28.
+    stages: u32,
     busy: u32,   // mode 1 is tried when the mode-6 error exceeds this (and the block has spread)
 }
 
@@ -248,7 +250,44 @@ fn dequant6p(q: vec3<i32>, p: i32) -> vec3<i32> {
     return 2 * v7 + (v7 >> vec3(6u));
 }
 
-fn encode_two(mask: u32) -> Sub {
+// Indices and error of a subset's members for levels q0, q1 and p-bit p: j = floor(7 (x - a)·d
+// / |d|²) clamped to 0..=6, then j or j + 1 (`index_two`).
+fn index_sub(mask: u32, q0: vec3<i32>, q1: vec3<i32>, p: i32) -> Sub {
+    var o: Sub;
+    o.q0 = q0;
+    o.q1 = q1;
+    o.p = p;
+    let a = dequant6p(q0, p);
+    let d = dequant6p(q1, p) - a;
+    let dd = max(dot(d, d), 1);
+    o.err = 0;
+    var idx: array<i32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        idx[i] = 0;
+        if (mask & (1u << i)) != 0u {
+            let j = clamp(floor_div(7 * dot(t[i] - a, d), dd), 0, 6);
+            let e0 = entry_err(i, a, d, W3[j]);
+            let e1 = entry_err(i, a, d, W3[j + 1]);
+            idx[i] = select(j, j + 1, e1 < e0);
+            o.err += min(e0, e1);
+        }
+    }
+    o.idx = idx;
+    return o;
+}
+
+// Mode-1 levels of endpoints lo, hi (1/16 units) with the shared p-bit of the lower total
+// endpoint error (0 on ties), then the members' indices (`quant_two`).
+fn quant_sub(mask: u32, lo: vec3<i32>, hi: vec3<i32>) -> Sub {
+    let a0 = quant6p3(lo, 0);
+    let b0 = quant6p3(hi, 0);
+    let a1 = quant6p3(lo, 1);
+    let b1 = quant6p3(hi, 1);
+    let one = a1.w + b1.w < a0.w + b0.w;
+    return index_sub(mask, select(a0.xyz, a1.xyz, one), select(b0.xyz, b1.xyz, one), select(0, 1, one));
+}
+
+fn encode_two(mask: u32, refits: u32) -> Sub {
     // Masked line fit: n Σxy - Σx Σy, three power iterations, a 7-bit axis, the members'
     // extreme projections (`encode_two`, `subset_ends`).
     var n = 0;
@@ -286,34 +325,94 @@ fn encode_two(mask: u32) -> Sub {
     let rl = pmin * n - pm - ql * n2;
     let hi = line_point(s, vec3(qh), vec3(rh), ws, n2, n);
     let lo = line_point(s, vec3(ql), vec3(rl), ws, n2, n);
-    // The shared p-bit with the lower total endpoint error (0 on ties).
-    let a0 = quant6p3(lo, 0);
-    let b0 = quant6p3(hi, 0);
-    let a1 = quant6p3(lo, 1);
-    let b1 = quant6p3(hi, 1);
-    let one = a1.w + b1.w < a0.w + b0.w;
-    var o: Sub;
-    o.p = select(0, 1, one);
-    o.q0 = select(a0.xyz, a1.xyz, one);
-    o.q1 = select(b0.xyz, b1.xyz, one);
-    // Indices: j = floor(7 (x - a)·d / |d|²) clamped to 0..=6, then j or j + 1 (`index_two`).
-    let a = dequant6p(o.q0, o.p);
-    let d = dequant6p(o.q1, o.p) - a;
-    let dd = max(dot(d, d), 1);
-    o.err = 0;
-    var idx: array<i32, 16>;
-    for (var i = 0u; i < 16u; i++) {
-        idx[i] = 0;
-        if (mask & (1u << i)) != 0u {
-            let j = clamp(floor_div(7 * dot(t[i] - a, d), dd), 0, 6);
-            let e0 = entry_err(i, a, d, W3[j]);
-            let e1 = entry_err(i, a, d, W3[j + 1]);
-            idx[i] = select(j, j + 1, e1 < e0);
-            o.err += min(e0, e1);
+    var best = quant_sub(mask, lo, hi);
+    // Least-squares refits on the members' weights, each kept when it lowers the error.
+    for (var r = 0u; r < refits; r++) {
+        var w: array<i32, 16>;
+        for (var i = 0u; i < 16u; i++) {
+            w[i] = W3[best.idx[i]];
+        }
+        let ls = ls_ends(w, mask, n, s);
+        if !ls.ok {
+            break;
+        }
+        let cand = quant_sub(mask, ls.lo, ls.hi);
+        if cand.err >= best.err {
+            break;
+        }
+        best = cand;
+    }
+    return best;
+}
+
+// Greedy ±1 moves of each endpoint channel level (endpoint, channel, +1 then -1), then the
+// shared p-bit flip, each kept when it lowers the error; up to `passes` sweeps (`refine_two`).
+fn refine_sub(mask: u32, sub: Sub, passes: u32) -> Sub {
+    var b = sub;
+    for (var it = 0u; it < passes; it++) {
+        var any = false;
+        for (var mv = 0; mv < 12; mv++) {
+            let k = mv / 6;
+            let c = (mv / 2) % 3;
+            // The move as a vector (no component writes by a variable index, for FXC); the other
+            // channels are in range, so the clamp leaves them.
+            let dv = select(vec3(0), vec3(select(1, -1, (mv & 1) != 0)), vec3(c) == vec3(0, 1, 2));
+            let q0 = clamp(b.q0 + select(vec3(0), dv, k == 0), vec3(0), vec3(63));
+            let q1 = clamp(b.q1 + select(vec3(0), dv, k == 1), vec3(0), vec3(63));
+            let cand = index_sub(mask, q0, q1, b.p);
+            if cand.err < b.err {
+                b = cand;
+                any = true;
+            }
+        }
+        let cand = index_sub(mask, b.q0, b.q1, 1 - b.p);
+        if cand.err < b.err {
+            b = cand;
+            any = true;
+        }
+        if !any {
+            break;
         }
     }
-    o.idx = idx;
-    return o;
+    return b;
+}
+
+// Greedy ±1 moves of the mode-6 RGB levels (endpoint, channel, +1 then -1), then flips of the
+// first, second and both p-bits, each kept when it lowers the error; up to `passes` sweeps
+// (`refine6`).
+fn refine6(f0: Fit6, passes: u32) -> Fit6 {
+    var f = f0;
+    for (var it = 0u; it < passes; it++) {
+        var any = false;
+        for (var mv = 0; mv < 15; mv++) {
+            var e = f.e;
+            if mv < 12 {
+                let k = mv / 6;
+                let c = (mv / 2) % 3;
+                let dv = select(vec3(0), vec3(select(1, -1, (mv & 1) != 0)), vec3(c) == vec3(0, 1, 2));
+                e.q0 = clamp(e.q0 + select(vec3(0), dv, k == 0), vec3(0), vec3(127));
+                e.q1 = clamp(e.q1 + select(vec3(0), dv, k == 1), vec3(0), vec3(127));
+            } else {
+                if mv != 13 {
+                    e.p0 = 1 - e.p0;
+                }
+                if mv != 12 {
+                    e.p1 = 1 - e.p1;
+                }
+            }
+            e.v0 = 2 * e.q0 + e.p0;
+            e.v1 = 2 * e.q1 + e.p1;
+            let cand = project6(e);
+            if cand.err < f.err {
+                f = cand;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    return f;
 }
 
 // Writes the low n bits of v at bit position pos of a 128-bit block.
@@ -509,12 +608,13 @@ fn encode() -> array<u32, 4> {
     // Mode 1 for blocks with error left and some spread, on the K partitions nearest (in
     // Hamming distance, either polarity) to the split by the side of the mean along the axis.
     let parts = (P.stages >> 8u) & 255u;
+    let two_refits = (P.stages >> 20u) & 15u;
     let busy = i32(P.busy) < f.err && 1024 < max(c[0].x, max(c[1].y, c[2].z));
     if parts == 0u || !busy {
         return pack6(f);
     }
     var best_p = array<u32, 4>(0u, 0u, 0u, 0u);
-    if (P.stages >> 16u) != 0u {
+    if ((P.stages >> 16u) & 15u) != 0u {
         best_p = rank_fits(v, parts);
     } else {
         var bits = 0u;
@@ -546,8 +646,8 @@ fn encode() -> array<u32, 4> {
     var w1: Sub;
     for (var k = 0u; k < parts; k++) {
         let part = best_p[k];
-        let s0 = encode_two(~PART2[part] & 0xffffu);
-        let s1 = encode_two(PART2[part]);
+        let s0 = encode_two(~PART2[part] & 0xffffu, two_refits);
+        let s1 = encode_two(PART2[part], two_refits);
         let e = s0.err + s1.err;
         if k == 0u || e < win_err {
             win_err = e;
@@ -556,8 +656,17 @@ fn encode() -> array<u32, 4> {
             w1 = s1;
         }
     }
+    // ±1 refinement of the winner (it never raises the error, so the winner stays).
+    let refine = (P.stages >> 24u) & 15u;
     if win_err < f.err {
+        if refine > 0u {
+            w0 = refine_sub(~PART2[win_part] & 0xffffu, w0, refine);
+            w1 = refine_sub(PART2[win_part], w1, refine);
+        }
         return pack1(win_part, w0, w1);
+    }
+    if refine > 0u && (P.stages >> 28u) != 0u {
+        f = refine6(f, refine);
     }
     return pack6(f);
 }

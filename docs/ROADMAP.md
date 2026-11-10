@@ -119,8 +119,9 @@ Open for v0.9.x:
   rounding and index projection) exact on the CPU at unchanged speed and quality. BC7 effort 3
   (mode 1 on the best line-fit-ranked partition), after making the partition ranking exact
   (scatter matrices cut to 10 bits, a 5-bit power step, floored estimates; -0.004 dB on Kodak,
-  ~15% slower ranking on the CPU).
-  Next: BC7 subset refits, refinement and modes 3/0/2/5 up to effort 8 (where the GPU should win) and the RDO
+  ~15% slower ranking on the CPU). BC7 efforts 4-5: subset refits on the ranked candidates and ±1
+  endpoint/p-bit refinement of the mode-1 or mode-6 winner.
+  Next: BC7 modes 3/0/2/5 up to effort 8 (where the GPU should win) and the RDO
   alternates, BC1 efforts 2+ (needs per-lane cluster-fit pruning and exact split scoring), then
   WebGPU in the web demo when the browser has it.
 
