@@ -7,7 +7,8 @@ size at Oodle's RMSE and at Oodle's SSIM (log-linear interpolation on mipple's P
   python scripts/ue_oodle/compare.py --oodle <run_ue_oodle --out dir> --out bench-results/oodle-ue
 
 Without the cook's dumps, --scores reuses Oodle's scores from an earlier results.json and only re-runs mipple
-(BC1, BC4 and BC7, whose sources are the Kodak PNGs; BC5 needs the cook's R16G16 inputs):
+on the Kodak PNGs. BC5's R16G16 input is rebuilt from the PNG the way run_ue_oodle.py's input check measured
+UE's normal-map import (XY of normalize(rgb/255*2-1), remapped to 0..65535):
 
   python scripts/ue_oodle/compare.py --scores bench-results/oodle-ue/results.json --formats bc7       --images kodim03 kodim05 kodim08 kodim13 kodim18 kodim24 --out <scratch dir>
 
@@ -66,6 +67,13 @@ def read_r16g16(path):
     return px.astype(np.float64) / 257.0
 
 
+def normal_xy(png):
+    """UE's normal-map import of an 8-bit PNG (see run_ue_oodle.check_input), in 8-bit units like read_r16g16."""
+    n = np.asarray(Image.open(png).convert("RGB")).astype(np.float64) / 255.0 * 2 - 1
+    u = n / np.maximum(np.linalg.norm(n, axis=2, keepdims=True), 1e-9)
+    return np.rint((u[:, :, :2] + 1) / 2 * 65535) / 257.0
+
+
 def decoded(exe, src, png, ch):
     subprocess.run([exe, "decode", str(src), "-o", str(png)], check=True, capture_output=True)
     return np.asarray(Image.open(png).convert("RGB")).astype(np.float64)[:, :, :ch]
@@ -103,7 +111,10 @@ def job(a, fmt, image, lams):
     work = a.work / fmt / image
     work.mkdir(parents=True, exist_ok=True)
     if fmt == "bc5":
-        ref = read_r16g16(a.oodle / "bc5" / "inputs" / f"{image}_IN.dds")
+        if a.scores is None:
+            ref = read_r16g16(a.oodle / "bc5" / "inputs" / f"{image}_IN.dds")
+        else:
+            ref = normal_xy(ROOT / "test-images" / "kodak" / f"{image}.png")
         src = work / "src.png"
         rg = np.clip(np.rint(ref), 0, 255).astype(np.uint8)
         Image.fromarray(np.dstack([rg, np.zeros_like(rg[:, :, :1])]), "RGB").save(src)
@@ -195,7 +206,7 @@ def main():
         prev = json.load(open(a.scores, encoding="utf-8"))
         lams = prev["settings"]["oodle_lambdas"]
         a.scores = {(r["format"], r["image"]): r["oodle"] for r in prev["results"]
-                    if r["format"] in a.formats and r["format"] != "bc5"
+                    if r["format"] in a.formats
                     and (a.images is None or r["image"] in a.images)}
         a.images = {img: ROOT / "test-images" / "kodak" / f"{img}.png" for _, img in a.scores}
         run(a, sorted(a.scores), lams)

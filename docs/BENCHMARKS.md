@@ -375,18 +375,18 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 
 | Oodle λ | BC1 at RMSE | BC1 at SSIM | BC7 at RMSE | BC7 at SSIM | BC4 at RMSE | BC4 at SSIM | BC5 at RMSE | BC5 at SSIM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | −17.6% | −8.5% | −6.5% (16/24 images) | −2.6% (4/24) | −10.7% | −4.6% | −26.7% | −10.0% |
-| 1 | −13.8% | −5.8% | −3.0% (12/24) | −0.9% (4/24) | −1.1% (20/24) | −0.8% | +4.0% (22/24) | +0.1% |
-| 10 | −9.6% | −5.7% | −1.1% | −3.1% | −4.9% | −0.8% | −6.8% | −2.0% |
-| 20 | −8.8% | −5.2% | −0.6% | −1.5% | −8.0% | −1.5% | −12.4% | −3.7% |
-| 30 | −8.8% | −4.6% | −0.9% | −0.7% | −11.1% | −2.4% | −15.8% | −4.3% |
-| 40 | −8.8% | −4.0% | −1.5% | −0.3% | −13.6% | −3.2% | −18.3% | −4.6% |
+| 0 | −17.6% | −8.5% | −6.5% (16/24 images) | −2.6% (4/24) | −10.7% | −4.6% | −27.9% | −10.2% |
+| 1 | −13.8% | −5.8% | −3.0% (12/24) | −0.9% (4/24) | −1.1% (20/24) | −0.8% | +2.6% (22/24) | −0.3% |
+| 10 | −9.6% | −5.7% | −1.1% | −3.1% | −4.9% | −0.8% | −8.5% | −2.2% |
+| 20 | −8.8% | −5.2% | −0.6% | −1.5% | −8.0% | −1.5% | −13.9% | −3.5% |
+| 30 | −8.8% | −4.6% | −0.9% | −0.7% | −11.1% | −2.4% | −17.3% | −3.9% |
+| 40 | −8.8% | −4.0% | −1.5% | −0.3% | −13.6% | −3.2% | −19.7% | −4.2% |
 
-BC1, BC4 and BC7 are mipple 0.9.18 (smooth weight 4×, halved at channel std 12). BC5 is 0.9.16 (5× ramping
-linearly to 1 at std 14): its R16G16 cook inputs are not in the repo, so it was not re-run.
+All four are mipple 0.9.18 (smooth weight 4×, halved at channel std 12). BC5's R16G16 input is rebuilt from the
+PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces the recorded λ 0 scores exactly.
 
-mipple is now smaller at both of Oodle's quality measures at every λ in BC1, BC4 and BC7 (BC5 λ 1 is the one
-cell left behind). Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
+mipple is now smaller at both of Oodle's quality measures at every λ in BC1, BC4 and BC7, and in
+BC5 at every λ except 1 at equal RMSE (+2.6%, was +4.0% with the linear ramp). Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
 kodim08) and on SSIM for 26 (up to +5.5%, kodim07 and kodim20, smooth-sky images where Oodle's RDO keeps more
 structure at λ 30-40); BC4 loses most on kodim05, kodim14 and kodim18 on SSIM (+4% to +6% at λ 20-40).
@@ -426,7 +426,7 @@ On those 6 images, mean of λ 10-40 at RMSE / SSIM: -e 5 +9.4% / −2.7% before 
 −2.2% after; -e 9 is the same as -e 5.
 
 At λ 1 Oodle comes out both more accurate and smaller than its own λ 0 (BC5: RMSE 2.687 at 5.69 bpt vs 2.756
-at 7.43); mipple's BC4 is now ahead there too (−1.1% / −0.8%), BC5 (0.9.16) was +4.0% / +0.1%.
+at 7.43); mipple's BC4 is now ahead there too (−1.1% / −0.8%), BC5 is +2.6% / −0.3%.
 The crop of kodim18 alone (0.9.16 numbers) is behind at equal SSIM for BC4 and BC5:
 kodim18 (512×512 crop), at RMSE / at SSIM: BC4 −5.2% / −1.5% at λ 0, then +2.8% / +4.8%, +1.2% / +6.2%,
 +0.2% / +6.7%, −0.6% / +6.6% at λ 10-40; BC5 −28.9% / −8.7% at λ 0, +5.6% / +3.8% at λ 1, then −7.3% / +2.3%,

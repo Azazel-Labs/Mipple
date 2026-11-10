@@ -2,7 +2,7 @@
 
 Oodle's blocks come from a normal UE 5.8.4 cook (Final encode speed, RDO on, lambda from Lossy Compression Amount; dumped with `-OodleDebugDumpFilter`, bit-exact with the cooked texture data). Both encoders are scored on the same source pixels, sizes are Zstd level 19 over the block data. Each cell is mipple's size at Oodle's quality relative to Oodle's size (negative = mipple smaller), from a mipple -e 5 lambda sweep. Lambda 0 is Oodle without RDO.
 
-BC5 and kodim18_original rows are from mipple 0.9.16 (smooth weight 5x, linear ramp to std 14): their inputs are not in the repo, so --scores cannot re-run them.
+kodim18_original rows are from mipple 0.9.16 (smooth weight 5x, linear ramp to std 14): that 512x512 crop is not in the repo, so --scores cannot re-run it.
 
 ## BC1 Kodak-24 (24 images)
 
@@ -52,12 +52,12 @@ BC5 and kodim18_original rows are from mipple 0.9.16 (smooth weight 5x, linear r
 
 | Oodle λ | Oodle bpt | Oodle RMSE | Oodle SSIM | at equal RMSE | at equal SSIM |
 |---:|---:|---:|---:|---:|---:|
-| 0 | 7.427 | 2.756 | 0.99713 | -26.7% | -10.0% |
-| 1 | 5.691 | 2.687 | 0.99507 | +4.0% (22/24) | +0.1% |
-| 10 | 4.379 | 3.231 | 0.98590 | -6.8% | -2.0% |
-| 20 | 4.048 | 3.672 | 0.98079 | -12.4% | -3.7% |
-| 30 | 3.852 | 4.035 | 0.97723 | -15.8% | -4.3% |
-| 40 | 3.710 | 4.346 | 0.97437 | -18.3% | -4.6% |
+| 0 | 7.427 | 2.756 | 0.99713 | -27.9% | -10.2% |
+| 1 | 5.691 | 2.687 | 0.99507 | +2.6% (22/24) | -0.3% |
+| 10 | 4.379 | 3.231 | 0.98590 | -8.5% | -2.2% |
+| 20 | 4.048 | 3.672 | 0.98079 | -13.9% | -3.5% |
+| 30 | 3.852 | 4.035 | 0.97723 | -17.3% | -3.9% |
+| 40 | 3.710 | 4.346 | 0.97437 | -19.7% | -4.2% |
 
 ## BC5 kodim18_original
 
