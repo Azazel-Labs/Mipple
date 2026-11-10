@@ -56,11 +56,11 @@ Shipped:
   out of a stock UE cook (bit-exact, no engine source) and scores them on Zstd-19 next to a mipple sweep
   (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −7.6% to
   −6.3% / −6.9% to −5.7%, BC4 −9.9% to −2.2% / −3.2% to −0.9%, BC5 −18.3% to −6.8% / −4.6% to −2.0%.
-- [x] **Learned BC7 ranker** (`src/ranker_bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
+- [x] **Learned BC7 ranker** (`src/ranker/bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
   the 1024-block far search, then 16 blocks from anywhere in the 64 KiB chunk, picked by a two-key prefilter
   (decoded value SAD and least-squares refit residual) and a small MLP. Kodak-24 BD-rate −0.22% at 0.86× the
   time; Poly Haven held-out −0.73%.
-- [x] **Learned BC4 ranker** (`src/ranker_bc4.rs`, CC0 Poly Haven only): 128 deep plus 32 blocks from the 16 KiB
+- [x] **Learned BC4 ranker** (`src/ranker/bc4.rs`, CC0 Poly Haven only): 128 deep plus 32 blocks from the 16 KiB
   chunk (64 by shape SAD, 64 by value SAD, then a 13-16-1 MLP). Kodak-24 BD-rate −0.77% at 0.95× the time; Poly
   Haven held-out −0.71%.
 - [x] **Mode-6 base for BC7 RDO:** a mode-6-only encode as a third starting point per block. Kodak-24 BD-rate

@@ -12,7 +12,6 @@
 
 pub mod alpha;
 pub mod bc1;
-mod bc1_order;
 pub mod bc4;
 pub mod bc7;
 pub mod bench;
@@ -29,8 +28,6 @@ pub mod mips;
 pub mod pipeline;
 pub mod prep;
 pub mod ranker;
-pub mod ranker_bc4;
-pub mod ranker_bc7;
 pub mod rdo;
 pub mod simd;
 pub mod surface;

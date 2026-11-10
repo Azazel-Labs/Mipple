@@ -1,6 +1,6 @@
 //! Learned ranker for BC7's localized search: which earlier blocks of the chunk, beyond the
 //! exhaustive near search, get the full candidate search (whole-block copy, endpoints re-indexed,
-//! indices with refit endpoints). Like the BC5 ranker ([`crate::ranker`]) it only proposes
+//! indices with refit endpoints). Like the BC5 ranker ([`super::bc5`]) it only proposes
 //! blocks; the RD search still picks the encoding from their candidates, so a bad ranking costs
 //! compression, never correctness.
 //!

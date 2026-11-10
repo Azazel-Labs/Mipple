@@ -17,9 +17,9 @@ use crate::bc1;
 use crate::bc4;
 use crate::bc7;
 use crate::format::Format;
-use crate::ranker::{RankBlock, RankSrc};
-use crate::ranker_bc4::{Rank1, RankSrc1};
-use crate::ranker_bc7::{RankBlock7, RankSrc7};
+use crate::ranker::bc4::{Rank1, RankSrc1};
+use crate::ranker::bc5::{RankBlock, RankSrc};
+use crate::ranker::bc7::{RankBlock7, RankSrc7};
 use crate::surface::{Block, block_sse};
 use rayon::prelude::*;
 
@@ -69,9 +69,8 @@ pub struct RdoParams {
     /// BC7: refit endpoints with the entropy-reduced quantization (set when the base encode
     /// used [`crate::format::BlockOpts::reduce_entropy`]).
     pub reduce_entropy: bool,
-    /// Localized search (BC4, BC5, BC7): beyond `max_back`, the learned ranker ([`crate::ranker`],
-    /// [`crate::ranker_bc4`], [`crate::ranker_bc7`]) picks this many earlier blocks of the chunk for
-    /// the full search. `None` picks a per-format default ([`RdoParams::local_k_for`]); 0 disables it.
+    /// Localized search (BC4, BC5, BC7): beyond `max_back`, the format's learned ranker
+    /// ([`crate::ranker`]) picks this many earlier blocks of the chunk for the full search. `None` picks a per-format default ([`RdoParams::local_k_for`]); 0 disables it.
     pub local_k: Option<usize>,
     /// Blocks per row of the surface (blocks are in raster order), or 0 when unknown. The
     /// localized search also tries the blocks around the one directly above.
@@ -1398,8 +1397,8 @@ fn optimize_chunk(
     // those (plus the blocks around the one above) get the full search. The ranker only chooses
     // where to look; every candidate is still scored exactly.
     let two = format == Format::Bc5 && w[0] > 0 && w[1] > 0;
-    // BC4: the same with its own single-channel ranker ([`crate::ranker_bc4`]). BC7 has its own
-    // ranker ([`crate::ranker_bc7`]), run after the far search.
+    // BC4: the same with its own single-channel ranker ([`crate::ranker::bc4`]). BC7 has its own
+    // ranker ([`crate::ranker::bc7`]), run after the far search.
     let one = format == Format::Bc4 && w[0] > 0;
     let bc7 = format == Format::Bc7;
     let local_k = if two || one || bc7 { p.local_k_for(format) } else { 0 };
@@ -1419,7 +1418,7 @@ fn optimize_chunk(
     let mut res7: Vec<(u32, usize)> = Vec::new();
     let mut decs: Vec<Block> = Vec::new();
     let mut scored: Vec<(f32, usize)> = Vec::new();
-    let mut pick1 = crate::ranker_bc4::Scratch::default();
+    let mut pick1 = crate::ranker::bc4::Scratch::default();
     let mut extra_ds: Vec<usize> = Vec::new();
     let mut gains: Vec<f32> = Vec::new();
     // A BC7 dump block searches the whole chunk.
@@ -1693,7 +1692,7 @@ fn optimize_chunk(
                 }
                 buf.extend_from_slice(&g.to_le_bytes());
                 buf.extend_from_slice(&0u32.to_le_bytes());
-                buf.extend(std::iter::repeat_n(0u8, 4 * crate::ranker_bc7::NIN));
+                buf.extend(std::iter::repeat_n(0u8, 4 * crate::ranker::bc7::NIN));
                 buf.extend_from_slice(&gains.iter().fold(0f32, |a, &b| a.max(b)).to_le_bytes());
                 buf.extend_from_slice(&(extra_ds.len() as f32).to_le_bytes());
                 use std::io::Write;
@@ -1702,7 +1701,7 @@ fn optimize_chunk(
                 let rs = RankSrc1::new(s, base_err, lambda as f32, p.row);
                 if let Some(wr) = DUMP.lock().unwrap().as_mut() {
                     let g = DUMP_GROUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    crate::ranker_bc4::dump_rows(wr, g, &rs, &rblocks1, i, &extra_ds, &gains, near.0);
+                    crate::ranker::bc4::dump_rows(wr, g, &rs, &rblocks1, i, &extra_ds, &gains, near.0);
                 }
             } else {
                 dump_rows(s, i, &extra_ds, &gains, near.0, &sigs, &decs, w, base_half, lambda);

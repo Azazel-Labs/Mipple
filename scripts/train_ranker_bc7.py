@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit BC7's localized-search ranker (src/ranker_bc7.rs) from `MIPPLE_LOCAL_DUMP` rows.
+"""Fit BC7's localized-search ranker (src/ranker/bc7.rs) from `MIPPLE_LOCAL_DUMP` rows.
 
 Dump one file per image (group ids are only unique within a process), with the ranker off and
 the exhaustive near search 64 deep (as for the shipped weights; the encoder searches 32), e.g.

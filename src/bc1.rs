@@ -5,6 +5,7 @@
 //! The interpolation rule matches the common reference decoders (`(2*a + b) / 3`, truncating).
 
 mod batch;
+mod order;
 
 pub use batch::{encode_block as encode_fast, encode_surface};
 
@@ -329,7 +330,7 @@ impl SplitTable {
 }
 
 /// Cached split tables: `ordered[three]` for 16 texels in frequency order (learned on the
-/// synthetic corpus, see `bc1_order.rs`, degenerate splits dropped), and `canonical[n][three]`
+/// synthetic corpus, see `order.rs`, degenerate splits dropped), and `canonical[n][three]`
 /// with every split of `n` texels in canonical order (index = canonical id).
 struct SplitTables {
     ordered: [SplitTable; 2],
@@ -349,10 +350,7 @@ fn split_tables() -> &'static SplitTables {
             SplitTable::new(&v)
         };
         SplitTables {
-            ordered: [
-                ordered(false, &crate::bc1_order::ORDER4),
-                ordered(true, &crate::bc1_order::ORDER3),
-            ],
+            ordered: [ordered(false, &order::ORDER4), ordered(true, &order::ORDER3)],
             canonical: (0..=16)
                 .map(|n| {
                     [
@@ -845,7 +843,7 @@ mod tests {
 
     /// Learns the cluster-fit split order: exhaustive, snapped cluster fits over the synthetic
     /// corpus (not Kodak, which is the benchmark), counting how often each split wins. Prints
-    /// `src/bc1_order.rs`.
+    /// `src/bc1/order.rs`.
     #[test]
     #[ignore = "diagnostic report; run by hand with --nocapture"]
     fn print_split_order() {

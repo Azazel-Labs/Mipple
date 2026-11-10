@@ -132,7 +132,7 @@ BD-rate: Kodak-8 −0.90%, Kodak-24 −0.76%, a disjoint Poly Haven held-out set
 `--local 0` restores the 192-deep search byte for byte.
 
 Localized BC4 search (`--local`, default 32 for BC4, with `--max-back 128`): the same idea with a single-channel
-ranker (`src/ranker_bc4.rs`). Beyond the nearest 128 blocks, 64 earlier blocks of the chunk by shape distance and
+ranker (`src/ranker/bc4.rs`). Beyond the nearest 128 blocks, 64 earlier blocks of the chunk by shape distance and
 64 by value distance (exact integer SAD) go to a 13-16-1 network, which keeps 32; those and the blocks around the
 one above get the exact search. Trained (`scripts/train_ranker_bc4.py`) only on single-channel images derived
 from CC0 Poly Haven textures (324 encodes, 9.35M candidate rows). On a validation split the best block is in its

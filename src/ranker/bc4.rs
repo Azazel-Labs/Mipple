@@ -1,5 +1,5 @@
 //! Learned ranker for the localized BC4 search: which far earlier blocks of the chunk get the full
-//! candidate search. The single-channel counterpart of [`crate::ranker`] (BC5): it only proposes
+//! candidate search. The single-channel counterpart of [`super::bc5`]: it only proposes
 //! blocks, the RD search still picks the encoding from their candidates, so a bad ranking costs
 //! compression, never correctness.
 //!

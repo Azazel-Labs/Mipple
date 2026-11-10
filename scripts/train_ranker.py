@@ -8,7 +8,7 @@ high-gain blocks in its top K; it never decides the encoding (the search does, o
     python scripts/train_ranker.py train.bin [--hidden 16] [--epochs 30]
 
 Prints the captured gain at several K for simple baselines and the fitted MLP on held-out encodes
-(every 5th), then the weights as the body of src/ranker.rs's `weights` module. The encoder narrows
+(every 5th), then the weights as the body of src/ranker/bc5.rs's `weights` module. The encoder narrows
 each block's candidates to 128 by shape SAD before the MLP ranks them, so captured gain at K = 16 is
 the figure that matters.
 """

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit the localized BC4 search ranker (src/ranker_bc4.rs) from `MIPPLE_LOCAL_DUMP` rows.
+"""Fit the localized BC4 search ranker (src/ranker/bc4.rs) from `MIPPLE_LOCAL_DUMP` rows.
 
 Training data: single channels of the CC0 Poly Haven textures in test-images/polyhaven
 (`scripts/fetch_polyhaven.py`; never Kodak or RAD's images), since BC4 encodes channel 0:
@@ -10,11 +10,11 @@ Training data: single channels of the CC0 Poly Haven textures in test-images/pol
 
 Each group is one source block; its rows are every far block j (beyond --max-back) of the chunk,
 with the RD-cost gain j's candidates would bring over the near search alone (`dump_rows` in
-src/ranker_bc4.rs: u32 run, u32 group, f32 x 16 raw statistics, f32 gain, f32 near J). The
+src/ranker/bc4.rs: u32 run, u32 group, f32 x 16 raw statistics, f32 gain, f32 near J). The
 encoder narrows each block's far blocks to the M most similar by shape SAD, the MLP ranks those
 and the top K get the full search, so "captured gain at K" after that prefilter is what matters.
 `train` prints it for simple baselines and the fitted MLP on held-out encodes (every 5th
-process), then the weights as the body of src/ranker_bc4.rs's `weights` module.
+process), then the weights as the body of src/ranker/bc4.rs's `weights` module.
 """
 import argparse
 import pathlib
@@ -272,7 +272,7 @@ def main():
     p.add_argument("--min-d", type=int, default=0, help="only rows farther back than this")
     p.add_argument("--train-pre", type=int, default=1, help="train only on prefiltered rows")
     p.add_argument("--pre", default="union", choices=["shape", "value", "union"])
-    p.add_argument("--emit-rs", help="write the weights into this Rust file (src/ranker_bc4.rs)")
+    p.add_argument("--emit-rs", help="write the weights into this Rust file (src/ranker/bc4.rs)")
     a = ap.parse_args()
     {"prep": prep, "dump": dump, "train": train}[a.cmd](a)
 
