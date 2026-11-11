@@ -1376,7 +1376,18 @@ fn reindex_bounded_mode<const MODE: u8>(
 }
 
 /// Channel pairs of [`SegBound`]'s scatter entries.
-const SCATTER_PAIRS: [(usize, usize); 10] = [(0, 0), (1, 1), (2, 2), (3, 3), (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+const SCATTER_PAIRS: [(usize, usize); 10] = [
+    (0, 0),
+    (1, 1),
+    (2, 2),
+    (3, 3),
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (1, 2),
+    (1, 3),
+    (2, 3),
+];
 
 /// Per-source-block state for [`reindex_bounded`]'s lower bound: the texels scaled by the
 /// square roots of the channel weights and, per partition seen, each subset's texel count and
@@ -1660,7 +1671,11 @@ mod tests {
             let noise = [0, 2, 8, 40][k % 4];
             let px: Block = std::array::from_fn(|i| {
                 std::array::from_fn(|c| {
-                    let n = if noise > 0 { (rng(&mut seed) % (2 * noise + 1)) as i32 - noise as i32 } else { 0 };
+                    let n = if noise > 0 {
+                        (rng(&mut seed) % (2 * noise + 1)) as i32 - noise as i32
+                    } else {
+                        0
+                    };
                     (i32::from(base[c]) + step[c] * i as i32 + n).clamp(0, 255) as u8
                 })
             });

@@ -222,8 +222,29 @@ fn cross_sq(s: &RankBlock7, p: &RankBlock7) -> [u32; 4] {
     }
 }
 
-/// [`RankSrc7::prefilter_top`] with the key function `key`. Each list collects pairs below its
-/// current `m`-th smallest, and is cut back to `m` whenever it holds `4m`.
+/// Adds pair `k` to `l` if it is below `t`, the `m`-th smallest of `l` at its last cut (`l`
+/// collects pairs below that, and is cut back to its `m` smallest whenever it holds `4m`).
+#[inline(always)]
+fn offer(l: &mut Vec<(u32, usize)>, t: &mut (u32, usize), m: usize, k: (u32, usize)) {
+    if k < *t {
+        l.push(k);
+        if l.len() == 4 * m {
+            l.select_nth_unstable(m - 1);
+            l.truncate(m);
+            *t = l[m - 1];
+        }
+    }
+}
+
+/// Cuts `l` back to its `m` smallest pairs.
+fn keep_smallest(l: &mut Vec<(u32, usize)>, m: usize) {
+    if m < l.len() {
+        l.select_nth_unstable(m);
+        l.truncate(m);
+    }
+}
+
+/// [`RankSrc7::prefilter_top`] with the key function `key` (`m` > 0).
 #[inline(always)]
 fn top_with(
     blocks: &[RankBlock7],
@@ -234,34 +255,14 @@ fn top_with(
     res: &mut Vec<(u32, usize)>,
     mut key: impl FnMut(&RankBlock7) -> (u32, u32),
 ) {
-    let cap = 4 * m.max(1);
     let (mut tp, mut tr) = ((u32::MAX, usize::MAX), (u32::MAX, usize::MAX));
-    let cut = |l: &mut Vec<(u32, usize)>, t: &mut (u32, usize)| {
-        l.select_nth_unstable(m - 1);
-        l.truncate(m);
-        *t = l[m - 1];
-    };
     for d in ds {
         let (v, r) = key(&blocks[i - d]);
-        if (v, d) < tp {
-            pre.push((v, d));
-            if pre.len() == cap {
-                cut(pre, &mut tp);
-            }
-        }
-        if (r, d) < tr {
-            res.push((r, d));
-            if res.len() == cap {
-                cut(res, &mut tr);
-            }
-        }
+        offer(pre, &mut tp, m, (v, d));
+        offer(res, &mut tr, m, (r, d));
     }
-    for l in [pre, res] {
-        if m < l.len() {
-            l.select_nth_unstable(m);
-            l.truncate(m);
-        }
-    }
+    keep_smallest(pre, m);
+    keep_smallest(res, m);
 }
 
 impl RankSrc7 {
@@ -337,6 +338,8 @@ impl RankSrc7 {
         top_with(blocks, i, ds, m, pre, res, |p| self.prefilter(p));
     }
 
+    /// [`Self::prefilter_top`] with AVX2, mostly eight consecutive blocks at a time, with the same
+    /// operations in the same order as [`Self::prefilter`], so the same keys exactly.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn top_avx2(
@@ -349,16 +352,21 @@ impl RankSrc7 {
         res: &mut Vec<(u32, usize)>,
     ) {
         use std::arch::x86_64::*;
+        // The residual lanes of eight blocks from `j` hold blocks `j + RES_LANE[lane]` (the SAD
+        // lanes `j + lane`).
+        const RES_LANE: [usize; 8] = [0, 2, 1, 3, 4, 6, 5, 7];
         let ld = |a: &[u8; 64], k: usize| {
             // SAFETY: an unaligned 32-byte load within a 64-byte array.
             unsafe { _mm256_loadu_si256(a.as_ptr().add(k * 32).cast::<__m256i>()) }
         };
+        // SAFETY: unaligned loads of [f32; 4] arrays.
+        let ldf = |a: &[f32; 4]| unsafe { _mm_loadu_ps(a.as_ptr()) };
         let (s0, s1) = (ld(&self.b.vals, 0), ld(&self.b.vals, 1));
         let ones = _mm256_set1_epi16(1);
-        // SAFETY: unaligned loads of [f32; 4] arrays.
-        let (sum1, vs) = unsafe { (_mm_loadu_ps(self.s1.as_ptr()), _mm_loadu_ps(self.vs.as_ptr())) };
+        let (sum1, vs) = (ldf(&self.s1), ldf(&self.vs));
         let (sixteen, cap) = (_mm_set1_ps(16.0), _mm_set1_ps(1e7));
-        top_with(blocks, i, ds, m, pre, res, |p| {
+        // One block's keys.
+        let key = |p: &RankBlock7| {
             let (v0, v1) = (ld(&p.vals, 0), ld(&p.vals, 1));
             let sad = _mm256_add_epi64(_mm256_sad_epu8(s0, v0), _mm256_sad_epu8(s1, v1));
             let sad = _mm_add_epi64(_mm256_castsi256_si128(sad), _mm256_extracti128_si256::<1>(sad));
@@ -374,8 +382,6 @@ impl RankSrc7 {
             // Channels 0..4 in order; [`Self::resid`] on all four lanes at once, with the same
             // operations in the same order, then summed in channel order as the scalar path.
             let sq = _mm_cvtepi32_ps(_mm_unpacklo_epi32(lo, hi));
-            // SAFETY: unaligned loads of [f32; 4] arrays.
-            let ldf = |a: &[f32; 4]| unsafe { _mm_loadu_ps(a.as_ptr()) };
             let cov = _mm_sub_ps(sq, _mm_div_ps(_mm_mul_ps(sum1, ldf(&p.q1)), sixteen));
             let r = _mm_sub_ps(vs, _mm_mul_ps(_mm_mul_ps(cov, cov), ldf(&p.inv_vq)));
             let r = _mm_min_ps(_mm_max_ps(r, _mm_setzero_ps()), cap);
@@ -383,7 +389,113 @@ impl RankSrc7 {
             // SAFETY: an unaligned store into a [f32; 4].
             unsafe { _mm_storeu_ps(rs.as_mut_ptr(), r) };
             (sad, (((rs[0] + rs[1]) + rs[2]) + rs[3]) as u32)
-        });
+        };
+        let s1c: [__m256; 4] = std::array::from_fn(|c| _mm256_set1_ps(self.s1[c]));
+        let vsc: [__m256; 4] = std::array::from_fn(|c| _mm256_set1_ps(self.vs[c]));
+        let (sixteenth, cap8, zero) = (_mm256_set1_ps(1.0 / 16.0), _mm256_set1_ps(1e7), _mm256_setzero_ps());
+        let ps = _mm256_castsi256_ps;
+        let pd = _mm256_castps_pd;
+        // A [f32; 4] field (`f[k]`: block `j + k`'s) of the blocks in residual lane order, as one
+        // vector per channel.
+        let soa = |f: [__m128; 8]| -> [__m256; 4] {
+            let l = [0, 2, 1, 3].map(|k| _mm256_set_m128(f[k + 4], f[k]));
+            let (t0, t1) = (_mm256_unpacklo_ps(l[0], l[1]), _mm256_unpackhi_ps(l[0], l[1]));
+            let (t2, t3) = (_mm256_unpacklo_ps(l[2], l[3]), _mm256_unpackhi_ps(l[2], l[3]));
+            [
+                _mm256_castpd_ps(_mm256_unpacklo_pd(pd(t0), pd(t2))),
+                _mm256_castpd_ps(_mm256_unpackhi_pd(pd(t0), pd(t2))),
+                _mm256_castpd_ps(_mm256_unpacklo_pd(pd(t1), pd(t3))),
+                _mm256_castpd_ps(_mm256_unpackhi_pd(pd(t1), pd(t3))),
+            ]
+        };
+        // Two pairs' cross sums ([k0, k2, l0, l2 | k1, k3, l1, l3] for blocks k, l = k + 1)
+        // transposed: channels 0 and 1 of the four blocks, then channels 2 and 3.
+        let half = |g0: __m256i, g1: __m256i| {
+            let (a, b) = (ps(_mm256_unpacklo_epi64(g0, g1)), ps(_mm256_unpackhi_epi64(g0, g1)));
+            (_mm256_shuffle_ps::<0x88>(a, b), _mm256_shuffle_ps::<0xDD>(a, b))
+        };
+        let (mut tp, mut tr) = ((u32::MAX, usize::MAX), (u32::MAX, usize::MAX));
+        let (lo, hi) = (*ds.start(), *ds.end());
+        // The blocks `blocks[j]`, `j` from `i - hi` up to `i - lo`, eight at a time, then the
+        // rest one by one. Order doesn't matter: the lists end with the `m` smallest pairs.
+        let (mut j, end) = if lo <= hi { (i - hi, i - lo + 1) } else { (0, 0) };
+        while j + 8 <= end {
+            let bs = &blocks[j..j + 8];
+            // Per pair of blocks: the SADs' 64-bit partial sums (each SAD fits in 16 bits, so
+            // as 32-bit lanes they are [x, 0, y, 0]) and the cross sums, each pairwise added.
+            let mut sads = [_mm256_setzero_si256(); 4];
+            let mut cross = [_mm256_setzero_si256(); 4];
+            for q in 0..4 {
+                let mut sd = [_mm256_setzero_si256(); 2];
+                let mut hs = [_mm256_setzero_si256(); 2];
+                for e in 0..2 {
+                    let p = &bs[2 * q + e];
+                    let (v0, v1) = (ld(&p.vals, 0), ld(&p.vals, 1));
+                    sd[e] = _mm256_add_epi64(_mm256_sad_epu8(s0, v0), _mm256_sad_epu8(s1, v1));
+                    let c0 = _mm256_madd_epi16(_mm256_maddubs_epi16(s0, ld(&p.shape, 0)), ones);
+                    let c1 = _mm256_madd_epi16(_mm256_maddubs_epi16(s1, ld(&p.shape, 1)), ones);
+                    hs[e] = _mm256_hadd_epi32(c0, c1);
+                }
+                sads[q] = _mm256_hadd_epi32(sd[0], sd[1]);
+                cross[q] = _mm256_hadd_epi32(hs[0], hs[1]);
+            }
+            let t0 = _mm256_hadd_epi32(sads[0], sads[1]);
+            let t1 = _mm256_hadd_epi32(sads[2], sads[3]);
+            let v = _mm256_add_epi32(
+                _mm256_permute2x128_si256::<0x20>(t0, t1),
+                _mm256_permute2x128_si256::<0x31>(t0, t1),
+            );
+            let ((x0, y0), (x1, y1)) = (half(cross[0], cross[1]), half(cross[2], cross[3]));
+            let sq = [
+                _mm256_permute2f128_ps::<0x20>(x0, x1),
+                _mm256_permute2f128_ps::<0x31>(x0, x1),
+                _mm256_permute2f128_ps::<0x20>(y0, y1),
+                _mm256_permute2f128_ps::<0x31>(y0, y1),
+            ]
+            .map(|x| _mm256_cvtepi32_ps(_mm256_castps_si256(x)));
+            let q1 = soa(std::array::from_fn(|k| ldf(&bs[k].q1)));
+            let iv = soa(std::array::from_fn(|k| ldf(&bs[k].inv_vq)));
+            // [`Self::resid`] per channel, summed in channel order (dividing by 16 and
+            // multiplying by 1/16 agree exactly).
+            let mut r = zero;
+            for c in 0..4 {
+                let cov = _mm256_sub_ps(sq[c], _mm256_mul_ps(_mm256_mul_ps(s1c[c], q1[c]), sixteenth));
+                let rc = _mm256_sub_ps(vsc[c], _mm256_mul_ps(_mm256_mul_ps(cov, cov), iv[c]));
+                r = _mm256_add_ps(r, _mm256_min_ps(_mm256_max_ps(rc, zero), cap8));
+            }
+            let r = _mm256_cvttps_epi32(r);
+            // A lane whose key exceeds its list's bound can't enter the list (bounds only
+            // fall); the rest take the exact test. Keys stay below 2^31.
+            let over = |x: __m256i, t: (u32, usize)| {
+                let b = _mm256_set1_epi32(t.0.min(i32::MAX as u32) as i32);
+                _mm256_movemask_ps(ps(_mm256_cmpgt_epi32(x, b))) as u32
+            };
+            let (op, or) = (over(v, tp), over(r, tr));
+            if op & or != 0xFF {
+                let (mut va, mut ra) = ([0u32; 8], [0u32; 8]);
+                // SAFETY: unaligned stores into [u32; 8] arrays.
+                unsafe {
+                    _mm256_storeu_si256(va.as_mut_ptr().cast(), v);
+                    _mm256_storeu_si256(ra.as_mut_ptr().cast(), r);
+                }
+                for l in 0..8 {
+                    if op >> l & 1 == 0 {
+                        offer(pre, &mut tp, m, (va[l], i - j - l));
+                    }
+                    if or >> l & 1 == 0 {
+                        offer(res, &mut tr, m, (ra[l], i - j - RES_LANE[l]));
+                    }
+                }
+            }
+            j += 8;
+        }
+        for j in j..end {
+            let (v, r) = key(&blocks[j]);
+            offer(pre, &mut tp, m, (v, i - j));
+            offer(res, &mut tr, m, (r, i - j));
+        }
+        keep_smallest(pre, m);
+        keep_smallest(res, m);
     }
 
     /// Channel `c`'s least-squares residual of the source's values against `p`'s shape; `sq`:

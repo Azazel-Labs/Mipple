@@ -210,14 +210,25 @@ mod tests {
             x ^= x << 5;
             x
         };
-        let ws = [[1, 1, 1, 1], [1, 1, 1, 0], [1, 0, 0, 0], [3, 7, 128, 0], [128, 128, 128, 128], [200, 1, 1, 1]];
+        let ws = [
+            [1, 1, 1, 1],
+            [1, 1, 1, 0],
+            [1, 0, 0, 0],
+            [3, 7, 128, 0],
+            [128, 128, 128, 128],
+            [200, 1, 1, 1],
+        ];
         for k in 0..2000 {
             let mut a: Block = [[0; 4]; 16];
             let mut b: Block = [[0; 4]; 16];
             for i in 0..16 {
                 for c in 0..4 {
                     // Every fifth pair at the extremes (0 vs 255) to exercise the bound.
-                    (a[i][c], b[i][c]) = if k % 5 == 0 { (0, 255) } else { (next() as u8, next() as u8) };
+                    (a[i][c], b[i][c]) = if k % 5 == 0 {
+                        (0, 255)
+                    } else {
+                        (next() as u8, next() as u8)
+                    };
                 }
             }
             for w in &ws {

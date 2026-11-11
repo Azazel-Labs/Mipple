@@ -1466,7 +1466,9 @@ fn bc7_far(
     // The bound only tightens as `best` improves, so the filter's verdicts at the starting
     // bound hold for the whole scan. A dropped block's endpoints are not marked seen: a later
     // block with the same ones is dropped too, and anywhere else they would be rejected.
-    let q = f7.pre.query(s, w, &base, limit.min((best.0 * 16.0 / smooth) as u64 + 2));
+    let q = f7
+        .pre
+        .query(s, w, &base, limit.min((best.0 * 16.0 / smooth) as u64 + 2));
     let lo = i - far;
     f7.pre.filter(lo, i - back, &q);
     for d in back + 1..=far {
@@ -2401,7 +2403,11 @@ mod tests {
                 let noise = [0i32, 2, 8, 40][k % 4];
                 let px: Block = std::array::from_fn(|i| {
                     std::array::from_fn(|c| {
-                        let n = if noise > 0 { (next() % (2 * noise as u64 + 1)) as i32 - noise } else { 0 };
+                        let n = if noise > 0 {
+                            (next() % (2 * noise as u64 + 1)) as i32 - noise
+                        } else {
+                            0
+                        };
                         (i32::from(base_c[c]) + step[c] * i as i32 + n).clamp(0, 255) as u8
                     })
                 });
@@ -2414,7 +2420,10 @@ mod tests {
                 pre.push(&prev, Some(ps));
                 // Whole-block copy: the exact test keeps it iff floor(S / 16) <= bound.
                 let src = channel_sums(&px);
-                let lb: u64 = (0..4).map(|c| u64::from(w[c]) * ((src[c] - ps[c]).pow(2) as u64)).sum::<u64>() / 16;
+                let lb: u64 = (0..4)
+                    .map(|c| u64::from(w[c]) * ((src[c] - ps[c]).pow(2) as u64))
+                    .sum::<u64>()
+                    / 16;
                 let q = pre.query(&px, &w, &base, lb);
                 pre.filter(0, 1, &q);
                 assert_ne!(pre.mask[0] & 1, 0, "whole copy at its own bound {lb}");
