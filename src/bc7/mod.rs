@@ -489,6 +489,13 @@ fn mode6_endpoints(lo: u64, p1: u64) -> [[u32; 4]; 2] {
     ]
 }
 
+/// The 8-bit endpoints of a mode-6 block from its first 8 bytes, with P1 (bit 64, past them) clear.
+pub fn mode6_head_endpoints(raw: &[u8]) -> [[u32; 4]; 2] {
+    let mut lo = [0u8; 8];
+    lo.copy_from_slice(&raw[..8]);
+    mode6_endpoints(u64::from_le_bytes(lo), 0)
+}
+
 /// The 16-entry mode-6 palette from the low 64 bits of a mode-6 block and P1.
 fn mode6_palette(lo: u64, p1: u64) -> [[u8; 4]; 16] {
     let e = mode6_endpoints(lo, p1);
@@ -1639,7 +1646,7 @@ mod tests {
             });
             let mut raw: [u8; 16] = std::array::from_fn(|_| rng(&mut seed) as u8);
             let mode = [0u8, 1, 2, 3, 6, 6, 6, 7][k % 8];
-            raw[0] = (raw[0] & !((2u8 << mode) - 1)) | (1 << mode);
+            raw[0] = (raw[0] & !(u8::MAX >> (7 - mode))) | (1 << mode);
             seg.reset(&px, &w);
             let Some((_, exact)) = reindex_bounded(&raw, &px, &w, u64::MAX, &mut seg) else {
                 continue;

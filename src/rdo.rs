@@ -1298,9 +1298,141 @@ impl FarEndpoints {
 struct Far7<'a> {
     fin: &'a [Option<(bc7::Bc7Block, Block)>],
     fin_sums: &'a [[i32; 4]],
+    pre: &'a mut Far7Pre,
     far_back: usize,
     w: &'a [u32; 4],
     lambda: f64,
+}
+
+/// [`bc7_far`]'s prefilter: the chunk's finished blocks as structure-of-arrays, so one vector
+/// pass over the far range drops the previous blocks whose two candidates both lose on a lower
+/// bound (about 97% of whole-block copies and 87% of mode-6 re-indexings on Kodak-24 at λ 1).
+/// The bounds are those of the exact tests, computed in `f32` with a margin for its rounding, so
+/// a dropped candidate would have been rejected anyway.
+struct Far7Pre {
+    /// Square roots of the channel weights.
+    sw: [f32; 4],
+    /// Per-channel texel sums of each block's decoding (`1e9` when it does not decode).
+    sums: [Vec<f32>; 4],
+    /// Mode 6: the endpoints scaled by `sw`, endpoint 1 with P1 clear (bit 64 comes from the
+    /// candidate's base). NaN for other modes, which the filter always keeps.
+    a: [Vec<f32>; 4],
+    b: [Vec<f32>; 4],
+    /// Per block of the range last filtered: bit 0, its whole-block copy may pass the bound;
+    /// bit 1, its re-indexing may.
+    mask: Vec<u8>,
+}
+
+/// One current block's side of [`Far7Pre::filter`].
+struct Far7Query {
+    /// The source's per-channel texel sums.
+    sums: [f32; 4],
+    w: [f32; 4],
+    /// Whole-block copies with `sum w (Δ sum)^2` above this lose.
+    lb_thr: f32,
+    /// The source's mean texel scaled by `sw`.
+    mean: [f32; 4],
+    /// `sw` where the base's P1 is set, else 0 (added to endpoint 1).
+    p1: [f32; 4],
+    /// Mode-6 re-indexings whose segment is farther (squared) than this from `mean` lose.
+    thr6: f32,
+}
+
+impl Far7Pre {
+    fn new(w: &[u32; 4], cap: usize) -> Self {
+        let v = || std::array::from_fn(|_| Vec::with_capacity(cap));
+        Self {
+            sw: w.map(|x| (x as f32).sqrt()),
+            sums: v(),
+            a: v(),
+            b: v(),
+            mask: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, raw: &[u8; 16], sums: Option<[i32; 4]>) {
+        let t = sums.map_or([1e9; 4], |t| t.map(|x| x as f32));
+        let ends = bc7::is_mode6(raw).then(|| bc7::mode6_head_endpoints(raw));
+        for c in 0..4 {
+            self.sums[c].push(t[c]);
+            let [a, b] = ends.map_or([f32::NAN; 2], |e| [0, 1].map(|k| e[k][c] as f32 * self.sw[c]));
+            self.a[c].push(a);
+            self.b[c].push(b);
+        }
+    }
+
+    /// The bounds for source `s` at error bound `bound` (the base's P1 is bit 64 of `base`).
+    fn query(&self, s: &Block, w: &[u32; 4], base: &[u8; 16], bound: u64) -> Far7Query {
+        let sums = channel_sums(s).map(|x| x as f32);
+        // Exact test: floor(S / 16) > bound, i.e. S >= 16 (bound + 1); f32 sums of four
+        // products err by well under 1e-5 relative.
+        let lb_thr = ((bound as f64 + 1.0) * 16.0 * (1.0 + 1e-5)) as f32;
+        // As `SegBound::rejects`: 0.999 * 16 * (d - slack)^2 > bound. The margin covers f32
+        // rounding of coordinates up to 255 * sw (relative ~1e-6 after a few operations).
+        let slack = 0.5 * f64::from(w.iter().sum::<u32>()).sqrt();
+        let big = 255.0 * f64::from(self.sw.iter().fold(0f32, |m, &x| m.max(x)));
+        let r = slack + (bound as f64 / (0.999 * 16.0)).sqrt();
+        let r = r + 1e-3 + 1e-5 * big + 1e-6 * r;
+        let p1 = base[8] & 1 != 0;
+        Far7Query {
+            sums,
+            w: w.map(|x| x as f32),
+            lb_thr,
+            mean: std::array::from_fn(|c| sums[c] * self.sw[c] / 16.0),
+            p1: std::array::from_fn(|c| if p1 { self.sw[c] } else { 0.0 }),
+            thr6: (r * r) as f32,
+        }
+    }
+
+    /// Fills `mask` for blocks `lo..hi`.
+    fn filter(&mut self, lo: usize, hi: usize, q: &Far7Query) {
+        self.mask.clear();
+        self.mask.resize(hi - lo, 0);
+        #[cfg(target_arch = "x86_64")]
+        if crate::simd::level() == crate::simd::Level::Avx2 {
+            // SAFETY: AVX2 and FMA were detected.
+            unsafe { self.filter_avx2(lo, hi, q) };
+            return;
+        }
+        self.filter_body(lo, hi, q);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn filter_avx2(&mut self, lo: usize, hi: usize, q: &Far7Query) {
+        self.filter_body(lo, hi, q);
+    }
+
+    /// Branch-free so it vectorizes. NaN endpoints (not mode 6) give a NaN `d2` and are kept.
+    #[inline(always)]
+    fn filter_body(&mut self, lo: usize, hi: usize, q: &Far7Query) {
+        let n = hi - lo;
+        let sums: [&[f32]; 4] = std::array::from_fn(|c| &self.sums[c][lo..hi]);
+        let a: [&[f32]; 4] = std::array::from_fn(|c| &self.a[c][lo..hi]);
+        let b: [&[f32]; 4] = std::array::from_fn(|c| &self.b[c][lo..hi]);
+        let mask = &mut self.mask[..n];
+        for k in 0..n {
+            let mut lb = 0f32;
+            let (mut len2, mut dot) = (0f32, 0f32);
+            let mut ab = [0f32; 4];
+            let mut am = [0f32; 4];
+            for c in 0..4 {
+                let d = q.sums[c] - sums[c][k];
+                lb += q.w[c] * d * d;
+                ab[c] = b[c][k] + q.p1[c] - a[c][k];
+                am[c] = q.mean[c] - a[c][k];
+                len2 += ab[c] * ab[c];
+                dot += am[c] * ab[c];
+            }
+            let t = (dot / len2.max(1e-30)).clamp(0.0, 1.0);
+            let mut d2 = 0f32;
+            for c in 0..4 {
+                let e = am[c] - t * ab[c];
+                d2 += e * e;
+            }
+            mask[k] = u8::from(lb <= q.lb_thr) | u8::from((d2 <= q.thr6) | d2.is_nan()) << 1;
+        }
+    }
 }
 
 /// BC7 far back-references, `back + 1..=far_back` blocks back: the whole-block copy and prev's
@@ -1310,7 +1442,7 @@ struct Far7<'a> {
     reason = "the search state it updates is spread over the caller's locals"
 )]
 fn bc7_far(
-    f7: &Far7,
+    f7: &mut Far7,
     blocks: &[[u8; 16]],
     i: usize,
     back: usize,
@@ -1327,13 +1459,29 @@ fn bc7_far(
     let (fin, fin_sums, far_back, w, lambda) = (f7.fin, f7.fin_sums, f7.far_back, f7.w, f7.lambda);
     let (n, base) = (16, *base);
     let src_sums = channel_sums(s);
-    for d in back + 1..=far_back.min(i) {
+    let far = far_back.min(i);
+    if far <= back {
+        return;
+    }
+    // The bound only tightens as `best` improves, so the filter's verdicts at the starting
+    // bound hold for the whole scan. A dropped block's endpoints are not marked seen: a later
+    // block with the same ones is dropped too, and anywhere else they would be rejected.
+    let q = f7.pre.query(s, w, &base, limit.min((best.0 * 16.0 / smooth) as u64 + 2));
+    let lo = i - far;
+    f7.pre.filter(lo, i - back, &q);
+    for d in back + 1..=far {
         let j = i - d;
+        let keep = f7.pre.mask[j - lo];
+        if keep == 0 {
+            continue;
+        }
         let prev = blocks[j];
         let mut pair = [([0u8; 16], UNKNOWN); 2];
         let mut np = 0;
         let bnd = limit.min((best.0 * 16.0 / smooth) as u64 + 2);
-        if let Some((_, prev_dec)) = &fin[j] {
+        if keep & 1 != 0
+            && let Some((_, prev_dec)) = &fin[j]
+        {
             // The difference of the means bounds the error from below (Cauchy-Schwarz):
             // most copies from far back lose on it alone.
             let ps = &fin_sums[j];
@@ -1346,7 +1494,7 @@ fn bc7_far(
                 np += 1;
             }
         }
-        if fields.endpoints.insert(field_key(&prev[..8])) {
+        if keep & 2 != 0 && fields.endpoints.insert(field_key(&prev[..8])) {
             let mut c = base;
             c[..8].copy_from_slice(&prev[..8]);
             if let Some(r) = bc7::reindex_bounded(&c, s, w, bnd, &mut fields.seg) {
@@ -1451,6 +1599,7 @@ fn optimize_chunk(
     // BC7: per-channel texel sums of each final block's decoding, for the far search's bound.
     let far7 = format == Format::Bc7 && far_back > max_back;
     let mut fin_sums: Vec<[i32; 4]> = Vec::new();
+    let mut far7_pre = Far7Pre::new(w, if far7 { blocks.len() } else { 0 });
 
     for i in 0..blocks.len() {
         let s = &src[i];
@@ -1576,15 +1725,16 @@ fn optimize_chunk(
             if far7 && !far_done && d > back {
                 far_done = true;
                 model.hint = 0;
-                let f7 = Far7 {
+                let mut f7 = Far7 {
                     fin: &fin,
                     fin_sums: &fin_sums,
+                    pre: &mut far7_pre,
                     far_back,
                     w,
                     lambda,
                 };
                 bc7_far(
-                    &f7,
+                    &mut f7,
                     blocks,
                     i,
                     back,
@@ -1771,15 +1921,16 @@ fn optimize_chunk(
         }
 
         if far7 && !far_done && i > back {
-            let f7 = Far7 {
+            let mut f7 = Far7 {
                 fin: &fin,
                 fin_sums: &fin_sums,
+                pre: &mut far7_pre,
                 far_back,
                 w,
                 lambda,
             };
             bc7_far(
-                &f7,
+                &mut f7,
                 blocks,
                 i,
                 back,
@@ -1878,6 +2029,7 @@ fn optimize_chunk(
         fin.push(unpack_final(format, &best.1));
         if far7 {
             fin_sums.push(fin[i].as_ref().map_or([0; 4], |(_, d)| channel_sums(d)));
+            far7_pre.push(&best.1, fin[i].as_ref().map(|(_, d)| channel_sums(d)));
         }
         model.push(&best.1[..n], best.3);
         if far_on {
@@ -2227,6 +2379,65 @@ mod tests {
                 .collect();
             println!("wins d-bucket {b}: {}", row.join(" "));
         }
+    }
+
+    /// [`Far7Pre`] only drops what the exact tests reject: a re-indexing whose error is within
+    /// the bound, or a whole-block copy whose mean bound is, is always kept.
+    #[test]
+    fn far7_prefilter_keeps_what_the_exact_tests_keep() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut dec = [[0u8; 4]; 16];
+        let (mut dropped, mut tested) = (0, 0);
+        for w in [[1u32, 1, 1, 1], [1, 1, 1, 0], [2, 3, 1, 5]] {
+            for k in 0..4000 {
+                let base_c: [u8; 4] = std::array::from_fn(|_| next() as u8);
+                let step: [i32; 4] = std::array::from_fn(|_| (next() % 9) as i32 - 4);
+                let noise = [0i32, 2, 8, 40][k % 4];
+                let px: Block = std::array::from_fn(|i| {
+                    std::array::from_fn(|c| {
+                        let n = if noise > 0 { (next() % (2 * noise as u64 + 1)) as i32 - noise } else { 0 };
+                        (i32::from(base_c[c]) + step[c] * i as i32 + n).clamp(0, 255) as u8
+                    })
+                });
+                let mut prev: [u8; 16] = std::array::from_fn(|_| next() as u8);
+                prev[0] = (prev[0] & !0x7f) | 0x40;
+                let base: [u8; 16] = std::array::from_fn(|_| next() as u8);
+                let mut pre = Far7Pre::new(&w, 1);
+                Format::Bc7.decode_block(&prev, &mut dec);
+                let ps = channel_sums(&dec);
+                pre.push(&prev, Some(ps));
+                // Whole-block copy: the exact test keeps it iff floor(S / 16) <= bound.
+                let src = channel_sums(&px);
+                let lb: u64 = (0..4).map(|c| u64::from(w[c]) * ((src[c] - ps[c]).pow(2) as u64)).sum::<u64>() / 16;
+                let q = pre.query(&px, &w, &base, lb);
+                pre.filter(0, 1, &q);
+                assert_ne!(pre.mask[0] & 1, 0, "whole copy at its own bound {lb}");
+                // Re-indexing: kept at its own error and above.
+                let mut c = base;
+                c[..8].copy_from_slice(&prev[..8]);
+                let mut seg = bc7::SegBound::new(&px, &w);
+                let Some((_, exact)) = bc7::reindex_bounded(&c, &px, &w, u64::MAX, &mut seg) else {
+                    continue;
+                };
+                for bound in [exact, exact + 1] {
+                    let q = pre.query(&px, &w, &base, bound);
+                    pre.filter(0, 1, &q);
+                    assert_ne!(pre.mask[0] & 2, 0, "re-index at bound {bound}, error {exact}, w {w:?}");
+                }
+                let q = pre.query(&px, &w, &base, exact / 2);
+                pre.filter(0, 1, &q);
+                tested += 1;
+                dropped += usize::from(pre.mask[0] & 2 == 0);
+            }
+        }
+        // It must also drop something.
+        assert!(dropped * 4 > tested, "dropped {dropped} of {tested} at half the error");
     }
 
     #[test]
