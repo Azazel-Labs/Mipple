@@ -1317,7 +1317,7 @@ fn reindex_bounded_mode<const MODE: u8>(
             [[0; 4]; 2]
         }
     });
-    if seg.lower_bound(&ends, mi.ns, b.partition) > bound {
+    if seg.rejects(&ends, mi.ns, b.partition, bound) {
         return None;
     }
     let pals: [Option<LinePal>; 3] = std::array::from_fn(|s| {
@@ -1360,6 +1360,10 @@ pub struct SegBound {
     means: [[[f32; 4]; 3]; 128],
     cnt: [[f32; 3]; 128],
     whole: [f32; 4],
+    /// The `bound` that [`Self::thr`] was computed for (`u64::MAX`: none yet).
+    thr_bound: u64,
+    /// One-subset rejection threshold on the squared distance; see [`Self::rejects`].
+    thr: f64,
 }
 
 impl SegBound {
@@ -1372,6 +1376,8 @@ impl SegBound {
             means: [[[0.0; 4]; 3]; 128],
             cnt: [[0.0; 3]; 128],
             whole: [0.0; 4],
+            thr_bound: u64::MAX,
+            thr: 0.0,
         };
         s.reset(px, w);
         s
@@ -1389,6 +1395,44 @@ impl SegBound {
             }
         }
         self.have = [0; 2];
+        self.thr_bound = u64::MAX;
+    }
+
+    /// Whether [`Self::lower_bound`] proves every indexing on these endpoints costs more than
+    /// `bound`. One-subset blocks (mode 6, most of them) take an equivalent test without the
+    /// division and square root: with `d` the distance from the mean texel to the segment and
+    /// `s` the slack, `0.999 * 16 * (d - s)^2 > bound` iff `d^2 > (s + sqrt(bound / 15.984))^2`,
+    /// a threshold computed once per bound; the projection is multiplied through by the
+    /// segment's squared length instead of divided, and summed in f64.
+    #[inline]
+    fn rejects(&mut self, ends: &[[[u32; 4]; 2]; 3], ns: u8, partition: u8, bound: u64) -> bool {
+        if ns != 1 {
+            return self.lower_bound(ends, ns, partition) > bound;
+        }
+        if self.thr_bound != bound {
+            self.thr_bound = bound;
+            let r = f64::from(self.slack) + (bound as f64 / (0.999 * 16.0)).sqrt();
+            self.thr = r * r;
+        }
+        let [a, b] = ends[0];
+        let (mut len2, mut dot, mut am2, mut bm2) = (0f64, 0f64, 0f64, 0f64);
+        for c in 0..4 {
+            let sw = f64::from(self.sw[c]);
+            let ac = f64::from(a[c]) * sw;
+            let ab = f64::from(b[c]) * sw - ac;
+            let am = f64::from(self.whole[c]) - ac;
+            len2 += ab * ab;
+            dot += am * ab;
+            am2 += am * am;
+            bm2 += (am - ab) * (am - ab);
+        }
+        if dot <= 0.0 || len2 == 0.0 {
+            am2 > self.thr
+        } else if dot >= len2 {
+            bm2 > self.thr
+        } else {
+            am2 * len2 - dot * dot > self.thr * len2
+        }
     }
 
     /// A lower bound on the error of any indices into palettes on these endpoints: per subset,
