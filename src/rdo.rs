@@ -67,7 +67,8 @@ pub struct RdoParams {
     pub chain_depth: usize,
     /// After optimizing a chunk, compress it with real Zstd at this level and revert the
     /// chunk to its base encoding if RDO did not make it smaller. `None` skips the check, and
-    /// BC7 skips it for chunks the rate model says shrank to [`VERIFY_SKIP7`] or less.
+    /// BC7 skips it for chunks the rate model says shrank to [`VERIFY_SKIP7`] or less, and every
+    /// format for chunks Zstd level 1 shrinks to [`VERIFY_QUICK`] or less.
     pub verify_zstd_level: Option<i32>,
     /// BC7: refit endpoints with the entropy-reduced quantization (set when the base encode
     /// used [`crate::format::BlockOpts::reduce_entropy`]).
@@ -2052,11 +2053,13 @@ fn optimize_chunk(
     // chunk, keep the base encoding (better quality at the same or smaller size).
     let sure = format == Format::Bc7 && stats.est_bits_after <= VERIFY_SKIP7 * stats.est_bits_before;
     if let (Some(level), Some(original), false) = (p.verify_zstd_level, original, sure) {
-        let size = |bs: &[[u8; 16]]| {
+        let size = |bs: &[[u8; 16]], level: i32| {
             let flat: Vec<u8> = bs.iter().flat_map(|b| b[..n].iter().copied()).collect();
             zstd::bulk::compress(&flat, level).map_or(usize::MAX, |v| v.len())
         };
-        if size(blocks) >= size(&original) {
+        // A fast first look: a chunk clearly smaller at Zstd level 1 is smaller at any level.
+        let quick = level > 1 && size(blocks, 1) as f64 <= VERIFY_QUICK * size(&original, 1) as f64;
+        if !quick && size(blocks, level) >= size(&original, level) {
             blocks.copy_from_slice(&original);
             stats.changed = 0;
             stats.est_bits_after = stats.est_bits_before;
@@ -2073,6 +2076,11 @@ fn optimize_chunk(
 /// of BC7 RDO's CPU time at λ 1; this skips 43% of chunks at λ 1 and all from about λ 10. BC1,
 /// BC4 and BC5 keep it: their estimates miss by up to 0.7, and a few chunks do fail.
 const VERIFY_SKIP7: f64 = 0.6;
+/// Chunks at most this fraction of the base's size under Zstd level 1 skip the check at the
+/// requested level. On Kodak-24 (λ 0.25 to 3) the level-19 ratio exceeded the level-1 ratio by at
+/// most 0.065, so such a chunk is still at most 0.97 of the base's size. A level-19 compression costs
+/// about 100 level-1 compressions; this skips most of the check's 3% of BC7 RDO CPU at λ 1.
+const VERIFY_QUICK: f64 = 0.9;
 
 /// Localized search: blocks the shape signatures pass to the ranker.
 const LOCAL_M: usize = 128;
