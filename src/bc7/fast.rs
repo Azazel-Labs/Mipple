@@ -1073,6 +1073,13 @@ fn ls_two<V: SimdF32>(
     (e, ok)
 }
 
+/// Polish (uber trials and refinement) skips a batch's (mode, partition) encoding unless some
+/// lane's unpolished error is within this factor of the lowest error seen for that lane so far:
+/// mode 6, every mode's unpolished candidates, then each polished result. Polish rarely cuts an
+/// error by a third. Effort 8 on Kodak-24: 1.72× faster at -0.006 dB; BC7 RDO λ 1: 15% less CPU
+/// time at -0.04% size and -0.004 dB.
+const POLISH_REACH: f32 = 1.5;
+
 /// [`uber_multi`]'s trials for mode 6 in the `active` lanes (16-level indices, 8-bit endpoints).
 #[inline(always)]
 fn uber6<V: SimdF32>(t: &Texels<V>, ends: &mut Ends<V>, idx: &mut [V; 16], err: &mut V, active: V::Mask, level: u8) {
@@ -2076,37 +2083,65 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
             let mut best_err = err;
             let mut winner = V::Int::splat(0);
             let mut mode_best: [Option<TwoBest<V>>; 4] = [None, None, None, None];
+            let slot_cfg = |slot: usize| match slot {
+                0 => (cfg.two & 1 != 0, &cands[0], k),
+                1 => (cfg.two & 2 != 0, &cands[1], k),
+                2 => (cfg.three & 1 != 0, &cands3[0], (cfg.parts_three as usize).clamp(1, 4)),
+                _ => (cfg.three & 2 != 0, &cands3[1], (cfg.parts_three as usize).clamp(1, 4)),
+            };
+            let sum_err = |s: &[Sub<V>; 3], ns: usize| {
+                if ns == 3 {
+                    s[0].err + s[1].err + s[2].err
+                } else {
+                    s[0].err + s[1].err
+                }
+            };
+            // Every (mode, candidate) unpolished first, so that a polish can be skipped when no
+            // lane of the batch is within POLISH_REACH of the lowest error seen for it.
+            let polishing = cfg.uber > 0 && (cfg.polish_parts || cfg.polish_modes);
+            let mut pre = [[None::<[Sub<V>; 3]>; 4]; 4];
+            let mut bound = err;
             for (slot, mode) in MODES.into_iter().enumerate() {
-                let (on, list, kk) = match slot {
-                    0 => (cfg.two & 1 != 0, &cands[0], k),
-                    1 => (cfg.two & 2 != 0, &cands[1], k),
-                    2 => (cfg.three & 1 != 0, &cands3[0], (cfg.parts_three as usize).clamp(1, 4)),
-                    _ => (cfg.three & 2 != 0, &cands3[1], (cfg.parts_three as usize).clamp(1, 4)),
-                };
+                let (on, list, kk) = slot_cfg(slot);
+                if !on {
+                    continue;
+                }
+                let ns = mode.subsets();
+                for (ci, part) in list.iter().take(kk).enumerate() {
+                    let m = part_masks::<V>(*part, mode);
+                    let s0 = encode_two(t, &m[0], mode, cfg.two_refits);
+                    let s1 = encode_two(t, &m[1], mode, cfg.two_refits);
+                    let s2 = if ns == 3 {
+                        encode_two(t, &m[2], mode, cfg.two_refits)
+                    } else {
+                        s0
+                    };
+                    let subs = [s0, s1, s2];
+                    bound = bound.simd_min(sum_err(&subs, ns));
+                    pre[slot][ci] = Some(subs);
+                }
+            }
+            let reach = V::splat(POLISH_REACH);
+            let worth = |e: V, bound: V| !polishing || V::mask_any(busy & e.simd_lt(bound * reach));
+            for (slot, mode) in MODES.into_iter().enumerate() {
+                let (on, list, kk) = slot_cfg(slot);
                 if !on {
                     continue;
                 }
                 let ns = mode.subsets();
                 let mut mb: Option<TwoBest<V>> = None;
                 for (ci, part) in list.iter().take(kk).enumerate() {
-                    let m = part_masks::<V>(*part, mode);
-                    let mut s0 = encode_two(t, &m[0], mode, cfg.two_refits);
-                    let mut s1 = encode_two(t, &m[1], mode, cfg.two_refits);
-                    let mut s2 = if ns == 3 {
-                        encode_two(t, &m[2], mode, cfg.two_refits)
-                    } else {
-                        s0
-                    };
-                    if cfg.polish_parts && (cfg.polish_top == 0 || ci < cfg.polish_top as usize) {
-                        let mut subs = [s0, s1, s2];
+                    let mut subs = pre[slot][ci].expect("encoded above");
+                    if cfg.polish_parts
+                        && (cfg.polish_top == 0 || ci < cfg.polish_top as usize)
+                        && worth(sum_err(&subs, ns), bound)
+                    {
+                        let m = part_masks::<V>(*part, mode);
                         polish(t, &m, &mut subs, mode, cfg.uber, cfg.refine);
-                        [s0, s1, s2] = subs;
+                        bound = bound.simd_min(sum_err(&subs, ns));
                     }
-                    let e = if ns == 3 {
-                        s0.err + s1.err + s2.err
-                    } else {
-                        s0.err + s1.err
-                    };
+                    let [s0, s1, s2] = subs;
+                    let e = sum_err(&subs, ns);
                     mb = Some(match mb {
                         None => ([s0, s1, s2], *part),
                         Some((b, bp)) => {
@@ -2128,9 +2163,10 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                     });
                 }
                 if let Some((mut b, bp)) = mb {
-                    if cfg.polish_modes && (!cfg.polish_parts || cfg.polish_top != 0) {
+                    if cfg.polish_modes && (!cfg.polish_parts || cfg.polish_top != 0) && worth(sum_err(&b, ns), bound) {
                         let m = part_masks::<V>(bp, mode);
                         polish(t, &m, &mut b, mode, cfg.uber, cfg.refine);
+                        bound = bound.simd_min(sum_err(&b, ns));
                     }
                     let e = if ns == 3 {
                         b[0].err + b[1].err + b[2].err
