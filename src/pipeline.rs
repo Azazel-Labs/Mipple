@@ -217,7 +217,10 @@ pub fn rdo_bases(
     let mut alts = Vec::new();
     if bc7_rdo {
         if bo.reduce_entropy {
-            alts.push(encode(plain));
+            alts.push(match crate::bc7::rdo_alt_cfg(plain) {
+                Some(cfg) => unflatten(format, &crate::bc7::fast::encode_surface(surface, cfg, plain)),
+                None => encode(plain),
+            });
         }
         alts.push(unflatten(
             format,

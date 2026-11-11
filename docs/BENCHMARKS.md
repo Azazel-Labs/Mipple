@@ -375,15 +375,24 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 
 | Oodle λ | BC1 at RMSE | BC1 at SSIM | BC7 at RMSE | BC7 at SSIM | BC4 at RMSE | BC4 at SSIM | BC5 at RMSE | BC5 at SSIM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | −17.6% | −8.5% | −6.5% (16/24 images) | −2.6% (4/24) | −13.2% | −5.0% | −30.8% | −10.9% |
-| 1 | −13.8% | −5.8% | −3.0% (12/24) | −0.9% (4/24) | −3.8% | −1.1% | −4.1% | −0.7% |
-| 10 | −9.6% | −5.7% | −1.1% | −3.1% | −5.7% | −0.9% | −9.8% | −2.4% |
-| 20 | −8.8% | −5.2% | −0.6% | −1.5% | −8.6% | −1.7% | −14.7% | −3.6% |
-| 30 | −8.8% | −4.6% | −0.9% | −0.7% | −11.5% | −2.5% | −17.9% | −4.0% |
-| 40 | −8.8% | −4.0% | −1.5% | −0.3% | −13.9% | −3.3% | −20.1% | −4.3% |
+| 0 | −17.6% | −8.5% | −6.3% (15/24 images) | −2.5% (4/24) | −13.2% | −5.0% | −30.8% | −10.9% |
+| 1 | −13.8% | −5.8% | −2.8% (12/24) | −0.8% (4/24) | −3.8% | −1.1% | −4.1% | −0.7% |
+| 10 | −9.6% | −5.7% | −1.0% | −3.0% | −5.7% | −0.9% | −9.8% | −2.4% |
+| 20 | −8.8% | −5.2% | −0.4% | −1.5% | −8.6% | −1.7% | −14.7% | −3.6% |
+| 30 | −8.8% | −4.6% | −0.8% | −0.7% | −11.5% | −2.5% | −17.9% | −4.0% |
+| 40 | −8.8% | −4.0% | −1.4% | −0.2% | −13.9% | −3.3% | −20.1% | −4.3% |
 
-All four are mipple 0.9.18 (smooth weight 4×, halved at channel std 12; BC4/BC5 RDO from an effort-8 base). BC5's R16G16 input is rebuilt from the
+All four are mipple 0.9.18 (smooth weight 4×, halved at channel std 12; BC4/BC5 RDO from an effort-8 base),
+BC7 rerun after the far-search speedups and the lighter second base (below), which leave its size unchanged. BC5's R16G16 input is rebuilt from the
 PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces the recorded λ 0 scores exactly.
+
+Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
+the same cook with a full one, about 62 CPU-seconds for Kodak-24 at λ 30 (High). mipple reaches that quality
+at λ 1-1.5. BC7 RDO at λ 1 took about 104 CPU-seconds for Kodak-24 at 9c2eacf (one process per image on 6
+pinned P-cores) and about 94 with the lighter second base (`bc7::rdo_alt_cfg`: the effort-8 plain search
+kept beside the entropy-reduced base polishes one candidate per mode, not two, and refines once, not twice;
+the table above is the same with or without it), so mipple still takes about 1.5× Oodle's CPU time for the
+same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,

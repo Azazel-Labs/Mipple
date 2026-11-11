@@ -119,6 +119,24 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
     })
 }
 
+/// The plain search RDO keeps as a second base beside an entropy-reduced one: [`fast_cfg`], except
+/// that effort 8 polishes only each mode's best candidate (not its top two) and refines ±1 once
+/// (not twice). RDO replaces or re-indexes most of these blocks, so the extra search mostly goes
+/// unused: BC7 RDO λ 1 on Kodak-24 takes 10% less CPU time for the same size vs Oodle 2.9.16 at
+/// λ 0-40 (see docs/BENCHMARKS.md).
+pub fn rdo_alt_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
+    let c = fast_cfg(opts)?;
+    Some(if opts.effort == 8 {
+        fast::Cfg {
+            polish_top: 1,
+            refine: 1,
+            ..c
+        }
+    } else {
+        c
+    })
+}
+
 /// Mode 6 alone (effort 0's search) with two refits: an RDO base whose blocks all share one layout.
 pub fn mode6_cfg() -> fast::Cfg {
     fast::Cfg {
