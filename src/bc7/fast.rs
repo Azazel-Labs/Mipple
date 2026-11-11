@@ -890,10 +890,98 @@ fn refine_multi<V: SimdF32, const NS: usize>(
     }
 }
 
-/// Encodes one subset (members `m`) per lane: masked principal axis, extremes, quantization,
-/// exact indices, then `refits` least-squares refits kept when they lower the error.
+/// Encodes the first `NS` subsets (members `m`) per lane: each subset's masked principal axis,
+/// extremes and quantization, then exact indices and `refits` least-squares refits, each kept
+/// per lane when it lowers that subset's error. The subsets run in lockstep so that every
+/// indexing is one [`index_multi`] pass for all of them; a subset stops refitting when no lane
+/// takes its refit, so each gets exactly the result it gets alone. A subset's indices are its
+/// members' (the only ones callers read). For two subsets the third is a copy of the first.
 #[inline(always)]
-fn encode_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], mode: Two, refits: u8) -> Sub<V> {
+fn encode_multi<V: SimdF32, const NS: usize>(t: &Texels<V>, m: &[[V; 16]; 3], mode: Two, refits: u8) -> [Sub<V>; 3] {
+    let zero = V::splat(0.0);
+    let mut e = [[[zero; 3]; 2]; NS];
+    let mut q = [[[zero; 3]; 2]; NS];
+    let mut p = [[zero; 2]; NS];
+    let mut v = [[[zero; 3]; 2]; NS];
+    let mut s = 0;
+    while s < NS {
+        e[s] = subset_line(t, &m[s]);
+        (q[s], p[s], v[s]) = quant_two(&e[s], mode);
+        s += 1;
+    }
+    let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+    let mut best = [Sub {
+        q: q[0],
+        p: p[0],
+        v: v[0],
+        idx,
+        err: err[0],
+    }; NS];
+    let mut s = 1;
+    while s < NS {
+        best[s] = Sub {
+            q: q[s],
+            p: p[s],
+            v: v[s],
+            idx,
+            err: err[s],
+        };
+        s += 1;
+    }
+    let mut live = [true; NS];
+    let nidx = 1u32 << mode.index_bits();
+    let mut r = 0;
+    while r < refits {
+        let mut ne = e;
+        let mut oks = [zero.simd_lt(zero); NS];
+        let mut s = 0;
+        while s < NS {
+            v[s] = best[s].v;
+            if live[s] {
+                let (a, b, ok) = ls_ends(t, &m[s], &best[s].idx, nidx, (e[s][0], e[s][1]));
+                ne[s] = [a, b];
+                oks[s] = ok;
+                (q[s], p[s], v[s]) = quant_two(&ne[s], mode);
+            }
+            s += 1;
+        }
+        let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+        let mut any = false;
+        let mut s = 0;
+        while s < NS {
+            if live[s] {
+                let take = oks[s] & err[s].simd_lt(best[s].err);
+                if V::mask_any(take) {
+                    best[s] = merge_sub(
+                        take,
+                        &Sub {
+                            q: q[s],
+                            p: p[s],
+                            v: v[s],
+                            idx,
+                            err: err[s],
+                        },
+                        &best[s],
+                    );
+                    e[s] = ne[s];
+                    any = true;
+                } else {
+                    live[s] = false;
+                }
+            }
+            s += 1;
+        }
+        if !any {
+            break;
+        }
+        r += 1;
+    }
+    [best[0], best[1], if NS == 3 { best[NS - 1] } else { best[0] }]
+}
+
+/// A subset's line-fit endpoints (members `m`) in 8-bit units, as multiples of 1/16.
+#[inline(always)]
+fn subset_line<V: SimdF32>(t: &Texels<V>, m: &[V; 16]) -> [[V; 3]; 2] {
     // In exact integers, as the mode-6 line fit: n Σxy - Σx Σy over the members, three power
     // iterations, a 7-bit axis and the endpoints at the members' extreme projections.
     let one = V::splat(1.0);
@@ -918,28 +1006,10 @@ fn encode_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], mode: Two, refits: u8) -> 
     };
     let (hi, lo) = subset_ends(t, m, n, &sum, &ws);
     let inv16 = V::splat(1.0 / 16.0);
-    let mut e = [
+    [
         [lo[0] * inv16, lo[1] * inv16, lo[2] * inv16],
         [hi[0] * inv16, hi[1] * inv16, hi[2] * inv16],
-    ];
-    let (q, p, vq) = quant_two(&e, mode);
-    let (idx, err) = index_two(t, m, &vq, mode);
-    let mut best = Sub { q, p, v: vq, idx, err };
-    let mut r = 0;
-    while r < refits {
-        let (a, b, ok) = ls_ends(t, m, &best.idx, 1u32 << mode.index_bits(), (e[0], e[1]));
-        let ne = [a, b];
-        let (q, p, vq) = quant_two(&ne, mode);
-        let (idx, err) = index_two(t, m, &vq, mode);
-        let take = ok & err.simd_lt(best.err);
-        if !V::mask_any(take) {
-            break;
-        }
-        best = merge_sub(take, &Sub { q, p, v: vq, idx, err }, &best);
-        e = ne;
-        r += 1;
-    }
-    best
+    ]
 }
 
 /// 8-bit value of a quantized endpoint channel `q` with p-bit `p` for `mode`: the `n`-bit value
@@ -2109,14 +2179,11 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                 let ns = mode.subsets();
                 for (ci, part) in list.iter().take(kk).enumerate() {
                     let m = part_masks::<V>(*part, mode);
-                    let s0 = encode_two(t, &m[0], mode, cfg.two_refits);
-                    let s1 = encode_two(t, &m[1], mode, cfg.two_refits);
-                    let s2 = if ns == 3 {
-                        encode_two(t, &m[2], mode, cfg.two_refits)
+                    let subs = if ns == 3 {
+                        encode_multi::<V, 3>(t, &m, mode, cfg.two_refits)
                     } else {
-                        s0
+                        encode_multi::<V, 2>(t, &m, mode, cfg.two_refits)
                     };
-                    let subs = [s0, s1, s2];
                     bound = bound.simd_min(sum_err(&subs, ns));
                     pre[slot][ci] = Some(subs);
                 }

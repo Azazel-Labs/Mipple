@@ -66,7 +66,8 @@ pub struct RdoParams {
     /// Hash-chain depth for the match finder.
     pub chain_depth: usize,
     /// After optimizing a chunk, compress it with real Zstd at this level and revert the
-    /// chunk to its base encoding if RDO did not make it smaller. `None` skips the check.
+    /// chunk to its base encoding if RDO did not make it smaller. `None` skips the check, and
+    /// BC7 skips it for chunks the rate model says shrank to [`VERIFY_SKIP7`] or less.
     pub verify_zstd_level: Option<i32>,
     /// BC7: refit endpoints with the entropy-reduced quantization (set when the base encode
     /// used [`crate::format::BlockOpts::reduce_entropy`]).
@@ -2256,7 +2257,8 @@ fn optimize_chunk(
 
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this
     // chunk, keep the base encoding (better quality at the same or smaller size).
-    if let (Some(level), Some(original)) = (p.verify_zstd_level, original) {
+    let sure = format == Format::Bc7 && stats.est_bits_after <= VERIFY_SKIP7 * stats.est_bits_before;
+    if let (Some(level), Some(original), false) = (p.verify_zstd_level, original, sure) {
         let size = |bs: &[[u8; 16]]| {
             let flat: Vec<u8> = bs.iter().flat_map(|b| b[..n].iter().copied()).collect();
             zstd::bulk::compress(&flat, level).map_or(usize::MAX, |v| v.len())
@@ -2270,6 +2272,14 @@ fn optimize_chunk(
     }
     stats
 }
+
+/// BC7 chunks whose estimated size after RDO is at most this fraction of the base's skip the Zstd
+/// check. On Kodak-24 no chunk ever failed it (λ 0.1 to 40), and among chunks estimated at 0.6 or
+/// less the real ratio was at most 0.69 (BC7's model is close: the real ratio exceeded the
+/// estimate by at most 0.22, at λ 0.1). The check is two Zstd-19 compressions per chunk, about 5%
+/// of BC7 RDO's CPU time at λ 1; this skips 43% of chunks at λ 1 and all from about λ 10. BC1,
+/// BC4 and BC5 keep it: their estimates miss by up to 0.7, and a few chunks do fail.
+const VERIFY_SKIP7: f64 = 0.6;
 
 /// Localized search: blocks the shape signatures pass to the ranker.
 const LOCAL_M: usize = 128;

@@ -403,7 +403,10 @@ multi-subset candidates before re-indexing them: the endpoint channels fully ins
 mean texel too far from that segment rejects (byte-identical, about 2% less), and mode-6 re-indexing chose
 all 16 indices at once with AVX2 (the same projection, window and ties; byte-identical, about 2.5% less, to
 about 80). BC7 block packing, unpacking and decoding then got one copy per mode, so each mode's bit layout
-unrolls to fixed shifts (byte-identical, about 5% less, to about 75). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
+unrolls to fixed shifts (byte-identical, about 5% less, to about 75). The fast encoder's 2- and 3-subset
+candidates (the plain alternate base) then encoded their subsets in lockstep, one indexing pass for all of them
+(byte-identical, about 2.5% less), and BC7 skipped the Zstd check for chunks the rate model says shrank to 0.6
+or less, which on Kodak-24 never fail it (byte-identical there; about 1% less at λ 1, to about 73, and 5% at λ 10). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
