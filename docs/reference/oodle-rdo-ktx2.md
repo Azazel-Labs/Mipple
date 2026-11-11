@@ -1,8 +1,6 @@
 # Oodle, RDO, Texture Optimization & KTX2 — Reference
 
-Exported from the living doc "Oodle, RDO, Texture Optimization & KTX2 — Reference" (as of Nov 6, 2026).
-Live version: https://claude.ai/artifact/8Hxqjpm7U5tdv3nS8tsv8J — edits made there are not reflected here.
-The two diagrams from the live doc are described in text.
+As of Nov 6, 2026.
 
 ## Overview
 
