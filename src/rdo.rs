@@ -1911,11 +1911,13 @@ const LOCAL_ROW_R: usize = 2;
 /// Ranker training dumps: one block in this many searches every far block of its chunk.
 const DUMP_EVERY: usize = 512;
 
-/// BC7 localized search: blocks each prefilter key passes to the ranker.
-const LOCAL7_M: usize = 32;
-/// Localized BC7 search: how far back the prefilter looks (64 KiB of blocks, the chunk size the ranker
-/// was trained on; with larger `--chunk-bytes`, scanning the whole chunk would cost quadratically more).
-const LOCAL7_REACH: usize = 4096;
+/// BC7 localized search: blocks each prefilter key passes to the ranker (32 matched 16's size and quality on
+/// Kodak-24 against Oodle at 6% more CPU time).
+const LOCAL7_M: usize = 16;
+/// Localized BC7 search: how far back the prefilter looks. Half a 64 KiB chunk (the chunk size the ranker was
+/// trained on): the whole chunk matched it on Kodak-24 but cost more, and with larger `--chunk-bytes`,
+/// scanning the whole chunk would cost quadratically more.
+const LOCAL7_REACH: usize = 2048;
 /// BC7 ranker training dumps: blocks dumped per prefilter key (see `optimize_chunk`).
 const DUMP7_M: usize = 64;
 
