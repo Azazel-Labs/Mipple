@@ -7,9 +7,13 @@
 //! identifier | header | index | level index | DFD | key/value data | mip data (smallest first)
 //! ```
 
+// Header fields are untrusted: sizes and offsets go through checked conversions and arithmetic.
+#![warn(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+
 use crate::format::Format;
 use crate::pipeline::{EncodedTexture, Level};
 use anyhow::{Context, Result, bail, ensure};
+use std::io::Read;
 
 pub const IDENTIFIER: [u8; 12] = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
 pub const SCHEME_NONE: u32 = 0;
@@ -39,17 +43,21 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
     };
     let block_size = 24 + 16 * samples.len();
     let mut v = Vec::with_capacity(4 + block_size);
-    v.extend_from_slice(&((4 + block_size) as u32).to_le_bytes());
+    v.extend_from_slice(&u32_field(4 + block_size).to_le_bytes());
     v.extend_from_slice(&0u32.to_le_bytes()); // vendorId = Khronos, descriptorType = basic
     v.extend_from_slice(&2u16.to_le_bytes()); // versionNumber
-    v.extend_from_slice(&(block_size as u16).to_le_bytes());
+    v.extend_from_slice(&u16::try_from(block_size).expect("DFD block is small").to_le_bytes());
     v.push(color_model(format));
     v.push(1); // colorPrimaries = BT709
     v.push(if srgb { 2 } else { 1 }); // transferFunction: sRGB or linear
     v.push(0); // flags: straight alpha
     v.extend_from_slice(&[3, 3, 0, 0]); // texelBlockDimension (4x4, stored minus one)
     // bytesPlane0 is 0 ("unsized") when the data is supercompressed.
-    let bytes_plane0 = if supercompressed { 0 } else { format.block_bytes() as u8 };
+    let bytes_plane0 = if supercompressed {
+        0
+    } else {
+        u8::try_from(format.block_bytes()).expect("8 or 16")
+    };
     v.extend_from_slice(&[bytes_plane0, 0, 0, 0, 0, 0, 0, 0]);
     for &(offset, len, channel) in samples {
         v.extend_from_slice(&offset.to_le_bytes());
@@ -64,7 +72,7 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
 
 fn push_kv(out: &mut Vec<u8>, key: &str, value: &str) {
     let len = key.len() + 1 + value.len() + 1;
-    out.extend_from_slice(&(len as u32).to_le_bytes());
+    out.extend_from_slice(&u32_field(len).to_le_bytes());
     out.extend_from_slice(key.as_bytes());
     out.push(0);
     out.extend_from_slice(value.as_bytes());
@@ -72,6 +80,12 @@ fn push_kv(out: &mut Vec<u8>, key: &str, value: &str) {
     while !out.len().is_multiple_of(4) {
         out.push(0);
     }
+}
+
+/// A 32-bit header field (level count, DFD and key/value offsets and lengths): these sit before the
+/// level data and stay small.
+fn u32_field(v: usize) -> u32 {
+    u32::try_from(v).expect("KTX2 header field fits in 32 bits")
 }
 
 fn round_up(v: usize, a: usize) -> usize {
@@ -174,12 +188,12 @@ pub fn write(
     put32(&mut out, 28, 0); // pixelDepth
     put32(&mut out, 32, 0); // layerCount
     put32(&mut out, 36, 1); // faceCount
-    put32(&mut out, 40, n as u32);
+    put32(&mut out, 40, u32_field(n));
     put32(&mut out, 44, if supercompressed { SCHEME_ZSTD } else { SCHEME_NONE });
-    put32(&mut out, 48, dfd_off as u32);
-    put32(&mut out, 52, dfd.len() as u32);
-    put32(&mut out, 56, if kvd.is_empty() { 0 } else { kvd_off as u32 });
-    put32(&mut out, 60, kvd.len() as u32);
+    put32(&mut out, 48, u32_field(dfd_off));
+    put32(&mut out, 52, u32_field(dfd.len()));
+    put32(&mut out, 56, if kvd.is_empty() { 0 } else { u32_field(kvd_off) });
+    put32(&mut out, 60, u32_field(kvd.len()));
     put64(&mut out, 64, 0); // sgdByteOffset
     put64(&mut out, 72, 0); // sgdByteLength
 
@@ -230,18 +244,24 @@ pub fn read_header(bytes: &[u8]) -> Result<Header> {
     let (kvd_off, kvd_len) = (u32_at(56) as usize, u32_at(60) as usize);
     let mut key_values = Vec::new();
     if kvd_len > 0 {
-        ensure!(kvd_off + kvd_len <= bytes.len(), "truncated key/value data");
-        let kvd = &bytes[kvd_off..kvd_off + kvd_len];
+        let kvd = kvd_off
+            .checked_add(kvd_len)
+            .and_then(|end| bytes.get(kvd_off..end))
+            .context("truncated key/value data")?;
         let mut p = 0;
         while p + 4 <= kvd.len() {
             let len = u32::from_le_bytes(kvd[p..p + 4].try_into().unwrap()) as usize;
-            let entry = &kvd[p + 4..(p + 4 + len).min(kvd.len())];
+            let end = (p + 4).saturating_add(len);
+            let entry = &kvd[p + 4..end.min(kvd.len())];
             if let Some(z) = entry.iter().position(|&b| b == 0) {
                 let key = String::from_utf8_lossy(&entry[..z]).into_owned();
                 let val = entry[z + 1..].strip_suffix(&[0]).unwrap_or(&entry[z + 1..]);
                 key_values.push((key, String::from_utf8_lossy(val).into_owned()));
             }
-            p = round_up(p + 4 + len, 4);
+            if end >= kvd.len() {
+                break;
+            }
+            p = round_up(end, 4);
         }
     }
     Ok(Header {
@@ -270,19 +290,32 @@ pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
         .map(|(_, v)| v.chars().map(|c| c == '1').collect())
         .unwrap_or_default();
     let mut levels = Vec::with_capacity(h.levels.len());
-    for (li, &(off, len, ulen)) in h.levels.iter().enumerate() {
-        let (off, len) = (off as usize, len as usize);
-        ensure!(off + len <= bytes.len(), "level {li} out of bounds");
-        let raw = &bytes[off..off + len];
+    for (li, &(off, len, _)) in h.levels.iter().enumerate() {
+        let shift = u32::try_from(li).unwrap_or(u32::MAX);
+        let width = h.width.checked_shr(shift).unwrap_or(0).max(1);
+        let height = h.height.checked_shr(shift).unwrap_or(0).max(1);
+        let expected = format
+            .level_bytes(width, height)
+            .with_context(|| format!("level {li}: {width}x{height} is too large"))?;
+        let raw = usize::try_from(off)
+            .ok()
+            .zip(usize::try_from(len).ok())
+            .and_then(|(off, len)| bytes.get(off..off.checked_add(len)?))
+            .with_context(|| format!("level {li} out of bounds"))?;
         let prepped = prep.get(li).copied().unwrap_or(false);
         let mut data = if h.scheme == SCHEME_ZSTD {
-            // `ulen` is the size of the blocks; a prepped level inflates to its (larger) streams.
+            // At most the level's size (a prepped level inflates to its larger streams), read as a
+            // stream so memory follows the actual output, not a size the header claims.
             let cap = if prepped {
-                crate::prep::max_len(ulen as usize)
+                crate::prep::max_len(expected)
             } else {
-                ulen as usize
+                expected
             };
-            zstd::bulk::decompress(raw, cap).with_context(|| format!("level {li}: zstd"))?
+            let mut out = Vec::new();
+            zstd::stream::read::Decoder::with_buffer(raw)
+                .and_then(|d| d.take(cap as u64 + 1).read_to_end(&mut out))
+                .with_context(|| format!("level {li}: zstd"))?;
+            out
         } else {
             raw.to_vec()
         };
@@ -290,9 +323,6 @@ pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
             data =
                 crate::prep::inverse(format, &data).with_context(|| format!("level {li}: malformed prep streams"))?;
         }
-        let width = (h.width >> li).max(1);
-        let height = (h.height >> li).max(1);
-        let expected = width.div_ceil(4) as usize * height.div_ceil(4) as usize * format.block_bytes();
         ensure!(
             data.len() == expected,
             "level {li}: {} bytes, expected {expected}",

@@ -38,7 +38,7 @@ pub fn forward(format: Format, raw: &[u8]) -> Vec<u8> {
 /// Upper bound on `forward(format, raw).len()` for `raw_len` bytes of blocks (no block expands
 /// to more than twice its size: at most 29 stream bytes per 16-byte BC7 block).
 pub fn max_len(raw_len: usize) -> usize {
-    2 * raw_len + 64
+    raw_len.saturating_mul(2).saturating_add(64)
 }
 
 /// Restores the blocks of `forward(format, raw)`; `None` if `data` is malformed.

@@ -94,6 +94,13 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
+# Release speed with overflow checks and debug assertions, for tests (`cargo test --profile ci`, as CI runs
+# them): a wrapped integer in a cost, rate or size computation fails a test instead of passing silently.
+[profile.ci]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true
+
 # Fast-to-build optimized profile for iterating on kernels (`cargo build --profile iter`).
 # Timings are close to release but not identical; confirm wins with a release build.
 [profile.iter]

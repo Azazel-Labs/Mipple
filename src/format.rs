@@ -108,6 +108,14 @@ impl Format {
         }
     }
 
+    /// Bytes of a `width`×`height` level, or `None` when that overflows `usize` (the KTX2 and DDS
+    /// readers take sizes from untrusted headers).
+    pub fn level_bytes(self, width: u32, height: u32) -> Option<usize> {
+        let bw = usize::try_from(width.div_ceil(4)).ok()?;
+        let bh = usize::try_from(height.div_ceil(4)).ok()?;
+        bw.checked_mul(bh)?.checked_mul(self.block_bytes())
+    }
+
     /// Whether color data in this format is normally stored sRGB-encoded.
     pub fn default_srgb(self) -> bool {
         matches!(self, Format::Bc1 | Format::Bc7)

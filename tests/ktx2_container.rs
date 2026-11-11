@@ -125,3 +125,58 @@ fn prep_roundtrips_through_ktx2() {
         }
     }
 }
+
+/// Crafted headers must come back as errors: no panic, no allocation sized by the header.
+#[test]
+fn malformed_headers_are_errors() {
+    let tex = encode(Format::Bc7, true);
+    let put32 = |b: &mut Vec<u8>, at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |b: &mut Vec<u8>, at: usize, v: u64| b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    for zstd in [None, Some(3)] {
+        let good = ktx2::write(&tex, zstd, None, ktx2::PrepMode::Off).unwrap();
+        let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+        // Level 0 offset near u64::MAX: offset + length wraps.
+        let mut b = good.clone();
+        put64(&mut b, 80, u64::MAX - 1);
+        cases.push(("wrapping level offset", b));
+        // A 2^32-1 square texture: its level size overflows and the zstd output would be huge.
+        let mut b = good.clone();
+        put32(&mut b, 20, u32::MAX);
+        put32(&mut b, 24, u32::MAX);
+        cases.push(("huge dimensions", b));
+        // A huge uncompressed length must not size the output buffer.
+        let mut b = good.clone();
+        put64(&mut b, 96, u64::MAX);
+        cases.push(("huge uncompressed length", b));
+        // Key/value data running past the end of the file.
+        let mut b = good.clone();
+        put32(&mut b, 56, u32::MAX - 2);
+        put32(&mut b, 60, 16);
+        cases.push(("wrapping key/value range", b));
+        for (what, b) in cases {
+            if what == "huge uncompressed length" {
+                // Ignored by the reader: the level decodes from its own size.
+                assert_eq!(ktx2::read(&b).unwrap(), tex, "{what} zstd={zstd:?}");
+            } else {
+                assert!(ktx2::read(&b).is_err(), "{what} zstd={zstd:?}");
+            }
+        }
+    }
+    // A 1x1 texture claiming 40 levels (level indices past 31 must not shift a u32 by 32 or more),
+    // each pointing at the same 16-byte block.
+    let good = ktx2::write(&tex, None, None, ktx2::PrepMode::Off).unwrap();
+    let n = 40;
+    let data_at = 80 + 24 * n;
+    let mut b = good[..80].to_vec();
+    for (at, v) in [(20, 1), (24, 1), (40, n as u32), (44, 0), (56, 0), (60, 0)] {
+        put32(&mut b, at, v);
+    }
+    for _ in 0..n {
+        for v in [data_at as u64, 16, 16] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    b.extend_from_slice(&[0u8; 16]);
+    let back = ktx2::read(&b).unwrap();
+    assert_eq!(back.levels.len(), n);
+}

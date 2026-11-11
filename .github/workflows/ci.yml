@@ -21,7 +21,8 @@ jobs:
           cache-on-failure: true
       - run: cargo xtask fmt --check
       - run: cargo xtask clippy
-      - run: cargo test --release
+      # Release speed with overflow checks and debug assertions (profile.ci in Cargo.toml).
+      - run: cargo test --profile ci
       - name: Regression check (synthetic corpus vs bench-results/check-baseline.csv)
         if: startsWith(matrix.os, 'ubuntu')
         run: cargo run --release -- check

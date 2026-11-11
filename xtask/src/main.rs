@@ -3,7 +3,7 @@
 //!   fmt [--check]   rustfmt every crate in the workspace (`--check`: fail on a diff, as CI does)
 //!   clippy          clippy on all targets with warnings as errors, then the library without default
 //!                   features, as CI runs it
-//!   ci              fmt --check, then clippy, then the release tests
+//!   ci              fmt --check, then clippy, then the tests (profile ci: release + overflow checks)
 
 use std::process::{Command, ExitCode};
 
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
         ["fmt"] => fmt(false),
         ["fmt", "--check"] => fmt(true),
         ["clippy"] => clippy(),
-        ["ci"] => fmt(true) && clippy() && cargo(&["test", "--release"]),
+        ["ci"] => fmt(true) && clippy() && cargo(&["test", "--profile", "ci"]),
         _ => {
             eprintln!("usage: cargo xtask <fmt [--check] | clippy | ci>");
             return ExitCode::from(2);
