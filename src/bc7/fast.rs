@@ -46,7 +46,7 @@ pub struct Cfg {
     /// Partition ranking: the line-fit residual of all 64 partitions with a one-step λ estimate
     /// (`rank_fits`) instead of bc7f's popcount estimate.
     pub rank: bool,
-    /// ±1 endpoint refinement passes of the winning 2-subset encodings (`refine_two`).
+    /// ±1 endpoint refinement passes of the winning 2-subset encodings (`refine_multi`).
     pub refine: u8,
     /// Mode-6 error (sum over the block) at or below which a block skips the 2-subset search.
     pub busy_err: f32,
@@ -573,6 +573,323 @@ fn index_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], v: &[[V; 3]; 2], mode: Two)
     (idx, err)
 }
 
+/// [`index_two`] for the first `NS` subsets at once: each texel is indexed against its own
+/// subset's endpoints (picked by the membership masks `m`), so one pass instead of `NS`. The
+/// per-subset errors equal `index_two`'s exactly (same operations per texel; non-members add
+/// `0 · e`). Each index is the texel's own subset's, which is the only one callers read.
+#[inline(always)]
+fn index_multi<V: SimdF32, const NS: usize>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    v: &[[[V; 3]; 2]; NS],
+    mode: Two,
+) -> ([V; 16], [V; NS]) {
+    let zero = V::splat(0.0);
+    let n = (1u32 << mode.index_bits()) as f32;
+    let steps = V::splat(n - 1.0);
+    let inv64 = V::splat(1.0 / 64.0);
+    // Per subset, as in `index_two`.
+    let (mut ds, mut bias, mut inv_dd, mut d64) = ([[zero; 3]; NS], [zero; NS], [zero; NS], [[zero; 3]; NS]);
+    let mut s = 0;
+    while s < NS {
+        let vs = &v[s];
+        let d = [vs[1][0] - vs[0][0], vs[1][1] - vs[0][1], vs[1][2] - vs[0][2]];
+        let dd1 = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).simd_max(V::splat(1.0));
+        inv_dd[s] = V::splat(1.0) / dd1;
+        ds[s] = [d[0] * steps, d[1] * steps, d[2] * steps];
+        bias[s] = V::splat(0.5) - (vs[0][0] * ds[s][0] + vs[0][1] * ds[s][1] + vs[0][2] * ds[s][2]);
+        d64[s] = [d[0] * inv64, d[1] * inv64, d[2] * inv64];
+        s += 1;
+    }
+    let top = V::splat(n - 2.0);
+    let mut idx = [zero; 16];
+    let mut err = [zero; NS];
+    let mut i = 0;
+    while i < 16 {
+        let in1 = zero.simd_lt(m[1][i]);
+        let in2 = if NS == 3 { zero.simd_lt(m[2][i]) } else { in1 };
+        let pick = |x: [V; NS]| {
+            let y = V::select(in1, x[1], x[0]);
+            if NS == 3 { V::select(in2, x[NS - 1], y) } else { y }
+        };
+        let ds3: [V; 3] = std::array::from_fn(|c| pick(std::array::from_fn(|s| ds[s][c])));
+        let d643: [V; 3] = std::array::from_fn(|c| pick(std::array::from_fn(|s| d64[s][c])));
+        let a3: [V; 3] = std::array::from_fn(|c| pick(std::array::from_fn(|s| v[s][0][c])));
+        let (b, inv) = (pick(bias), pick(inv_dd));
+        let num = t[0][i].mul_add(ds3[0], t[1][i].mul_add(ds3[1], t[2][i].mul_add(ds3[2], b)));
+        let j = floor(num * inv).simd_max(zero).simd_min(top);
+        let w0 = weight(j, n as u32);
+        let w1 = weight(j + V::splat(1.0), n as u32);
+        let (e0, e1) = pair_err(t, [0, 1, 2], i, &a3, &d643, w0, w1);
+        let up = e1.simd_lt(e0);
+        idx[i] = V::select(up, j + V::splat(1.0), j);
+        let e = e0.simd_min(e1);
+        let mut s = 0;
+        while s < NS {
+            err[s] = m[s][i].mul_add(e, err[s]);
+            s += 1;
+        }
+        i += 1;
+    }
+    (idx, err)
+}
+
+/// bc7e's "uber" trials then greedy ±1 refinement (per `level` and `passes`; 0 skips) of the
+/// first `NS` subsets, run in lockstep so each trial indexes every subset in one
+/// [`index_multi`] pass. Subsets are independent (a subset's error depends only on its own
+/// endpoints and members), and a refinement pass that changes nothing would change nothing if
+/// repeated, so running passes until every subset has converged gives each subset exactly the
+/// result it gets alone.
+#[inline(always)]
+fn polish_multi<V: SimdF32, const NS: usize>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    subs: &mut [Sub<V>; 3],
+    mode: Two,
+    level: u8,
+    passes: u8,
+) {
+    if level > 0 {
+        uber_multi::<V, NS>(t, m, subs, mode, level);
+    }
+    if passes > 0 {
+        refine_multi::<V, NS>(t, m, subs, mode, passes);
+    }
+}
+
+/// [`polish_multi`] for the subset count of `mode`.
+#[inline(always)]
+fn polish<V: SimdF32>(t: &Texels<V>, m: &[[V; 16]; 3], subs: &mut [Sub<V>; 3], mode: Two, level: u8, passes: u8) {
+    if mode.subsets() == 3 {
+        polish_multi::<V, 3>(t, m, subs, mode, level, passes);
+    } else {
+        polish_multi::<V, 2>(t, m, subs, mode, level, passes);
+    }
+}
+
+/// bc7e's "uber" trials for each subset: least-squares fits from index sets with the subset's
+/// lowest index raised, its highest lowered, both, and (for `level` >= 2) the indices linearly
+/// stretched from `[ly, hy]` onto the full range for ly in -Q..=1 and hy in max-1..=max+Q
+/// (Q = `level` - 1). Each fit is quantized and re-indexed exactly; kept per lane when better.
+#[inline(always)]
+fn uber_multi<V: SimdF32, const NS: usize>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    subs: &mut [Sub<V>; 3],
+    mode: Two,
+    level: u8,
+) {
+    let zero = V::splat(0.0);
+    let maxsel = ((1u32 << mode.index_bits()) - 1) as f32;
+    let top = V::splat(maxsel);
+    // Lowest and highest index over each subset's members.
+    let (mut lo, mut hi) = ([top; NS], [zero; NS]);
+    let mut s = 0;
+    while s < NS {
+        let mut i = 0;
+        while i < 16 {
+            let member = zero.simd_lt(m[s][i]);
+            lo[s] = V::select(member, lo[s].simd_min(subs[s].idx[i]), lo[s]);
+            hi[s] = V::select(member, hi[s].simd_max(subs[s].idx[i]), hi[s]);
+            i += 1;
+        }
+        s += 1;
+    }
+    let base: [[V; 16]; NS] = std::array::from_fn(|s| subs[s].idx);
+    let prev: [[[V; 3]; 2]; NS] = std::array::from_fn(|s| subs[s].v);
+    let q = level as i32 - 1;
+    let nt = 3 + if level >= 2 {
+        ((q + 2) * (q + 2) - 1) as usize
+    } else {
+        0
+    };
+    let mut k = 0;
+    while k < nt {
+        let mut oks = [zero.simd_lt(zero); NS];
+        let mut qs = [[[zero; 3]; 2]; NS];
+        let mut ps = [[zero; 2]; NS];
+        let mut vs = [[[zero; 3]; 2]; NS];
+        let mut s = 0;
+        while s < NS {
+            let mut idx2 = base[s];
+            if k < 3 {
+                let mut i = 0;
+                while i < 16 {
+                    let x = base[s][i];
+                    let up = (x - lo[s]).simd_max(lo[s] - x).simd_lt(V::splat(0.5)) & x.simd_lt(top);
+                    let down = (x - hi[s]).simd_max(hi[s] - x).simd_lt(V::splat(0.5)) & zero.simd_lt(x);
+                    idx2[i] = match k {
+                        0 => V::select(up, x + V::splat(1.0), x),
+                        1 => V::select(down, x - V::splat(1.0), x),
+                        _ => V::select(up, x + V::splat(1.0), V::select(down, x - V::splat(1.0), x)),
+                    };
+                    i += 1;
+                }
+            } else {
+                // Stretch combination (ly, hy), skipping the identity (0, max).
+                let mut n = k - 3;
+                let side = (q + 2) as usize;
+                let mut ly = (n / side) as i32 - q;
+                let mut hy = (n % side) as i32 + maxsel as i32 - 1;
+                if ly > 0 || (ly == 0 && hy >= maxsel as i32) {
+                    // Shift past the identity.
+                    n += 1;
+                    ly = (n / side) as i32 - q;
+                    hy = (n % side) as i32 + maxsel as i32 - 1;
+                }
+                let scale = V::splat(maxsel / (hy - ly) as f32);
+                let l = V::splat(ly as f32);
+                let mut i = 0;
+                while i < 16 {
+                    idx2[i] = floor(((base[s][i] - l) * scale + V::splat(0.5)).simd_max(zero)).simd_min(top);
+                    i += 1;
+                }
+            }
+            let (e, ok) = ls_two(t, &m[s], &idx2, mode, &prev[s]);
+            (qs[s], ps[s], vs[s]) = quant_two(&e, mode);
+            oks[s] = ok;
+            s += 1;
+        }
+        let (idx3, err3) = index_multi(t, m, &vs, mode);
+        let mut s = 0;
+        while s < NS {
+            let take = oks[s] & err3[s].simd_lt(subs[s].err);
+            if V::mask_any(take) {
+                subs[s] = merge_sub(
+                    take,
+                    &Sub {
+                        q: qs[s],
+                        p: ps[s],
+                        v: vs[s],
+                        idx: idx3,
+                        err: err3[s],
+                    },
+                    &subs[s],
+                );
+            }
+            s += 1;
+        }
+        k += 1;
+    }
+}
+
+/// Greedy ±1 refinement of each subset's quantized endpoint channels and p-bit flips: each
+/// change is kept per lane when it lowers the subset's exact error (indices re-chosen for every
+/// trial; holding them fixed loses two thirds of the gain). Up to `passes` sweeps.
+#[inline(always)]
+fn refine_multi<V: SimdF32, const NS: usize>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    subs: &mut [Sub<V>; 3],
+    mode: Two,
+    passes: u8,
+) {
+    let top = V::splat(((1u32 << mode.color_bits()) - 1) as f32);
+    let (zero, one) = (V::splat(0.0), V::splat(1.0));
+    let mut pass = 0;
+    while pass < passes {
+        let mut any = false;
+        let mut k = 0;
+        while k < 2 {
+            let mut c = 0;
+            while c < 3 {
+                let mut dir = 0;
+                while dir < 2 {
+                    let d = V::splat(if dir == 0 { 1.0 } else { -1.0 });
+                    let mut qs = [zero; NS];
+                    let mut vs = [[[zero; 3]; 2]; NS];
+                    let mut s = 0;
+                    while s < NS {
+                        qs[s] = (subs[s].q[k][c] + d).simd_clamp(zero, top);
+                        vs[s] = subs[s].v;
+                        vs[s][k][c] = dequant_two(qs[s], subs[s].p[k], mode);
+                        s += 1;
+                    }
+                    let (idx, err) = index_multi(t, m, &vs, mode);
+                    let mut s = 0;
+                    while s < NS {
+                        let take = err[s].simd_lt(subs[s].err);
+                        if V::mask_any(take) {
+                            any = true;
+                            let sub = &mut subs[s];
+                            sub.q[k][c] = V::select(take, qs[s], sub.q[k][c]);
+                            sub.v[k][c] = V::select(take, vs[s][k][c], sub.v[k][c]);
+                            sub.err = V::select(take, err[s], sub.err);
+                            let mut i = 0;
+                            while i < 16 {
+                                sub.idx[i] = V::select(take, idx[i], sub.idx[i]);
+                                i += 1;
+                            }
+                        }
+                        s += 1;
+                    }
+                    dir += 1;
+                }
+                c += 1;
+            }
+            k += 1;
+        }
+        // p-bit flips: the shared one (mode 1), or each and both (modes 0 and 3).
+        let flips: &[[bool; 2]] = match mode.pbits() {
+            PBits::Shared => &[[true, true]],
+            PBits::Endpoint => &[[true, false], [false, true], [true, true]],
+            PBits::None => &[],
+        };
+        for f in flips {
+            let mut nps = [[zero; 2]; NS];
+            let mut vs = [[[zero; 3]; 2]; NS];
+            let mut s = 0;
+            while s < NS {
+                nps[s] = subs[s].p;
+                vs[s] = subs[s].v;
+                let mut k = 0;
+                while k < 2 {
+                    if f[k] {
+                        nps[s][k] = one - subs[s].p[k];
+                        let mut c = 0;
+                        while c < 3 {
+                            vs[s][k][c] = dequant_two(subs[s].q[k][c], nps[s][k], mode);
+                            c += 1;
+                        }
+                    }
+                    k += 1;
+                }
+                s += 1;
+            }
+            let (idx, err) = index_multi(t, m, &vs, mode);
+            let mut s = 0;
+            while s < NS {
+                let take = err[s].simd_lt(subs[s].err);
+                if V::mask_any(take) {
+                    any = true;
+                    let sub = &mut subs[s];
+                    let mut k = 0;
+                    while k < 2 {
+                        sub.p[k] = V::select(take, nps[s][k], sub.p[k]);
+                        let mut c = 0;
+                        while c < 3 {
+                            sub.v[k][c] = V::select(take, vs[s][k][c], sub.v[k][c]);
+                            c += 1;
+                        }
+                        k += 1;
+                    }
+                    sub.err = V::select(take, err[s], sub.err);
+                    let mut i = 0;
+                    while i < 16 {
+                        sub.idx[i] = V::select(take, idx[i], sub.idx[i]);
+                        i += 1;
+                    }
+                }
+                s += 1;
+            }
+        }
+        if !any {
+            break;
+        }
+        pass += 1;
+    }
+}
+
 /// Encodes one subset (members `m`) per lane: masked principal axis, extremes, quantization,
 /// exact indices, then `refits` least-squares refits kept when they lower the error.
 #[inline(always)]
@@ -644,95 +961,6 @@ fn dequant_two<V: SimdF32>(q: V, p: V, mode: Two) -> V {
                 floor(t * V::splat(1.0 / (1 << (2 * n - 8)) as f32)),
             )
         }
-    }
-}
-
-/// Greedy ±1 refinement of a subset's quantized endpoint channels and p-bit flips: each change is
-/// kept per lane when it lowers the subset's exact error (indices re-chosen for every trial;
-/// holding them fixed loses two thirds of the gain). Up to `passes` sweeps.
-#[inline(always)]
-fn refine_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], sub: &mut Sub<V>, mode: Two, passes: u8) {
-    let top = V::splat(((1u32 << mode.color_bits()) - 1) as f32);
-    let (zero, one) = (V::splat(0.0), V::splat(1.0));
-    let mut pass = 0;
-    while pass < passes {
-        let mut any = false;
-        let mut k = 0;
-        while k < 2 {
-            let mut c = 0;
-            while c < 3 {
-                let mut dir = 0;
-                while dir < 2 {
-                    let d = V::splat(if dir == 0 { 1.0 } else { -1.0 });
-                    let q = (sub.q[k][c] + d).simd_clamp(zero, top);
-                    let mut v = sub.v;
-                    v[k][c] = dequant_two(q, sub.p[k], mode);
-                    let (idx, err) = index_two(t, m, &v, mode);
-                    let take = err.simd_lt(sub.err);
-                    if V::mask_any(take) {
-                        any = true;
-                        sub.q[k][c] = V::select(take, q, sub.q[k][c]);
-                        sub.v[k][c] = V::select(take, v[k][c], sub.v[k][c]);
-                        sub.err = V::select(take, err, sub.err);
-                        let mut i = 0;
-                        while i < 16 {
-                            sub.idx[i] = V::select(take, idx[i], sub.idx[i]);
-                            i += 1;
-                        }
-                    }
-                    dir += 1;
-                }
-                c += 1;
-            }
-            k += 1;
-        }
-        // p-bit flips: the shared one (mode 1), or each and both (modes 0 and 3).
-        let flips: &[[bool; 2]] = match mode.pbits() {
-            PBits::Shared => &[[true, true]],
-            PBits::Endpoint => &[[true, false], [false, true], [true, true]],
-            PBits::None => &[],
-        };
-        for f in flips {
-            let mut np = sub.p;
-            let mut v = sub.v;
-            let mut k = 0;
-            while k < 2 {
-                if f[k] {
-                    np[k] = one - sub.p[k];
-                    let mut c = 0;
-                    while c < 3 {
-                        v[k][c] = dequant_two(sub.q[k][c], np[k], mode);
-                        c += 1;
-                    }
-                }
-                k += 1;
-            }
-            let (idx, err) = index_two(t, m, &v, mode);
-            let take = err.simd_lt(sub.err);
-            if V::mask_any(take) {
-                any = true;
-                let mut k = 0;
-                while k < 2 {
-                    sub.p[k] = V::select(take, np[k], sub.p[k]);
-                    let mut c = 0;
-                    while c < 3 {
-                        sub.v[k][c] = V::select(take, v[k][c], sub.v[k][c]);
-                        c += 1;
-                    }
-                    k += 1;
-                }
-                sub.err = V::select(take, err, sub.err);
-                let mut i = 0;
-                while i < 16 {
-                    sub.idx[i] = V::select(take, idx[i], sub.idx[i]);
-                    i += 1;
-                }
-            }
-        }
-        if !any {
-            break;
-        }
-        pass += 1;
     }
 }
 
@@ -845,90 +1073,7 @@ fn ls_two<V: SimdF32>(
     (e, ok)
 }
 
-/// bc7e's "uber" trials for one subset: least-squares fits from index sets with the subset's
-/// lowest index raised, its highest lowered, both, and (for `level` >= 2) the indices linearly
-/// stretched from `[ly, hy]` onto the full range for ly in -Q..=1 and hy in max-1..=max+Q
-/// (Q = `level` - 1). Each fit is quantized and re-indexed exactly; kept per lane when better.
-#[inline(always)]
-fn uber_two<V: SimdF32>(t: &Texels<V>, m: &[V; 16], sub: &mut Sub<V>, mode: Two, level: u8) {
-    let zero = V::splat(0.0);
-    let maxsel = ((1u32 << mode.index_bits()) - 1) as f32;
-    let top = V::splat(maxsel);
-    // Lowest and highest index over the members.
-    let (mut lo, mut hi) = (top, zero);
-    let mut i = 0;
-    while i < 16 {
-        let member = zero.simd_lt(m[i]);
-        lo = V::select(member, lo.simd_min(sub.idx[i]), lo);
-        hi = V::select(member, hi.simd_max(sub.idx[i]), hi);
-        i += 1;
-    }
-    let base = sub.idx;
-    let prev = sub.v;
-    let q = level as i32 - 1;
-    let nt = 3 + if level >= 2 {
-        ((q + 2) * (q + 2) - 1) as usize
-    } else {
-        0
-    };
-    let mut k = 0;
-    while k < nt {
-        let mut idx2 = base;
-        if k < 3 {
-            let mut i = 0;
-            while i < 16 {
-                let x = base[i];
-                let up = (x - lo).simd_max(lo - x).simd_lt(V::splat(0.5)) & x.simd_lt(top);
-                let down = (x - hi).simd_max(hi - x).simd_lt(V::splat(0.5)) & zero.simd_lt(x);
-                idx2[i] = match k {
-                    0 => V::select(up, x + V::splat(1.0), x),
-                    1 => V::select(down, x - V::splat(1.0), x),
-                    _ => V::select(up, x + V::splat(1.0), V::select(down, x - V::splat(1.0), x)),
-                };
-                i += 1;
-            }
-        } else {
-            // Stretch combination (ly, hy), skipping the identity (0, max).
-            let mut n = k - 3;
-            let side = (q + 2) as usize;
-            let mut ly = (n / side) as i32 - q;
-            let mut hy = (n % side) as i32 + maxsel as i32 - 1;
-            if ly > 0 || (ly == 0 && hy >= maxsel as i32) {
-                // Shift past the identity.
-                n += 1;
-                ly = (n / side) as i32 - q;
-                hy = (n % side) as i32 + maxsel as i32 - 1;
-            }
-            let scale = V::splat(maxsel / (hy - ly) as f32);
-            let l = V::splat(ly as f32);
-            let mut i = 0;
-            while i < 16 {
-                idx2[i] = floor(((base[i] - l) * scale + V::splat(0.5)).simd_max(zero)).simd_min(top);
-                i += 1;
-            }
-        }
-        let (e, ok) = ls_two(t, m, &idx2, mode, &prev);
-        let (q2, p2, v2) = quant_two(&e, mode);
-        let (idx3, err3) = index_two(t, m, &v2, mode);
-        let take = ok & err3.simd_lt(sub.err);
-        if V::mask_any(take) {
-            *sub = merge_sub(
-                take,
-                &Sub {
-                    q: q2,
-                    p: p2,
-                    v: v2,
-                    idx: idx3,
-                    err: err3,
-                },
-                sub,
-            );
-        }
-        k += 1;
-    }
-}
-
-/// [`uber_two`]'s trials for mode 6 in the `active` lanes (16-level indices, 8-bit endpoints).
+/// [`uber_multi`]'s trials for mode 6 in the `active` lanes (16-level indices, 8-bit endpoints).
 #[inline(always)]
 fn uber6<V: SimdF32>(t: &Texels<V>, ends: &mut Ends<V>, idx: &mut [V; 16], err: &mut V, active: V::Mask, level: u8) {
     let zero = V::splat(0.0);
@@ -1953,15 +2098,9 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                         s0
                     };
                     if cfg.polish_parts && (cfg.polish_top == 0 || ci < cfg.polish_top as usize) {
-                        let subs = [&mut s0, &mut s1, &mut s2];
-                        for (j, sb) in subs.into_iter().enumerate().take(ns) {
-                            if cfg.uber > 0 {
-                                uber_two(t, &m[j], sb, mode, cfg.uber);
-                            }
-                            if cfg.refine > 0 {
-                                refine_two(t, &m[j], sb, mode, cfg.refine);
-                            }
-                        }
+                        let mut subs = [s0, s1, s2];
+                        polish(t, &m, &mut subs, mode, cfg.uber, cfg.refine);
+                        [s0, s1, s2] = subs;
                     }
                     let e = if ns == 3 {
                         s0.err + s1.err + s2.err
@@ -1991,16 +2130,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                 if let Some((mut b, bp)) = mb {
                     if cfg.polish_modes && (!cfg.polish_parts || cfg.polish_top != 0) {
                         let m = part_masks::<V>(bp, mode);
-                        let mut j = 0;
-                        while j < ns {
-                            if cfg.uber > 0 {
-                                uber_two(t, &m[j], &mut b[j], mode, cfg.uber);
-                            }
-                            if cfg.refine > 0 {
-                                refine_two(t, &m[j], &mut b[j], mode, cfg.refine);
-                            }
-                            j += 1;
-                        }
+                        polish(t, &m, &mut b, mode, cfg.uber, cfg.refine);
                     }
                     let e = if ns == 3 {
                         b[0].err + b[1].err + b[2].err
@@ -2026,11 +2156,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
                     // ±1 refinement of this mode's winners only (refinement never raises the
                     // error, so they stay winners).
                     let m = part_masks::<V>(bp, mode);
-                    let mut j = 0;
-                    while j < mode.subsets() {
-                        refine_two(t, &m[j], &mut b[j], mode, cfg.refine);
-                        j += 1;
-                    }
+                    polish(t, &m, &mut b, mode, 0, cfg.refine);
                 }
                 pack_two_lanes(mode, bp, &b, V::mask_to_bools(lanes), &mut over);
             }
