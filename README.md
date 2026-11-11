@@ -7,6 +7,13 @@ A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC
 blocks, tuned so Zstd, Deflate or Kraken shrink them further, and stores them in **KTX2** with optional
 Zstd supercompression. GPUs read the output directly; nothing new runs at load time.
 
+<img src="docs/img/rdo.webp" alt="Animation: mipple's BC7 RDO sweeps Kodak 23 block by block, re-encoding blocks to copy or share bytes with earlier ones; Zstd size falls from 7.42 to 3.35 bits per texel while PSNR goes from 47.4 to 42.5 dB" width="100%">
+
+What RDO does, measured on Kodak 23 at λ = 1. Cyan blocks became exact copies of an earlier
+block, and magenta blocks were re-encoded to share a run of bytes with one. Detailed blocks such as
+the eye are kept as encoded. The loupe shows the decoder's exact pixels and links each block to the
+one it reuses. Regenerate with `python scripts/rdo_anim.py`.
+
 **[Try it in your browser](https://azazel-labs.github.io/Mipple/)**: drop in your own image, move the
 quality and size sliders, and zoom in to compare pixels against the source. The encoder runs as
 WebAssembly on your machine; your images never leave the browser.
