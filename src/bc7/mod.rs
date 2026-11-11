@@ -549,71 +549,6 @@ pub fn mode6_head_endpoints(raw: &[u8]) -> [[u32; 4]; 2] {
     mode6_endpoints(u64::from_le_bytes(lo), 0)
 }
 
-/// What the first 8 bytes of a multi-subset block fix of its endpoints ([`multi_head_endpoints`]).
-pub struct HeadEndpoints {
-    /// Subsets (2 or 3).
-    pub ns: u8,
-    /// Partition.
-    pub part: u8,
-    /// `mid[s][e][c]`: endpoint `e` of subset `s`, channel `c`, 8-bit, halfway between its two
-    /// p-bit choices (where `known[s][c]`).
-    pub mid: [[[f32; 4]; 2]; 3],
-    /// Whether both endpoints of channel `c` of subset `s` lie in those bytes.
-    pub known: [[bool; 4]; 3],
-    /// Distance from `mid` to either p-bit choice (0 without p-bits).
-    pub half: f32,
-}
-
-/// What the first 8 bytes of a multi-subset block (modes 0-3 and 7) fix of its endpoints, for a
-/// lower bound on re-indexing it with the rest taken from another block. The p-bits lie past
-/// byte 8, so a known channel is pinned to within `half` of `mid`. The opaque modes' alpha (255)
-/// is known with no p-bit uncertainty. Other modes give `None`.
-pub fn multi_head_endpoints(raw: &[u8]) -> Option<HeadEndpoints> {
-    let lo = u64::from_le_bytes(raw[..8].try_into().ok()?);
-    let mode = (lo as u8).trailing_zeros() as usize;
-    if !matches!(mode, 0..=3 | 7) {
-        return None;
-    }
-    let mi = MODES[mode];
-    let ns = mi.ns as usize;
-    let part = ((lo >> (mode + 1)) & ((1 << mi.pb) - 1)) as u8;
-    let start = mode + 1 + mi.pb as usize;
-    let cb = mi.cb as usize;
-    let pbit = mi.epb + mi.spb > 0;
-    let bits = cb + usize::from(pbit);
-    let half = if pbit { (1u32 << (8 - bits)) as f32 / 2.0 } else { 0.0 };
-    let mut mid = [[[0f32; 4]; 2]; 3];
-    let mut known = [[false; 4]; 3];
-    for s in 0..ns {
-        if mi.ab == 0 {
-            known[s][3] = true;
-            mid[s] = [[0.0, 0.0, 0.0, 255.0]; 2];
-        }
-        for c in 0..3 {
-            let at = |e: usize| start + (c * 2 * ns + 2 * s + e) * cb;
-            if at(1) + cb > 64 {
-                continue;
-            }
-            known[s][c] = true;
-            for e in 0..2 {
-                let q = ((lo >> at(e)) & ((1 << cb) - 1)) as u32;
-                // The p-bit-clear value; with the p-bit set it is 2 * half more (the low bits
-                // replicated into the expansion are the top ones, which the p-bit leaves alone).
-                let v = if pbit { q << 1 } else { q };
-                let x = (v << (8 - bits)) | (v >> (2 * bits - 8));
-                mid[s][e][c] = x as f32 + half;
-            }
-        }
-    }
-    Some(HeadEndpoints {
-        ns: mi.ns,
-        part,
-        mid,
-        known,
-        half,
-    })
-}
-
 /// The 16-entry mode-6 palette from the low 64 bits of a mode-6 block and P1.
 fn mode6_palette(lo: u64, p1: u64) -> [[u8; 4]; 16] {
     let e = mode6_endpoints(lo, p1);
@@ -1505,13 +1440,59 @@ pub fn reindex_bounded(
     let v = u128::from_le_bytes(raw[..16].try_into().ok()?);
     // One copy per mode, as in `unpack`; two-index modes (4, 5) are not re-indexed.
     match (v as u8).trailing_zeros() {
-        0 => reindex_bounded_mode::<0>(v, px, w, bound, seg),
-        1 => reindex_bounded_mode::<1>(v, px, w, bound, seg),
-        2 => reindex_bounded_mode::<2>(v, px, w, bound, seg),
-        3 => reindex_bounded_mode::<3>(v, px, w, bound, seg),
-        6 => reindex_bounded_mode::<6>(v, px, w, bound, seg),
-        7 => reindex_bounded_mode::<7>(v, px, w, bound, seg),
+        0 => reindex_bounded_mode::<0>(v, px, w, bound, seg, None),
+        1 => reindex_bounded_mode::<1>(v, px, w, bound, seg, None),
+        2 => reindex_bounded_mode::<2>(v, px, w, bound, seg, None),
+        3 => reindex_bounded_mode::<3>(v, px, w, bound, seg, None),
+        6 => reindex_bounded_mode::<6>(v, px, w, bound, seg, None),
+        7 => reindex_bounded_mode::<7>(v, px, w, bound, seg, None),
         _ => None,
+    }
+}
+
+/// A mode-6 block's palettes with P1 clear and set (P1 is bit 64, past the head), for
+/// re-indexing its head many times with [`reindex_bounded_with`].
+pub struct Pal6([LinePal; 2]);
+
+impl Pal6 {
+    /// None unless `raw` is mode 6.
+    pub fn new(raw: &[u8; 16], w: &[u32; 4]) -> Option<Self> {
+        if !is_mode6(raw) {
+            return None;
+        }
+        let v = u128::from_le_bytes(*raw) & !(1u128 << 64);
+        let mi = const { MODES[6] };
+        Some(Self([0u128, 1].map(|p1| {
+            let (b, _) = unpack_head_mode::<6>(v | p1 << 64);
+            LinePal::from_quantized(
+                &Quantized {
+                    q: b.ep[0],
+                    p: b.pbits[0],
+                },
+                &mi,
+                w,
+            )
+        })))
+    }
+}
+
+/// [`reindex_bounded`], with `pal` (when given) the palettes of a mode-6 block whose first 8
+/// bytes `raw` shares.
+pub fn reindex_bounded_with(
+    raw: &[u8; 16],
+    pal: Option<&Pal6>,
+    px: &Block,
+    w: &[u32; 4],
+    bound: u64,
+    seg: &mut SegBound,
+) -> Option<([u8; 16], u64)> {
+    match pal {
+        Some(p) => {
+            debug_assert!(is_mode6(raw));
+            let v = u128::from_le_bytes(*raw);
+            reindex_bounded_mode::<6>(v, px, w, bound, seg, Some(&p.0[(v >> 64) as usize & 1]))
+        }
+        None => reindex_bounded(raw, px, w, bound, seg),
     }
 }
 
@@ -1522,6 +1503,7 @@ fn reindex_bounded_mode<const MODE: u8>(
     w: &[u32; 4],
     bound: u64,
     seg: &mut SegBound,
+    cached: Option<&LinePal>,
 ) -> Option<([u8; 16], u64)> {
     // The indices are all re-chosen, so only the fields before them are read.
     let (mut b, _) = unpack_head_mode::<MODE>(v);
@@ -1532,8 +1514,9 @@ fn reindex_bounded_mode<const MODE: u8>(
     if seg.rejects(ends, mi.ns, mi.ib, b.partition, bound) {
         return None;
     }
-    let pals: [Option<LinePal>; 3] = std::array::from_fn(|s| {
-        (s < mi.ns as usize).then(|| {
+    // Mode 6 may come with its palette already built (the same one).
+    let own: [Option<LinePal>; 3] = std::array::from_fn(|s| {
+        (s < mi.ns as usize && cached.is_none()).then(|| {
             let qz = Quantized {
                 q: b.ep[s],
                 p: b.pbits[s],
@@ -1541,10 +1524,14 @@ fn reindex_bounded_mode<const MODE: u8>(
             LinePal::from_quantized(&qz, &mi, w)
         })
     });
+    let pals: [Option<&LinePal>; 3] = std::array::from_fn(|s| match cached {
+        Some(c) if s == 0 => Some(c),
+        _ => own[s].as_ref(),
+    });
     let mut err = 0u64;
     #[cfg(target_arch = "x86_64")]
     if MODE == 6 && crate::simd::level() == crate::simd::Level::Avx2 && w.iter().all(|&x| x <= 128) {
-        let lp = pals[0].as_ref().unwrap();
+        let lp = pals[0].unwrap();
         // SAFETY: AVX2 was detected; the palette has 16 entries and the weights are in range.
         let (idx, errs) = unsafe { lp.nearest16_avx2(px, w) };
         for i in 0..16 {
@@ -1562,7 +1549,7 @@ fn reindex_bounded_mode<const MODE: u8>(
         return Some((pack(&b), err));
     }
     for i in 0..16 {
-        let lp = pals[subset_of(mi.ns, b.partition, i)].as_ref().unwrap();
+        let lp = pals[subset_of(mi.ns, b.partition, i)].unwrap();
         // Anchors must keep their top index bit clear (no endpoint swap here): search the lower
         // half exhaustively. Everything else uses the projected search.
         let (k, e) = if anc.contains(&i) {
@@ -1950,42 +1937,6 @@ mod tests {
                 assert_eq!((idx[i], err[i]), lp.nearest(&px[i], &w), "case {k} texel {i}");
             }
         }
-    }
-
-    /// [`multi_head_endpoints`]' known channels are within `half` of the decoded endpoints
-    /// (exactly, for alpha), whatever the p-bits past the first 8 bytes.
-    #[test]
-    fn multi_head_endpoints_bracket_the_decoded_ones() {
-        let mut seed = 0x51_7cc1_b727_220au64;
-        let mut known_channels = [0usize; 8];
-        for k in 0..5000 {
-            let mode = [0u8, 1, 2, 3, 7][k % 5];
-            let mut raw: [u8; 16] = std::array::from_fn(|_| rng(&mut seed) as u8);
-            raw[0] = (raw[0] & !(((2u16 << mode) - 1) as u8)) | 1 << mode;
-            let HeadEndpoints {
-                ns,
-                part,
-                mid,
-                known,
-                half,
-            } = multi_head_endpoints(&raw).unwrap();
-            let b = unpack(&raw).unwrap();
-            let mi = MODES[mode as usize];
-            assert_eq!((ns, part, b.mode), (mi.ns, b.partition, mode));
-            for s in 0..ns as usize {
-                for e in 0..2 {
-                    let v = dequant_endpoint(&b.ep[s][e], &mi, b.pbits[s][e]);
-                    for c in 0..4 {
-                        if known[s][c] {
-                            let h = if c == 3 { 0.0 } else { half };
-                            assert_eq!((v[c] as f32 - mid[s][e][c]).abs(), h, "mode {mode} s {s} e {e} c {c}");
-                            known_channels[mode as usize] += 1;
-                        }
-                    }
-                }
-            }
-        }
-        assert!(known_channels.iter().all(|&n| n == 0 || n > 1000), "{known_channels:?}");
     }
 
     /// [`reindex_bounded`]'s rejection bounds never reject a block whose re-indexed error is

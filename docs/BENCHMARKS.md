@@ -378,12 +378,12 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 | 0 | −17.6% | −8.5% | −6.3% (15/24 images) | −2.5% (4/24) | −13.2% | −5.0% | −30.8% | −10.9% |
 | 1 | −13.8% | −5.8% | −2.8% (12/24) | −0.8% (4/24) | −3.8% | −1.1% | −4.1% | −0.7% |
 | 10 | −9.6% | −5.7% | −1.0% | −3.0% | −5.7% | −0.9% | −9.8% | −2.4% |
-| 20 | −8.8% | −5.2% | −0.4% | −1.4% | −8.6% | −1.7% | −14.7% | −3.6% |
+| 20 | −8.8% | −5.2% | −0.3% | −1.4% | −8.6% | −1.7% | −14.7% | −3.6% |
 | 30 | −8.8% | −4.6% | −0.7% | −0.7% | −11.5% | −2.5% | −17.9% | −4.0% |
 | 40 | −8.8% | −4.0% | −1.4% | −0.2% | −13.9% | −3.3% | −20.1% | −4.3% |
 
 All four are mipple 0.9.18 (smooth weight 4×, halved at channel std 12; BC4/BC5 RDO from an effort-8 base),
-BC7 rerun after the far-search speedups and the lighter second base (below). BC5's R16G16 input is rebuilt from the
+BC7 rerun after the far-search speedups, the lighter second base and the mode-6-only far re-indexing (below). BC5's R16G16 input is rebuilt from the
 PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces the recorded λ 0 scores exactly.
 
 Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
@@ -406,7 +406,12 @@ about 80). BC7 block packing, unpacking and decoding then got one copy per mode,
 unrolls to fixed shifts (byte-identical, about 5% less, to about 75). The fast encoder's 2- and 3-subset
 candidates (the plain alternate base) then encoded their subsets in lockstep, one indexing pass for all of them
 (byte-identical, about 2.5% less), and BC7 skipped the Zstd check for chunks the rate model says shrank to 0.6
-or less, which on Kodak-24 never fail it (byte-identical there; about 1% less at λ 1, to about 73, and 5% at λ 10). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
+or less, which on Kodak-24 never fail it (byte-identical there; about 1% less at λ 1, to about 73, and 5% at λ 10).
+The far search then re-indexed only mode-6 heads, dropping the multi-subset prefilter above: those far
+re-indexings almost never won, and every Kodak-24 delta against Oodle moved by 0.02% or less (only λ 20 at
+RMSE changes in the table, −0.4% to −0.3%), for about 5% less CPU at λ 1 and 1% at λ 10. Each mode-6 block's
+two palettes are now also built once, when it is finished, not for every later block that re-indexes it
+(byte-identical). mipple still takes about 1.2-1.3× Oodle's CPU time for the same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,

@@ -1,7 +1,7 @@
 //! Rate-distortion optimization of already-encoded GPU blocks.
 //!
 //! The GPU format is fixed-rate, so "rate" here means bits *after* a downstream LZ compressor
-//! (Zstd, Deflate, Kraken, GDeflate...). For each block, in storage order, we try alternative
+//! (any LZ77 family; we measure with Zstd and Deflate). For each block, in storage order, we try alternative
 //! encodings that copy bytes from recently emitted blocks — whole blocks, endpoint fields or
 //! index fields, with the other field re-optimized — and keep the one minimizing
 //!
@@ -1316,189 +1316,16 @@ struct Far7Pre {
     /// Per-channel texel sums of each block's decoding (`1e9` when it does not decode).
     sums: [Vec<f32>; 4],
     /// Mode 6: the endpoints scaled by `sw`, endpoint 1 with P1 clear (bit 64 comes from the
-    /// candidate's base). NaN for other modes, which the filter always keeps.
+    /// candidate's base). NaN for other modes, which are not re-indexed.
     a: [Vec<f32>; 4],
     b: [Vec<f32>; 4],
     /// Per block of the range last filtered: bit 0, its whole-block copy may pass the bound;
     /// bit 1, its re-indexing may.
     mask: Vec<u8>,
-    /// The two- and three-subset blocks (modes 1, 3, 7 and 0, 2) for [`Self::filter_multi`].
-    multi: [Far7Multi; 2],
-}
-
-/// [`Far7Pre`]'s multi-subset blocks, structure-of-arrays, for the bound of
-/// [`bc7::SegBound::rejects`] in the channels their first 8 bytes fix (see
-/// [`bc7::multi_head_endpoints`]): the rest comes from the candidate's base. Distances in fewer
-/// channels are no larger, and the unknown p-bits move each endpoint by at most `half` per
-/// channel, so every point of the segment by at most `shift`.
-struct Far7Multi {
-    /// Subsets of each.
-    ns: usize,
-    /// Block index of each.
-    at: Vec<u32>,
-    /// Per subset, the slot of its texel count in [`Self::cnt`] (`MEAN_NONE` for no subset).
-    cslot: [Vec<u16>; 3],
-    /// Per subset and channel, the slot of its mean in [`Self::means`] (`MEAN_NONE`, a mean
-    /// of 0, where the channel is not known or there is no subset).
-    slot: [[Vec<u16>; 4]; 3],
-    /// Per subset and channel, the endpoints scaled by `sw` (0 where not known).
-    a: [[Vec<f32>; 4]; 3],
-    b: [[Vec<f32>; 4]; 3],
-    /// Per subset, the bound on how far the p-bits move the segment.
-    shift: [Vec<f32>; 3],
-    /// Per channel, the current source's scaled subset means by slot (partition `p` subset `s`
-    /// at `ns p + s`), and 0 at `MEAN_NONE`.
-    means: [[f32; MEAN_SLOTS]; 4],
-    /// Texel count of each slot (0 at `MEAN_NONE`).
-    cnt: [f32; MEAN_SLOTS],
-    /// Per subset past the first, texel and partition: 1 where the texel is in that subset.
-    inside: [[[f32; 64]; 16]; 2],
-    /// The filtered range's gathered means and counts, and verdicts.
-    gm: [[Vec<f32>; 4]; 3],
-    gc: [Vec<f32>; 3],
-    lb: Vec<f32>,
-    keep: Vec<bool>,
-}
-
-const MEAN_NONE: usize = 192;
-const MEAN_SLOTS: usize = 193;
-
-impl Far7Multi {
-    fn new(ns: usize) -> Self {
-        let v4 = || -> [[Vec<f32>; 4]; 3] { Default::default() };
-        let mut m = Self {
-            ns,
-            at: Vec::new(),
-            cslot: Default::default(),
-            slot: Default::default(),
-            a: v4(),
-            b: v4(),
-            shift: Default::default(),
-            means: [[0.0; MEAN_SLOTS]; 4],
-            cnt: [0.0; MEAN_SLOTS],
-            inside: [[[0.0; 64]; 16]; 2],
-            gm: v4(),
-            gc: Default::default(),
-            lb: Vec::new(),
-            keep: Vec::new(),
-        };
-        for p in 0..64 {
-            for i in 0..16 {
-                let s = bc7::subset_of(ns as u8, p as u8, i);
-                m.cnt[ns * p + s] += 1.0;
-                if s > 0 {
-                    m.inside[s - 1][i][p] = 1.0;
-                }
-            }
-        }
-        m
-    }
-
-    /// Adds block `j`, a `self.ns`-subset block whose leading bytes fix what
-    /// [`bc7::multi_head_endpoints`] gave.
-    fn push(&mut self, j: usize, h: &bc7::HeadEndpoints, sw: &[f32; 4]) {
-        let bc7::HeadEndpoints {
-            part, mid, known, half, ..
-        } = h;
-        self.at.push(j as u32);
-        for s in 0..self.ns {
-            let slot = self.ns * *part as usize + s;
-            self.cslot[s].push(slot as u16);
-            let mut shift2 = 0f32;
-            for c in 0..4 {
-                let k = known[s][c];
-                self.a[s][c].push(if k { mid[s][0][c] * sw[c] } else { 0.0 });
-                self.b[s][c].push(if k { mid[s][1][c] * sw[c] } else { 0.0 });
-                self.slot[s][c].push(if k { slot as u16 } else { MEAN_NONE as u16 });
-                if k && c < 3 {
-                    shift2 += sw[c] * sw[c];
-                }
-            }
-            self.shift[s].push(shift2.sqrt() * half);
-        }
-    }
-
-    /// `means` for source `px` (texels scaled by `sw`, by channel).
-    #[inline(always)]
-    fn set_means(&mut self, px: &[[f32; 16]; 4]) {
-        for (c, x) in px.iter().enumerate() {
-            let m = &mut self.means[c];
-            if x.iter().all(|&v| v == x[0]) {
-                // Every subset's mean (a zero-weight channel's too).
-                m[..MEAN_NONE].fill(x[0]);
-                continue;
-            }
-            let total: f32 = x.iter().sum();
-            let mut t = [[0f32; 64]; 2];
-            for (ts, ins) in t.iter_mut().zip(&self.inside).take(self.ns - 1) {
-                for (xi, row) in x.iter().zip(ins) {
-                    for p in 0..64 {
-                        ts[p] += row[p] * xi;
-                    }
-                }
-            }
-            let ns = self.ns;
-            for p in 0..64 {
-                let rest: f32 = (0..ns - 1).map(|s| t[s][p]).sum();
-                m[ns * p] = (total - rest) / self.cnt[ns * p];
-                for s in 1..ns {
-                    m[ns * p + s] = t[s - 1][p] / self.cnt[ns * p + s];
-                }
-            }
-        }
-    }
-
-    /// Fills `keep` for multi-subset blocks `lo..hi` (their indices in `at`).
-    #[inline(always)]
-    fn filter_body(&mut self, lo: usize, hi: usize, q: &Far7Query) {
-        self.set_means(&q.px);
-        let n = hi - lo;
-        for s in 0..self.ns {
-            self.gc[s].resize(n, 0.0);
-            for (g, &k) in self.gc[s].iter_mut().zip(&self.cslot[s][lo..hi]) {
-                *g = self.cnt[k as usize];
-            }
-            for c in 0..4 {
-                self.gm[s][c].resize(n, 0.0);
-                for (g, &k) in self.gm[s][c].iter_mut().zip(&self.slot[s][c][lo..hi]) {
-                    *g = self.means[c][k as usize];
-                }
-            }
-        }
-        self.keep.clear();
-        self.keep.resize(n, true);
-        self.lb.clear();
-        self.lb.resize(n, 0.0);
-        let lb = &mut self.lb[..n];
-        for s in 0..self.ns {
-            let a: [&[f32]; 4] = std::array::from_fn(|c| &self.a[s][c][lo..hi]);
-            let b: [&[f32]; 4] = std::array::from_fn(|c| &self.b[s][c][lo..hi]);
-            let m: [&[f32]; 4] = std::array::from_fn(|c| &self.gm[s][c][..n]);
-            let (cnt, shift) = (&self.gc[s][..n], &self.shift[s][lo..hi]);
-            for k in 0..n {
-                let (mut len2, mut dot) = (0f32, 0f32);
-                let mut ab = [0f32; 4];
-                let mut am = [0f32; 4];
-                for c in 0..4 {
-                    ab[c] = b[c][k] - a[c][k];
-                    am[c] = m[c][k] - a[c][k];
-                    len2 += ab[c] * ab[c];
-                    dot += am[c] * ab[c];
-                }
-                let t = (dot / len2.max(1e-30)).clamp(0.0, 1.0);
-                let mut d2 = 0f32;
-                for c in 0..4 {
-                    let e = am[c] - t * ab[c];
-                    d2 += e * e;
-                }
-                let d = (d2.sqrt() - q.slack_m - shift[k]).max(0.0);
-                lb[k] += cnt[k] * d * d;
-            }
-        }
-        for (k, &l) in self.keep.iter_mut().zip(&*lb) {
-            *k = l <= q.thr_m;
-        }
-    }
+    /// The channel weights, and each mode-6 block's palettes: a head passes the filter for many
+    /// later blocks, and re-indexing it then skips building them.
+    w: [u32; 4],
+    pal6: Vec<Option<bc7::Pal6>>,
 }
 
 /// One current block's side of [`Far7Pre::filter`].
@@ -1514,12 +1341,6 @@ struct Far7Query {
     p1: [f32; 4],
     /// Mode-6 re-indexings whose segment is farther (squared) than this from `mean` lose.
     thr6: f32,
-    /// The source's texels scaled by `sw`, by channel.
-    px: [[f32; 16]; 4],
-    /// Multi-subset re-indexings lose when the bound of [`Far7Multi`] exceeds `thr_m`; `slack_m`
-    /// is the palette's rounding slack plus a margin for `f32` rounding.
-    slack_m: f32,
-    thr_m: f32,
 }
 
 impl Far7Pre {
@@ -1531,16 +1352,15 @@ impl Far7Pre {
             a: v(),
             b: v(),
             mask: Vec::new(),
-            multi: [Far7Multi::new(2), Far7Multi::new(3)],
+            w: *w,
+            pal6: Vec::with_capacity(cap),
         }
     }
 
     fn push(&mut self, raw: &[u8; 16], sums: Option<[i32; 4]>) {
-        if let Some(h) = bc7::multi_head_endpoints(raw) {
-            self.multi[h.ns as usize - 2].push(self.sums[0].len(), &h, &self.sw);
-        }
         let t = sums.map_or([1e9; 4], |t| t.map(|x| x as f32));
         let ends = bc7::is_mode6(raw).then(|| bc7::mode6_head_endpoints(raw));
+        self.pal6.push(bc7::Pal6::new(raw, &self.w));
         for c in 0..4 {
             self.sums[c].push(t[c]);
             let [a, b] = ends.map_or([f32::NAN; 2], |e| [0, 1].map(|k| e[k][c] as f32 * self.sw[c]));
@@ -1569,12 +1389,6 @@ impl Far7Pre {
             mean: std::array::from_fn(|c| sums[c] * self.sw[c] / 16.0),
             p1: std::array::from_fn(|c| if p1 { self.sw[c] } else { 0.0 }),
             thr6: (r * r) as f32,
-            px: std::array::from_fn(|c| std::array::from_fn(|i| f32::from(s[i][c]) * self.sw[c])),
-            // Subset means come from sums of up to 16 values below `big` (and differences of
-            // them), so err by under 1e-6 * 16 * big each, divided by the count.
-            slack_m: (slack + 1e-3 + 4e-5 * big) as f32,
-            // The real error is at least the bound; it must exceed `bound`.
-            thr_m: ((bound as f64 + 1.0) * (1.0 + 1e-5)) as f32,
         }
     }
 
@@ -1589,37 +1403,15 @@ impl Far7Pre {
             return;
         }
         self.filter_body(lo, hi, q);
-        self.filter_multi(lo, hi, q);
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     fn filter_avx2(&mut self, lo: usize, hi: usize, q: &Far7Query) {
         self.filter_body(lo, hi, q);
-        self.filter_multi(lo, hi, q);
     }
 
-    /// Clears bit 1 of `mask` for the multi-subset blocks in `lo..hi` whose re-indexing loses.
-    #[inline(always)]
-    fn filter_multi(&mut self, lo: usize, hi: usize, q: &Far7Query) {
-        for m in &mut self.multi {
-            let (a, b) = (
-                m.at.partition_point(|&j| (j as usize) < lo),
-                m.at.partition_point(|&j| (j as usize) < hi),
-            );
-            if a == b {
-                continue;
-            }
-            m.filter_body(a, b, q);
-            for (&j, &k) in m.at[a..b].iter().zip(&m.keep) {
-                if !k {
-                    self.mask[j as usize - lo] &= !2;
-                }
-            }
-        }
-    }
-
-    /// Branch-free so it vectorizes. NaN endpoints (not mode 6) give a NaN `d2` and are kept.
+    /// Branch-free so it vectorizes. NaN endpoints (not mode 6) give a NaN `d2`, which fails.
     #[inline(always)]
     fn filter_body(&mut self, lo: usize, hi: usize, q: &Far7Query) {
         let n = hi - lo;
@@ -1646,13 +1438,14 @@ impl Far7Pre {
                 let e = am[c] - t * ab[c];
                 d2 += e * e;
             }
-            mask[k] = u8::from(lb <= q.lb_thr) | u8::from((d2 <= q.thr6) | d2.is_nan()) << 1;
+            mask[k] = u8::from(lb <= q.lb_thr) | u8::from(d2 <= q.thr6) << 1;
         }
     }
 }
 
-/// BC7 far back-references, `back + 1..=far_back` blocks back: the whole-block copy and prev's
-/// leading bytes (mode, partition, endpoints) re-indexed, the candidates that win there.
+/// BC7 far back-references, `back + 1..=far_back` blocks back: the whole-block copy and, for a
+/// mode-6 prev, its endpoints re-indexed, the candidates that win there. Re-indexing the other
+/// modes' heads too costs about 5% more CPU for no gain (Kodak-24 vs Oodle within 0.02%).
 #[expect(
     clippy::too_many_arguments,
     reason = "the search state it updates is spread over the caller's locals"
@@ -1715,7 +1508,7 @@ fn bc7_far(
         if keep & 2 != 0 && fields.endpoints.insert(field_key(&prev[..8])) {
             let mut c = base;
             c[..8].copy_from_slice(&prev[..8]);
-            if let Some(r) = bc7::reindex_bounded(&c, s, w, bnd, &mut fields.seg) {
+            if let Some(r) = bc7::reindex_bounded_with(&c, f7.pre.pal6[j].as_ref(), s, w, bnd, &mut fields.seg) {
                 pair[np] = r;
                 np += 1;
             }
@@ -2608,8 +2401,9 @@ mod tests {
         }
     }
 
-    /// [`Far7Pre`] only drops what the exact tests reject: a re-indexing whose error is within
-    /// the bound, or a whole-block copy whose mean bound is, is always kept.
+    /// [`Far7Pre`] only drops what the exact tests reject: a mode-6 re-indexing whose error is
+    /// within the bound, or a whole-block copy whose mean bound is, is always kept. Other modes'
+    /// heads are never re-indexed.
     #[test]
     fn far7_prefilter_keeps_what_the_exact_tests_keep() {
         let mut x = 0x2545_F491_4F6C_DD1Du64;
@@ -2620,7 +2414,7 @@ mod tests {
             x
         };
         let mut dec = [[0u8; 4]; 16];
-        let (mut dropped, mut tested) = ([0; 2], [0; 2]);
+        let (mut dropped, mut tested) = (0, 0);
         for w in [[1u32, 1, 1, 1], [1, 1, 1, 0], [2, 3, 1, 5]] {
             for k in 0..6000 {
                 let base_c: [u8; 4] = std::array::from_fn(|_| next() as u8);
@@ -2640,7 +2434,6 @@ mod tests {
                 // Mode 6 or a multi-subset mode (the rest of the first byte random).
                 let mode = [6u8, 0, 1, 2, 3, 7][k % 6];
                 prev[0] = (prev[0] & !(((2u16 << mode) - 1) as u8)) | 1 << mode;
-                let multi = usize::from(mode != 6);
                 let base: [u8; 16] = std::array::from_fn(|_| next() as u8);
                 let mut pre = Far7Pre::new(&w, 1);
                 Format::Bc7.decode_block(&prev, &mut dec);
@@ -2655,6 +2448,12 @@ mod tests {
                 let q = pre.query(&px, &w, &base, lb);
                 pre.filter(0, 1, &q);
                 assert_ne!(pre.mask[0] & 1, 0, "whole copy at its own bound {lb}");
+                if mode != 6 {
+                    let q = pre.query(&px, &w, &base, u64::MAX / 32);
+                    pre.filter(0, 1, &q);
+                    assert_eq!(pre.mask[0] & 2, 0, "mode {mode} re-indexed");
+                    continue;
+                }
                 // Re-indexing: kept at its own error and above.
                 let mut c = base;
                 c[..8].copy_from_slice(&prev[..8]);
@@ -2669,24 +2468,13 @@ mod tests {
                 }
                 let q = pre.query(&px, &w, &base, exact / 2);
                 pre.filter(0, 1, &q);
-                tested[multi] += 1;
-                dropped[multi] += usize::from(pre.mask[0] & 2 == 0);
+                tested += 1;
+                dropped += usize::from(pre.mask[0] & 2 == 0);
             }
         }
         // It must also drop something.
-        println!("dropped {dropped:?} of {tested:?} at half the error (mode 6, multi-subset)");
-        assert!(
-            dropped[0] * 4 > tested[0],
-            "mode 6: dropped {} of {}",
-            dropped[0],
-            tested[0]
-        );
-        assert!(
-            dropped[1] * 4 > tested[1],
-            "multi-subset: dropped {} of {}",
-            dropped[1],
-            tested[1]
-        );
+        println!("dropped {dropped} of {tested} at half the error");
+        assert!(dropped * 4 > tested, "dropped {dropped} of {tested}");
     }
 
     #[test]
