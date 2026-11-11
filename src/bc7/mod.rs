@@ -1348,6 +1348,9 @@ fn reindex_bounded_mode<const MODE: u8>(
     Some((pack(&b), err))
 }
 
+/// Channel pairs of [`SegBound`]'s scatter entries.
+const SCATTER_PAIRS: [(usize, usize); 10] = [(0, 0), (1, 1), (2, 2), (3, 3), (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+
 /// Per-source-block state for [`reindex_bounded`]'s lower bound: the texels scaled by the
 /// square roots of the channel weights and, per partition seen, each subset's texel count and
 /// mean texel. Reset for each source block.
@@ -1360,10 +1363,14 @@ pub struct SegBound {
     means: [[[f32; 4]; 3]; 128],
     cnt: [[f32; 3]; 128],
     whole: [f32; 4],
-    /// The `bound` that [`Self::thr`] was computed for (`u64::MAX`: none yet).
-    thr_bound: u64,
+    /// The scaled texels' scatter about `whole` (sum of outer products): xx, yy, zz, ww, xy, xz, xw, yz, yw, zw.
+    scatter: [f64; 10],
+    /// The `bound` that [`Self::thr`] was computed for (`None`: none yet).
+    thr_bound: Option<u64>,
     /// One-subset rejection threshold on the squared distance; see [`Self::rejects`].
     thr: f64,
+    /// One-subset rejection threshold on the texels' summed squared distance to the line.
+    thr_line: f64,
 }
 
 impl SegBound {
@@ -1376,8 +1383,10 @@ impl SegBound {
             means: [[[0.0; 4]; 3]; 128],
             cnt: [[0.0; 3]; 128],
             whole: [0.0; 4],
-            thr_bound: u64::MAX,
+            scatter: [0.0; 10],
+            thr_bound: None,
             thr: 0.0,
+            thr_line: 0.0,
         };
         s.reset(px, w);
         s
@@ -1394,45 +1403,82 @@ impl SegBound {
                 self.whole[c] += self.px[i][c] / 16.0;
             }
         }
+        self.scatter = [0.0; 10];
+        for p in &self.px {
+            let d: [f64; 4] = std::array::from_fn(|c| f64::from(p[c]) - f64::from(self.whole[c]));
+            for (k, (a, b)) in SCATTER_PAIRS.iter().enumerate() {
+                self.scatter[k] += d[*a] * d[*b];
+            }
+        }
         self.have = [0; 2];
-        self.thr_bound = u64::MAX;
+        self.thr_bound = None;
     }
 
-    /// Whether [`Self::lower_bound`] proves every indexing on these endpoints costs more than
-    /// `bound`. One-subset blocks (mode 6, most of them) take an equivalent test without the
-    /// division and square root: with `d` the distance from the mean texel to the segment and
-    /// `s` the slack, `0.999 * 16 * (d - s)^2 > bound` iff `d^2 > (s + sqrt(bound / 15.984))^2`,
-    /// a threshold computed once per bound; the projection is multiplied through by the
-    /// segment's squared length instead of divided, and summed in f64.
+    /// Whether a lower bound proves every indexing on these endpoints costs more than `bound`.
+    /// Multi-subset blocks use [`Self::lower_bound`]. One-subset blocks (mode 6, most of them)
+    /// take an equivalent test without the division and square root: with `d` the distance from
+    /// the mean texel to the segment and `s` the slack, `0.999 * 16 * (d - s)^2 > bound` iff
+    /// `d^2 > (s + sqrt(bound / 15.984))^2`, a threshold computed once per bound; the projection
+    /// is multiplied through by the segment's squared length instead of divided, and summed in
+    /// f64. They also take a second bound from every texel rather than the mean: with `D` the
+    /// texels' summed squared distance to the endpoints' line (the scatter orthogonal to it, plus
+    /// 16 times the mean's), each texel's error is at least `(d_i - s)+^2 >= d_i^2 - 2 s d_i`, so
+    /// the block's is at least `D - 8 s sqrt(D)` (Cauchy-Schwarz on the sum of `d_i`), above
+    /// `bound / 0.999` iff `D > (4 s + sqrt(16 s^2 + bound / 0.999))^2`.
     #[inline]
     fn rejects(&mut self, ends: &[[[u32; 4]; 2]; 3], ns: u8, partition: u8, bound: u64) -> bool {
         if ns != 1 {
             return self.lower_bound(ends, ns, partition) > bound;
         }
-        if self.thr_bound != bound {
-            self.thr_bound = bound;
-            let r = f64::from(self.slack) + (bound as f64 / (0.999 * 16.0)).sqrt();
+        if self.thr_bound != Some(bound) {
+            self.thr_bound = Some(bound);
+            let s = f64::from(self.slack);
+            let r = s + (bound as f64 / (0.999 * 16.0)).sqrt();
             self.thr = r * r;
+            let r = 4.0 * s + (16.0 * s * s + bound as f64 / 0.999).sqrt();
+            self.thr_line = r * r;
         }
         let [a, b] = ends[0];
         let (mut len2, mut dot, mut am2, mut bm2) = (0f64, 0f64, 0f64, 0f64);
+        let mut ab = [0f64; 4];
         for c in 0..4 {
             let sw = f64::from(self.sw[c]);
             let ac = f64::from(a[c]) * sw;
-            let ab = f64::from(b[c]) * sw - ac;
+            ab[c] = f64::from(b[c]) * sw - ac;
             let am = f64::from(self.whole[c]) - ac;
-            len2 += ab * ab;
-            dot += am * ab;
+            len2 += ab[c] * ab[c];
+            dot += am * ab[c];
             am2 += am * am;
-            bm2 += (am - ab) * (am - ab);
+            bm2 += (am - ab[c]) * (am - ab[c]);
         }
-        if dot <= 0.0 || len2 == 0.0 {
+        let mean_far = if dot <= 0.0 || len2 == 0.0 {
             am2 > self.thr
         } else if dot >= len2 {
             bm2 > self.thr
         } else {
             am2 * len2 - dot * dot > self.thr * len2
+        };
+        if mean_far {
+            return true;
         }
+        // D * len2 = len2 * tr(S) - ab' S ab + 16 (am2 * len2 - dot^2); a point when len2 = 0.
+        let sc = &self.scatter;
+        let tr = sc[0] + sc[1] + sc[2] + sc[3];
+        if len2 == 0.0 {
+            return tr + 16.0 * am2 > self.thr_line;
+        }
+        let sab = sc[0] * ab[0] * ab[0]
+            + sc[1] * ab[1] * ab[1]
+            + sc[2] * ab[2] * ab[2]
+            + sc[3] * ab[3] * ab[3]
+            + 2.0
+                * (sc[4] * ab[0] * ab[1]
+                    + sc[5] * ab[0] * ab[2]
+                    + sc[6] * ab[0] * ab[3]
+                    + sc[7] * ab[1] * ab[2]
+                    + sc[8] * ab[1] * ab[3]
+                    + sc[9] * ab[2] * ab[3]);
+        len2 * tr - sab + 16.0 * (am2 * len2 - dot * dot) > self.thr_line * len2
     }
 
     /// A lower bound on the error of any indices into palettes on these endpoints: per subset,
@@ -1570,6 +1616,51 @@ mod tests {
         *seed ^= *seed >> 7;
         *seed ^= *seed << 17;
         *seed
+    }
+
+    /// [`reindex_bounded`]'s rejection bounds never reject a block whose re-indexed error is
+    /// within the bound: smooth, noisy and flat source blocks against random heads of every
+    /// re-indexable mode, with bounds at and just below the exact error.
+    #[test]
+    fn reindex_rejection_is_a_lower_bound() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let w = [1u32, 1, 1, 1];
+        let mut seg = SegBound::new(&[[0; 4]; 16], &w);
+        let (mut kept, mut rejected) = (0, 0);
+        for k in 0..20000 {
+            let base: [u8; 4] = std::array::from_fn(|_| rng(&mut seed) as u8);
+            let step: [i32; 4] = std::array::from_fn(|_| (rng(&mut seed) % 9) as i32 - 4);
+            let noise = [0, 2, 8, 40][k % 4];
+            let px: Block = std::array::from_fn(|i| {
+                std::array::from_fn(|c| {
+                    let n = if noise > 0 { (rng(&mut seed) % (2 * noise + 1)) as i32 - noise as i32 } else { 0 };
+                    (i32::from(base[c]) + step[c] * i as i32 + n).clamp(0, 255) as u8
+                })
+            });
+            let mut raw: [u8; 16] = std::array::from_fn(|_| rng(&mut seed) as u8);
+            let mode = [0u8, 1, 2, 3, 6, 6, 6, 7][k % 8];
+            raw[0] = (raw[0] & !((2u8 << mode) - 1)) | (1 << mode);
+            seg.reset(&px, &w);
+            let Some((_, exact)) = reindex_bounded(&raw, &px, &w, u64::MAX, &mut seg) else {
+                continue;
+            };
+            for bound in [exact, exact + 1, exact * 2] {
+                seg.reset(&px, &w);
+                let r = reindex_bounded(&raw, &px, &w, bound, &mut seg);
+                assert_eq!(r.map(|x| x.1), Some(exact), "mode {mode} bound {bound}");
+            }
+            let below = exact * 3 / 4;
+            seg.reset(&px, &w);
+            if mode == 6 {
+                let r = reindex_bounded(&raw, &px, &w, below, &mut seg);
+                if r.is_none() {
+                    rejected += 1;
+                } else {
+                    kept += 1;
+                }
+            }
+        }
+        assert!(rejected > kept, "rejected {rejected} kept {kept}");
     }
 
     /// Throwaway stage profile over a Kodak image (MIPPLE_PROFILE_IMG). Not a regression test.

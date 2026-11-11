@@ -137,6 +137,45 @@ impl Surface {
 /// Weighted squared error between two blocks. `w` weights R, G, B, A.
 #[inline]
 pub fn block_sse(a: &Block, b: &Block, w: &[u32; 4]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if w.iter().all(|&x| x <= 128) {
+        // SAFETY: SSE2 is part of the x86-64 baseline.
+        return unsafe { block_sse_sse2(a, b, w) };
+    }
+    block_sse_scalar(a, b, w)
+}
+
+/// [`block_sse`] on SSE2 (x86-64's baseline) for weights up to 128: per texel row, the
+/// differences as i16, times the weights (|d w| <= 32640), multiplied by the differences and
+/// summed in pairs to i32 (`madd`; each lane totals at most 8 * 2 * 255 * 32640 < 2^31).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "sse2")]
+fn block_sse_sse2(a: &Block, b: &Block, w: &[u32; 4]) -> u64 {
+    use std::arch::x86_64::*;
+    let [w0, w1, w2, w3] = w.map(|x| x as i16);
+    let wv = _mm_setr_epi16(w0, w1, w2, w3, w0, w1, w2, w3);
+    let z = _mm_setzero_si128();
+    let mut acc = z;
+    for r in 0..4 {
+        // SAFETY: a Block is 64 bytes, so row r's 16 bytes are in bounds; unaligned loads.
+        let (pa, pb) = unsafe {
+            (
+                _mm_loadu_si128(a.as_ptr().add(r * 4).cast()),
+                _mm_loadu_si128(b.as_ptr().add(r * 4).cast()),
+            )
+        };
+        let lo = _mm_sub_epi16(_mm_unpacklo_epi8(pa, z), _mm_unpacklo_epi8(pb, z));
+        let hi = _mm_sub_epi16(_mm_unpackhi_epi8(pa, z), _mm_unpackhi_epi8(pb, z));
+        acc = _mm_add_epi32(acc, _mm_madd_epi16(lo, _mm_mullo_epi16(lo, wv)));
+        acc = _mm_add_epi32(acc, _mm_madd_epi16(hi, _mm_mullo_epi16(hi, wv)));
+    }
+    let s = _mm_add_epi32(acc, _mm_shuffle_epi32::<0b01_00_11_10>(acc));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32::<0b10_11_00_01>(s));
+    u64::from(_mm_cvtsi128_si32(s) as u32)
+}
+
+fn block_sse_scalar(a: &Block, b: &Block, w: &[u32; 4]) -> u64 {
     let mut e = 0u64;
     for i in 0..16 {
         for c in 0..4 {
@@ -156,4 +195,35 @@ pub fn texel_sse(a: &Rgba, b: &Rgba, w: &[u32; 4]) -> u32 {
         e += w[c] * (d * d) as u32;
     }
     e
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_sse_matches_scalar() {
+        let mut x = 0x2545_f491_u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let ws = [[1, 1, 1, 1], [1, 1, 1, 0], [1, 0, 0, 0], [3, 7, 128, 0], [128, 128, 128, 128], [200, 1, 1, 1]];
+        for k in 0..2000 {
+            let mut a: Block = [[0; 4]; 16];
+            let mut b: Block = [[0; 4]; 16];
+            for i in 0..16 {
+                for c in 0..4 {
+                    // Every fifth pair at the extremes (0 vs 255) to exercise the bound.
+                    (a[i][c], b[i][c]) = if k % 5 == 0 { (0, 255) } else { (next() as u8, next() as u8) };
+                }
+            }
+            for w in &ws {
+                assert_eq!(block_sse(&a, &b, w), block_sse_scalar(&a, &b, w), "w {w:?}");
+                assert_eq!(block_sse(&b, &a, w), block_sse_scalar(&b, &a, w), "w {w:?}");
+            }
+        }
+    }
 }

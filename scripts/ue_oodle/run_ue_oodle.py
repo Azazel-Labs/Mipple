@@ -105,14 +105,43 @@ def run_ue(proj: Path, args, logfile: Path):
            "-unattended", "-nosplash", "-nullrhi", "-nop4", "-stdout", "-FullStdOutLogOutput", "-ddc=NoShared"]
     log("running:", " ".join(cmd[1:]))
     t0 = time.time()
+    child_cpu = {}
     with open(logfile, "w", encoding="utf-8", errors="replace") as f:
-        r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
+        r = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
+        # Child processes' CPU time (shader workers and the like), sampled until each exits.
+        try:
+            import psutil
+            me = psutil.Process(r.pid)
+            while r.poll() is None:
+                for c in me.children(recursive=True):
+                    try:
+                        t = c.cpu_times()
+                        child_cpu[c.pid] = t.user + t.system
+                    except psutil.Error:
+                        pass
+                time.sleep(0.2)
+        except ImportError:
+            pass
+        r.wait()
     dt = time.time() - t0
-    log(f"  exit {r.returncode} after {dt:.0f}s, log {logfile}")
+    cpu = process_cpu_s(r) + sum(child_cpu.values())
+    log(f"  exit {r.returncode} after {dt:.0f}s ({cpu:.1f} CPU s), log {logfile}")
     if r.returncode != 0:
         tail = logfile.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
         sys.exit("UE failed:\n" + "\n".join(tail))
-    return dt
+    return dt, cpu
+
+
+def process_cpu_s(p: subprocess.Popen) -> float:
+    """User + kernel CPU seconds of an exited Popen process (Windows: GetProcessTimes on its handle)."""
+    if os.name != "nt":
+        return 0.0
+    import ctypes
+    from ctypes import wintypes
+    ft = [wintypes.FILETIME() for _ in range(4)]
+    if not ctypes.windll.kernel32.GetProcessTimes(wintypes.HANDLE(int(p._handle)), *map(ctypes.byref, ft)):
+        return 0.0
+    return sum((t.dwHighDateTime << 32 | t.dwLowDateTime) / 1e7 for t in ft[2:])
 
 
 def parse_ts(ts: str):
@@ -207,7 +236,7 @@ def main():
     timing = {}
     if not a.skip_import:
         os.environ["UE_OODLE_JOB"] = str(job_path)
-        timing["import_s"] = run_ue(proj, ["-run=pythonscript", f"-script={HERE / 'ue_import.py'}"],
+        timing["import_s"], timing["import_cpu_s"] = run_ue(proj, ["-run=pythonscript", f"-script={HERE / 'ue_import.py'}"],
                                     logs / "import.log")
     dump = proj / "Saved" / "OodleDebugImages"
     cook_start = time.time()
@@ -217,7 +246,7 @@ def main():
                 for lam in a.lambdas:
                     for f in dump.glob(f"{CONTENT}/{fmt}/{names[p]}_l{lam}".replace("/", "_") + ".*"):
                         f.unlink()
-        timing["cook_s"] = run_ue(proj, ["-run=cook", "-targetplatform=Windows",
+        timing["cook_s"], timing["cook_cpu_s"] = run_ue(proj, ["-run=cook", "-targetplatform=Windows",
                                          f"-cookdir={proj / 'Content' / 'Bench'}",
                                          "-OodleDebugDumpFilter=*Bench*",
                                          # Verbose LogTexture prints "Storing texture in DDC" with the cache key
