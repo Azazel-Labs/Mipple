@@ -395,8 +395,9 @@ stretches uber index sets by one step, not three). The polish and refine cuts le
 at every λ (about 10% of the CPU time), the uber cut moved λ 30 at RMSE and λ 20 at SSIM by 0.1% (another 5%).
 The ranker's prefilter then took eight candidate blocks at a time (byte-identical output, about 6% less, to
 about 83 CPU-seconds; both builds encoding each image back to back on the same core), and mode-6 re-indexing
-rejected more candidates on a per-texel lower bound before choosing indices (byte-identical, about 3% less, to
-about 80). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
+rejected more candidates on a per-texel lower bound before choosing indices (byte-identical, about 3% less).
+The multi-subset rejection then stopped at the first subset that decides it, dequantizing only the endpoints it
+reaches (byte-identical, about 5% less, to about 77). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,

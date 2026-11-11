@@ -1337,14 +1337,9 @@ fn reindex_bounded_mode<const MODE: u8>(
     let (mut b, _) = unpack_head_mode::<MODE>(v);
     let mi = const { MODES[MODE as usize] };
     let anc = anchors(mi.ns, b.partition);
-    let ends: [[[u32; 4]; 2]; 3] = std::array::from_fn(|s| {
-        if s < mi.ns as usize {
-            [0, 1].map(|e| dequant_endpoint(&b.ep[s][e], &mi, b.pbits[s][e]))
-        } else {
-            [[0; 4]; 2]
-        }
-    });
-    if seg.rejects(&ends, mi.ns, mi.ib, b.partition, bound) {
+    // Dequantized only for the subsets the rejection test reaches.
+    let ends = |s: usize| [0, 1].map(|e| dequant_endpoint(&b.ep[s][e], &mi, b.pbits[s][e]));
+    if seg.rejects(ends, mi.ns, mi.ib, b.partition, bound) {
         return None;
     }
     let pals: [Option<LinePal>; 3] = std::array::from_fn(|s| {
@@ -1474,9 +1469,9 @@ impl SegBound {
     /// the block's is at least `D - 8 s sqrt(D)` (Cauchy-Schwarz on the sum of `d_i`), above
     /// `bound / 0.999` iff `D > (4 s + sqrt(16 s^2 + bound / 0.999))^2`.
     #[inline]
-    fn rejects(&mut self, ends: &[[[u32; 4]; 2]; 3], ns: u8, ib: u8, partition: u8, bound: u64) -> bool {
+    fn rejects(&mut self, ends: impl Fn(usize) -> [[u32; 4]; 2], ns: u8, ib: u8, partition: u8, bound: u64) -> bool {
         if ns != 1 {
-            return self.lower_bound(ends, ns, partition) > bound;
+            return self.lower_bound(ends, ns, partition, bound);
         }
         if self.thr_bound != Some(bound) {
             self.thr_bound = Some(bound);
@@ -1486,7 +1481,7 @@ impl SegBound {
             let r = 4.0 * s + (16.0 * s * s + bound as f64 / 0.999).sqrt();
             self.thr_line = r * r;
         }
-        let [a, b] = ends[0];
+        let [a, b] = ends(0);
         let (mut len2, mut dot, mut am2, mut bm2) = (0f64, 0f64, 0f64, 0f64);
         let mut ab = [0f64; 4];
         for c in 0..4 {
@@ -1561,11 +1556,13 @@ impl SegBound {
         f64::from(lb.iter().sum::<f32>() * 0.999) > bound as f64
     }
 
-    /// A lower bound on the error of any indices into palettes on these endpoints: per subset,
-    /// the mean of the chosen palette colors lies within half a step per channel of the
-    /// endpoints' segment, so the subset's error is at least its texel count times the squared
-    /// distance from its mean texel to that segment, less that slack.
-    fn lower_bound(&mut self, ends: &[[[u32; 4]; 2]; 3], ns: u8, partition: u8) -> u64 {
+    /// Whether a lower bound on the error of any indices into palettes on these endpoints
+    /// exceeds `bound`: per subset, the mean of the chosen palette colors lies within half a step
+    /// per channel of the endpoints' segment, so the subset's error is at least its texel count
+    /// times the squared distance from its mean texel to that segment, less that slack. Stops at
+    /// the first subset whose running sum decides it (sums only grow, so the verdict is that of
+    /// the full sum).
+    fn lower_bound(&mut self, ends: impl Fn(usize) -> [[u32; 4]; 2], ns: u8, partition: u8, bound: u64) -> bool {
         let (means, cnt) = if ns == 1 {
             ([self.whole, [0.0; 4], [0.0; 4]], [16.0, 0.0, 0.0])
         } else {
@@ -1599,7 +1596,7 @@ impl SegBound {
             if cnt[s] == 0.0 {
                 continue;
             }
-            let [a, b] = ends[s];
+            let [a, b] = ends(s);
             let mut ab = [0f32; 4];
             let mut am = [0f32; 4];
             for c in 0..4 {
@@ -1617,10 +1614,13 @@ impl SegBound {
             let d = d2.sqrt() - self.slack;
             if d > 0.0 {
                 lb += cnt[s] * d * d;
+                // Margin for float rounding.
+                if (lb * 0.999) as u64 > bound {
+                    return true;
+                }
             }
         }
-        // Margin for float rounding.
-        (lb * 0.999) as u64
+        false
     }
 }
 
