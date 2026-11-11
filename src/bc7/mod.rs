@@ -1344,7 +1344,7 @@ fn reindex_bounded_mode<const MODE: u8>(
             [[0; 4]; 2]
         }
     });
-    if seg.rejects(&ends, mi.ns, b.partition, bound) {
+    if seg.rejects(&ends, mi.ns, mi.ib, b.partition, bound) {
         return None;
     }
     let pals: [Option<LinePal>; 3] = std::array::from_fn(|s| {
@@ -1396,6 +1396,10 @@ pub struct SegBound {
     sw: [f32; 4],
     slack: f32,
     px: [[f32; 4]; 16],
+    /// `px` by channel, for [`Self::texels_far`].
+    pxs: [[f32; 16]; 4],
+    /// `slack` plus a margin for `f32` rounding in [`Self::texels_far`].
+    slack_f32: f32,
     /// Bit `p` of word `ns - 2`: the means of `ns`-subset partition `p` are cached.
     have: [u64; 2],
     means: [[[f32; 4]; 3]; 128],
@@ -1417,6 +1421,8 @@ impl SegBound {
             sw: [0.0; 4],
             slack: 0.0,
             px: [[0.0; 4]; 16],
+            pxs: [[0.0; 16]; 4],
+            slack_f32: 0.0,
             have: [0; 2],
             means: [[[0.0; 4]; 3]; 128],
             cnt: [[0.0; 3]; 128],
@@ -1434,10 +1440,14 @@ impl SegBound {
         self.sw = w.map(|x| (x as f32).sqrt());
         // Half a step per channel: the interpolation's rounding.
         self.slack = 0.5 * w.iter().map(|&x| x as f32).sum::<f32>().sqrt();
+        // Coordinates reach 255 * sw; each texel's distance in `texels_far` errs by well under
+        // 1e-3 * sw (a few f32 ulps of them, plus the projection's error times the length).
+        self.slack_f32 = self.slack + 4e-3 * self.sw.iter().fold(0f32, |m, &x| m.max(x));
         self.whole = [0.0; 4];
         for i in 0..16 {
             for c in 0..4 {
                 self.px[i][c] = px[i][c] as f32 * self.sw[c];
+                self.pxs[c][i] = self.px[i][c];
                 self.whole[c] += self.px[i][c] / 16.0;
             }
         }
@@ -1464,7 +1474,7 @@ impl SegBound {
     /// the block's is at least `D - 8 s sqrt(D)` (Cauchy-Schwarz on the sum of `d_i`), above
     /// `bound / 0.999` iff `D > (4 s + sqrt(16 s^2 + bound / 0.999))^2`.
     #[inline]
-    fn rejects(&mut self, ends: &[[[u32; 4]; 2]; 3], ns: u8, partition: u8, bound: u64) -> bool {
+    fn rejects(&mut self, ends: &[[[u32; 4]; 2]; 3], ns: u8, ib: u8, partition: u8, bound: u64) -> bool {
         if ns != 1 {
             return self.lower_bound(ends, ns, partition) > bound;
         }
@@ -1516,7 +1526,39 @@ impl SegBound {
                     + sc[7] * ab[1] * ab[2]
                     + sc[8] * ab[1] * ab[3]
                     + sc[9] * ab[2] * ab[3]);
-        len2 * tr - sab + 16.0 * (am2 * len2 - dot * dot) > self.thr_line * len2
+        len2 * tr - sab + 16.0 * (am2 * len2 - dot * dot) > self.thr_line * len2 || self.texels_far(a, b, ib, bound)
+    }
+
+    /// The one-subset bound texel by texel: palette color `k` lies within `slack` of the point
+    /// `W_k / 64` along the endpoints' segment, so a texel's error is at least `(d_i - slack)+^2`
+    /// with `d_i` its distance to the nearest such point. That is at least the distance to the
+    /// segment combined with the gap along it from the texel's projection `t` to the nearest
+    /// `k / (n - 1)` less `1 / 128` (each `W_k / 64` is within that of `k / (n - 1)`). Tighter
+    /// than the line bound when texels lie beyond the endpoints, fall between palette colors, or
+    /// sit at uneven distances. In `f32` over the texels' lanes; `slack_f32` and the 0.999 cover
+    /// its rounding.
+    #[inline]
+    fn texels_far(&self, a: [u32; 4], b: [u32; 4], ib: u8, bound: u64) -> bool {
+        // Adding and subtracting 1.5 * 2^23 rounds to an integer (|x| < 2^22) and vectorizes.
+        const ROUND: f32 = 12_582_912.0;
+        let steps = ((1u32 << ib) - 1) as f32;
+        let ac: [f32; 4] = std::array::from_fn(|c| a[c] as f32 * self.sw[c]);
+        let ab: [f32; 4] = std::array::from_fn(|c| b[c] as f32 * self.sw[c] - ac[c]);
+        let len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2] + ab[3] * ab[3];
+        let inv = if len2 > 0.0 { 1.0 / len2 } else { 0.0 };
+        let len = len2.sqrt();
+        let mut lb = [0f32; 16];
+        for (i, l) in lb.iter_mut().enumerate() {
+            let am: [f32; 4] = std::array::from_fn(|c| self.pxs[c][i] - ac[c]);
+            let t = ((am[0] * ab[0] + am[1] * ab[1] + am[2] * ab[2] + am[3] * ab[3]) * inv).clamp(0.0, 1.0);
+            let e: [f32; 4] = std::array::from_fn(|c| am[c] - t * ab[c]);
+            let x = t * steps;
+            let gap = (((x - ((x + ROUND) - ROUND)).abs() / steps - 1.0 / 128.0).max(0.0)) * len;
+            let d = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2] + e[3] * e[3] + gap * gap).sqrt() - self.slack_f32;
+            let d = d.max(0.0);
+            *l = d * d;
+        }
+        f64::from(lb.iter().sum::<f32>() * 0.999) > bound as f64
     }
 
     /// A lower bound on the error of any indices into palettes on these endpoints: per subset,
@@ -1658,14 +1700,15 @@ mod tests {
 
     /// [`reindex_bounded`]'s rejection bounds never reject a block whose re-indexed error is
     /// within the bound: smooth, noisy and flat source blocks against random heads of every
-    /// re-indexable mode, with bounds at and just below the exact error.
+    /// re-indexable mode, under even, alpha-free and uneven channel weights, with bounds at and
+    /// just below the exact error.
     #[test]
     fn reindex_rejection_is_a_lower_bound() {
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let w = [1u32, 1, 1, 1];
-        let mut seg = SegBound::new(&[[0; 4]; 16], &w);
+        let mut seg = SegBound::new(&[[0; 4]; 16], &[1; 4]);
         let (mut kept, mut rejected) = (0, 0);
-        for k in 0..20000 {
+        for k in 0..30000 {
+            let w = [[1u32, 1, 1, 1], [1, 1, 1, 0], [5, 9, 2, 1]][k % 3];
             let base: [u8; 4] = std::array::from_fn(|_| rng(&mut seed) as u8);
             let step: [i32; 4] = std::array::from_fn(|_| (rng(&mut seed) % 9) as i32 - 4);
             let noise = [0, 2, 8, 40][k % 4];
