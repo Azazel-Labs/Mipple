@@ -416,10 +416,12 @@ impl RankSrc7 {
         };
         let (mut tp, mut tr) = ((u32::MAX, usize::MAX), (u32::MAX, usize::MAX));
         let (lo, hi) = (*ds.start(), *ds.end());
-        // The blocks `blocks[j]`, `j` from `i - hi` up to `i - lo`, eight at a time, then the
-        // rest one by one. Order doesn't matter: the lists end with the `m` smallest pairs.
-        let (mut j, end) = if lo <= hi { (i - hi, i - lo + 1) } else { (0, 0) };
-        while j + 8 <= end {
+        // The blocks `blocks[j]`, `j` from `i - lo` down to `i - hi`, eight at a time, then the
+        // rest one by one. Order doesn't matter (the lists end with the `m` smallest pairs), but
+        // nearer blocks tend to have smaller keys, so starting there tightens the bounds sooner.
+        let (start, mut end) = if lo <= hi { (i - hi, i - lo + 1) } else { (0, 0) };
+        while end >= start + 8 {
+            let j = end - 8;
             let bs = &blocks[j..j + 8];
             // Per pair of blocks: the SADs' 64-bit partial sums (each SAD fits in 16 bits, so
             // as 32-bit lanes they are [x, 0, y, 0]) and the cross sums, each pairwise added.
@@ -487,9 +489,9 @@ impl RankSrc7 {
                     }
                 }
             }
-            j += 8;
+            end = j;
         }
-        for j in j..end {
+        for j in start..end {
             let (v, r) = key(&blocks[j]);
             offer(pre, &mut tp, m, (v, i - j));
             offer(res, &mut tr, m, (r, i - j));
