@@ -378,12 +378,13 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 | 0 | −17.6% | −8.5% | −6.3% (15/24 images) | −2.5% (4/24) | −13.2% | −5.0% | −30.8% | −10.9% |
 | 1 | −13.8% | −5.8% | −2.8% (12/24) | −0.8% (4/24) | −3.8% | −1.1% | −4.1% | −0.7% |
 | 10 | −9.6% | −5.7% | −1.0% | −3.0% | −5.7% | −0.9% | −9.8% | −2.4% |
-| 20 | −8.8% | −5.2% | −0.3% | −1.4% | −8.6% | −1.7% | −14.7% | −3.6% |
-| 30 | −8.8% | −4.6% | −0.7% | −0.7% | −11.5% | −2.5% | −17.9% | −4.0% |
-| 40 | −8.8% | −4.0% | −1.4% | −0.2% | −13.9% | −3.3% | −20.1% | −4.3% |
+| 20 | −8.8% | −5.2% | −0.3% | −1.5% | −8.6% | −1.7% | −14.7% | −3.6% |
+| 30 | −8.8% | −4.6% | −0.7% | −0.6% | −11.5% | −2.5% | −17.9% | −4.0% |
+| 40 | −8.8% | −4.0% | −1.3% | −0.1% | −13.9% | −3.3% | −20.1% | −4.3% |
 
 All four are mipple 0.9.18 (smooth weight 4×, halved at channel std 12; BC4/BC5 RDO from an effort-8 base),
-BC7 rerun after the far-search speedups, the lighter second base and the mode-6-only far re-indexing (below). BC5's R16G16 input is rebuilt from the
+BC7 rerun after the far-search speedups, the lighter second base, the mode-6-only far re-indexing and the shorter
+ranker lists (below). BC5's R16G16 input is rebuilt from the
 PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces the recorded λ 0 scores exactly.
 
 Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
@@ -411,7 +412,10 @@ The far search then re-indexed only mode-6 heads, dropping the multi-subset pref
 re-indexings almost never won, and every Kodak-24 delta against Oodle moved by 0.02% or less (only λ 20 at
 RMSE changes in the table, −0.4% to −0.3%), for about 5% less CPU at λ 1 and 1% at λ 10. Each mode-6 block's
 two palettes are now also built once, when it is finished, not for every later block that re-indexes it
-(byte-identical). mipple still takes about 1.2-1.3× Oodle's CPU time for the same size and quality.
+(byte-identical). The Zstd check then looked at level 1 first, skipping level 19 for chunks at most 0.9 of the
+base's size there (byte-identical, about 2.5% less at λ 1), and the ranker's prefilter passed it 8 blocks per
+key, not 16 (λ 20 SSIM, λ 30 SSIM and λ 40 change by 0.1% in the table, each cell by at most 0.07%; about 2%
+less). mipple still takes about 1.2× Oodle's CPU time for the same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
