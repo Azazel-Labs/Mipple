@@ -285,8 +285,26 @@ impl Bits {
 
 /// Unpacks a 16-byte block. Returns `None` for the reserved all-zero mode byte.
 pub fn unpack(raw: &[u8]) -> Option<Bc7Block> {
-    let (mut blk, mut b) = unpack_head(raw)?;
-    let mi = MODES[blk.mode as usize];
+    let v = u128::from_le_bytes(raw[..16].try_into().ok()?);
+    // One copy per mode: with the layout constant, the reads unroll to fixed shifts (RDO
+    // decodes thousands of candidate blocks per block).
+    Some(match (v as u8).trailing_zeros() {
+        0 => unpack_mode::<0>(v),
+        1 => unpack_mode::<1>(v),
+        2 => unpack_mode::<2>(v),
+        3 => unpack_mode::<3>(v),
+        4 => unpack_mode::<4>(v),
+        5 => unpack_mode::<5>(v),
+        6 => unpack_mode::<6>(v),
+        7 => unpack_mode::<7>(v),
+        _ => return None,
+    })
+}
+
+#[inline(always)]
+fn unpack_mode<const MODE: u8>(v: u128) -> Bc7Block {
+    let (mut blk, mut b) = unpack_head_mode::<MODE>(v);
+    let mi = const { MODES[MODE as usize] };
     let anc = anchors(mi.ns, blk.partition);
     for i in 0..16 {
         let n = mi.ib - anc.contains(&i) as u8;
@@ -298,27 +316,10 @@ pub fn unpack(raw: &[u8]) -> Option<Bc7Block> {
             blk.idx2[i] = b.read(n);
         }
     }
-    Some(blk)
+    blk
 }
 
 /// Every field before the indices (left zero), and the reader positioned at the indices.
-fn unpack_head(raw: &[u8]) -> Option<(Bc7Block, Bits)> {
-    let v = u128::from_le_bytes(raw[..16].try_into().ok()?);
-    // One copy per mode: with the layout constant, the reads unroll to fixed shifts (RDO
-    // decodes the heads of thousands of candidate blocks per block).
-    Some(match (v as u8).trailing_zeros() {
-        0 => unpack_head_mode::<0>(v),
-        1 => unpack_head_mode::<1>(v),
-        2 => unpack_head_mode::<2>(v),
-        3 => unpack_head_mode::<3>(v),
-        4 => unpack_head_mode::<4>(v),
-        5 => unpack_head_mode::<5>(v),
-        6 => unpack_head_mode::<6>(v),
-        7 => unpack_head_mode::<7>(v),
-        _ => return None,
-    })
-}
-
 #[inline(always)]
 fn unpack_head_mode<const MODE: u8>(v: u128) -> (Bc7Block, Bits) {
     let mode = MODE;
@@ -367,9 +368,25 @@ fn unpack_head_mode<const MODE: u8>(v: u128) -> (Bc7Block, Bits) {
 
 /// Packs a block. Anchor indices must already have their top bit clear.
 pub fn pack(blk: &Bc7Block) -> [u8; 16] {
-    let mi = MODES[blk.mode as usize];
+    // One copy per mode: with the layout constant, the writes unroll to fixed shifts.
+    match blk.mode {
+        0 => pack_mode::<0>(blk),
+        1 => pack_mode::<1>(blk),
+        2 => pack_mode::<2>(blk),
+        3 => pack_mode::<3>(blk),
+        4 => pack_mode::<4>(blk),
+        5 => pack_mode::<5>(blk),
+        6 => pack_mode::<6>(blk),
+        7 => pack_mode::<7>(blk),
+        m => panic!("BC7 mode {m}"),
+    }
+}
+
+#[inline(always)]
+fn pack_mode<const MODE: u8>(blk: &Bc7Block) -> [u8; 16] {
+    let mi = const { MODES[MODE as usize] };
     let mut b = Bits { v: 0, pos: 0 };
-    b.write(1 << blk.mode, blk.mode + 1);
+    b.write(1 << MODE, MODE + 1);
     b.write(blk.partition, mi.pb);
     b.write(blk.rotation, mi.rb);
     b.write(blk.idx_sel, mi.isb);
@@ -454,7 +471,23 @@ pub fn endpoint_colors(b: &Bc7Block) -> [[[u32; 4]; 2]; 3] {
 
 /// Decodes an unpacked block.
 pub fn decode_block(b: &Bc7Block, out: &mut Block) {
-    let mi = MODES[b.mode as usize];
+    // One copy per mode: the subset lookup, weight tables and index layout become constant.
+    match b.mode {
+        0 => decode_block_mode::<0>(b, out),
+        1 => decode_block_mode::<1>(b, out),
+        2 => decode_block_mode::<2>(b, out),
+        3 => decode_block_mode::<3>(b, out),
+        4 => decode_block_mode::<4>(b, out),
+        5 => decode_block_mode::<5>(b, out),
+        6 => decode_block_mode::<6>(b, out),
+        7 => decode_block_mode::<7>(b, out),
+        m => panic!("BC7 mode {m}"),
+    }
+}
+
+#[inline(always)]
+fn decode_block_mode<const MODE: u8>(b: &Bc7Block, out: &mut Block) {
+    let mi = const { MODES[MODE as usize] };
     let cols = endpoint_colors(b);
     let w1 = weights(mi.ib);
     let w2 = weights(mi.ib2.max(2));
@@ -694,9 +727,17 @@ pub fn decode(raw: &[u8], out: &mut Block) {
     if raw[0] & 0x7f == 0x40 {
         return decode_mode6(u128::from_le_bytes(raw[..16].try_into().unwrap()), out);
     }
-    match unpack(raw) {
-        Some(b) => decode_block(&b, out),
-        None => *out = [[0; 4]; 16],
+    let v = u128::from_le_bytes(raw[..16].try_into().unwrap());
+    match (v as u8).trailing_zeros() {
+        0 => decode_block_mode::<0>(&unpack_mode::<0>(v), out),
+        1 => decode_block_mode::<1>(&unpack_mode::<1>(v), out),
+        2 => decode_block_mode::<2>(&unpack_mode::<2>(v), out),
+        3 => decode_block_mode::<3>(&unpack_mode::<3>(v), out),
+        4 => decode_block_mode::<4>(&unpack_mode::<4>(v), out),
+        5 => decode_block_mode::<5>(&unpack_mode::<5>(v), out),
+        6 => decode_block_mode::<6>(&unpack_mode::<6>(v), out),
+        7 => decode_block_mode::<7>(&unpack_mode::<7>(v), out),
+        _ => *out = [[0; 4]; 16],
     }
 }
 
@@ -1462,7 +1503,7 @@ pub fn reindex_bounded(
     seg: &mut SegBound,
 ) -> Option<([u8; 16], u64)> {
     let v = u128::from_le_bytes(raw[..16].try_into().ok()?);
-    // One copy per mode, as in `unpack_head`; two-index modes (4, 5) are not re-indexed.
+    // One copy per mode, as in `unpack`; two-index modes (4, 5) are not re-indexed.
     match (v as u8).trailing_zeros() {
         0 => reindex_bounded_mode::<0>(v, px, w, bound, seg),
         1 => reindex_bounded_mode::<1>(v, px, w, bound, seg),
