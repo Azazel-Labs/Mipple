@@ -33,6 +33,15 @@ pub fn palette(e0: u8, e1: u8) -> [u8; 8] {
 /// then some value above `bound`); otherwise it is exact.
 #[inline]
 pub fn sse_bounded(raw: &[u8], px: &Block, c: usize, w: u32, bound: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if c < 2 && crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 is available (checked above).
+        return u64::from(w) * u64::from(unsafe { avx2::sse(raw, px, c) });
+    }
+    sse_bounded_generic(raw, px, c, w, bound)
+}
+
+fn sse_bounded_generic(raw: &[u8], px: &Block, c: usize, w: u32, bound: u64) -> u64 {
     let pal = palette(raw[0], raw[1]);
     let mut bits = 0u64;
     for (i, &b) in raw[2..8].iter().enumerate() {
@@ -69,6 +78,15 @@ pub fn decode_channel(raw: &[u8]) -> [u8; 16] {
 }
 
 fn assign(v: &[u8; 16], pal: &[u8; 8]) -> (u64, u64) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 is available (checked above).
+        return unsafe { avx2::assign(v, pal) };
+    }
+    assign_generic(v, pal)
+}
+
+fn assign_generic(v: &[u8; 16], pal: &[u8; 8]) -> (u64, u64) {
     let mut bits = 0u64;
     let mut err = 0u64;
     for (i, &x) in v.iter().enumerate() {
@@ -83,6 +101,97 @@ fn assign(v: &[u8; 16], pal: &[u8; 8]) -> (u64, u64) {
         err += best.0 as u64;
     }
     (bits, err)
+}
+
+/// AVX2 kernels: the 16 values of a block as u8 lanes. Same results as the scalar code.
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use super::palette;
+    use crate::surface::Block;
+    use std::arch::x86_64::*;
+
+    /// Sum of squared differences of 16 u8 lanes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn ssd(a: __m128i, b: __m128i) -> u32 {
+        let d = _mm_or_si128(_mm_subs_epu8(a, b), _mm_subs_epu8(b, a));
+        let d = _mm256_cvtepu8_epi16(d);
+        let s = _mm256_madd_epi16(d, d);
+        let s = _mm_add_epi32(_mm256_castsi256_si128(s), _mm256_extracti128_si256::<1>(s));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32::<0b01_00_11_10>(s));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32::<0b10_11_00_01>(s));
+        _mm_cvtsi128_si32(s) as u32
+    }
+
+    /// `super::assign`: nearest palette entry per value (the first of equals), and the SSE.
+    #[target_feature(enable = "avx2")]
+    pub fn assign(v: &[u8; 16], pal: &[u8; 8]) -> (u64, u64) {
+        // SAFETY: 16 bytes.
+        let x = unsafe { _mm_loadu_si128(v.as_ptr().cast()) };
+        let mut best = _mm_set1_epi8(-1);
+        let mut idx = _mm_setzero_si128();
+        for (k, &p) in pal.iter().enumerate() {
+            let p = _mm_set1_epi8(p as i8);
+            let d = _mm_or_si128(_mm_subs_epu8(x, p), _mm_subs_epu8(p, x));
+            // |d| orders as d²; strictly closer only. Entry 0 always wins its lanes (best
+            // starts at 255, and a tie there keeps index 0 anyway).
+            let not_lt = _mm_cmpeq_epi8(_mm_subs_epu8(best, d), _mm_setzero_si128());
+            idx = _mm_blendv_epi8(_mm_set1_epi8(k as i8), idx, not_lt);
+            best = _mm_min_epu8(best, d);
+        }
+        // Pack 3-bit indices: pairs (i0 + 8 i1), then quads (+ 64 * pair), 12 bits per dword.
+        let pairs = _mm_maddubs_epi16(idx, _mm_set1_epi16(0x0801));
+        let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0040_0001));
+        let mut q = [0u32; 4];
+        // SAFETY: 16 bytes.
+        unsafe { _mm_storeu_si128(q.as_mut_ptr().cast(), quads) };
+        let bits = u64::from(q[0]) | u64::from(q[1]) << 12 | u64::from(q[2]) << 24 | u64::from(q[3]) << 36;
+        let err = ssd(best, _mm_setzero_si128());
+        (bits, u64::from(err))
+    }
+
+    /// Channel `c` (0 or 1) of the 16 texels.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn channel(px: &Block, c: usize) -> __m128i {
+        // SAFETY: a Block is 64 bytes; unaligned loads.
+        let (a, b) = unsafe {
+            let p = px.as_ptr().cast::<__m256i>();
+            (_mm256_loadu_si256(p), _mm256_loadu_si256(p.add(1)))
+        };
+        // Per 128-bit lane (4 texels): RRRR GGGG BBBB AAAA; then qwords R0-7 G0-7 B0-7 A0-7.
+        let m = _mm256_setr_epi8(
+            0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
+        );
+        let perm = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        let a = _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(a, m), perm);
+        let b = _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(b, m), perm);
+        _mm256_castsi256_si128(if c == 0 {
+            _mm256_unpacklo_epi64(a, b)
+        } else {
+            _mm256_unpackhi_epi64(a, b)
+        })
+    }
+
+    /// Unweighted SSE of an encoded BC4 block against channel `c` of `px`.
+    #[target_feature(enable = "avx2")]
+    pub fn sse(raw: &[u8], px: &Block, c: usize) -> u32 {
+        let pal = palette(raw[0], raw[1]);
+        let bits = u64::from_le_bytes([raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], 0, 0]);
+        // Texel i's index starts at bit 3i: gather bytes 3i/8 and 3i/8 + 1 into u16 lane i, then
+        // shift right by 3i % 8 (as a multiply by 2^(7 - s) and a shift by 7) and keep 3 bits.
+        let w = _mm256_broadcastsi128_si256(_mm_cvtsi64_si128(bits as i64));
+        let gather = _mm256_setr_epi8(
+            0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 2, 3, 2, 3, 3, 4, 3, 4, 3, 4, 4, 5, 4, 5, 4, 5, 5, 6, 5, 6,
+        );
+        let mul = _mm256_setr_epi16(128, 16, 2, 64, 8, 1, 32, 4, 128, 16, 2, 64, 8, 1, 32, 4);
+        let ix = _mm256_srli_epi16::<7>(_mm256_mullo_epi16(_mm256_shuffle_epi8(w, gather), mul));
+        let ix = _mm256_and_si256(ix, _mm256_set1_epi16(7));
+        let ix = _mm_packus_epi16(_mm256_castsi256_si128(ix), _mm256_extracti128_si256::<1>(ix));
+        // SAFETY: 8 bytes.
+        let p = _mm_shuffle_epi8(unsafe { _mm_loadl_epi64(pal.as_ptr().cast()) }, ix);
+        ssd(channel(px, c), p)
+    }
 }
 
 fn to_bytes(e0: u8, e1: u8, bits: u64) -> [u8; 8] {
@@ -279,6 +388,44 @@ mod tests {
         let d = decode_channel(&raw);
         let sse: u32 = v.iter().zip(&d).map(|(a, b)| (a.abs_diff(*b) as u32).pow(2)).sum();
         assert!(sse < 16 * 100, "sse {sse}");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_kernels_match_generic() {
+        if crate::simd::level() != crate::simd::Level::Avx2 {
+            return;
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for n in 0..20_000 {
+            let spread = [255u64, 8, 1][n % 3];
+            let base = next() as u8;
+            let px: Block =
+                std::array::from_fn(|_| std::array::from_fn(|_| base.wrapping_add((next() % (spread + 1)) as u8)));
+            let mut raw = next().to_le_bytes();
+            if n % 4 == 0 {
+                raw[1] = raw[0];
+            }
+            for c in 0..2 {
+                let v = channel(&px, c);
+                let pal = palette(raw[0], raw[1]);
+                // SAFETY: AVX2 checked above.
+                unsafe {
+                    assert_eq!(avx2::assign(&v, &pal), assign_generic(&v, &pal), "block {n}");
+                    assert_eq!(
+                        u64::from(avx2::sse(&raw, &px, c)),
+                        sse_bounded_generic(&raw, &px, c, 1, u64::MAX),
+                        "block {n}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
