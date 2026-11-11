@@ -355,6 +355,9 @@ impl RankSrc7 {
         };
         let (s0, s1) = (ld(&self.b.vals, 0), ld(&self.b.vals, 1));
         let ones = _mm256_set1_epi16(1);
+        // SAFETY: unaligned loads of [f32; 4] arrays.
+        let (sum1, vs) = unsafe { (_mm_loadu_ps(self.s1.as_ptr()), _mm_loadu_ps(self.vs.as_ptr())) };
+        let (sixteen, cap) = (_mm_set1_ps(16.0), _mm_set1_ps(1e7));
         top_with(blocks, i, ds, m, pre, res, |p| {
             let (v0, v1) = (ld(&p.vals, 0), ld(&p.vals, 1));
             let sad = _mm256_add_epi64(_mm256_sad_epu8(s0, v0), _mm256_sad_epu8(s1, v1));
@@ -368,17 +371,18 @@ impl RankSrc7 {
             let h = _mm256_hadd_epi32(c0, c1);
             let h = _mm256_hadd_epi32(h, h);
             let (lo, hi) = (_mm256_castsi256_si128(h), _mm256_extracti128_si256::<1>(h));
-            let sq = [
-                _mm_cvtsi128_si32(lo) as u32,
-                _mm_cvtsi128_si32(hi) as u32,
-                _mm_extract_epi32::<1>(lo) as u32,
-                _mm_extract_epi32::<1>(hi) as u32,
-            ];
-            let mut r = 0f32;
-            for (c, &x) in sq.iter().enumerate() {
-                r += self.resid(x, p, c);
-            }
-            (sad, r as u32)
+            // Channels 0..4 in order; [`Self::resid`] on all four lanes at once, with the same
+            // operations in the same order, then summed in channel order as the scalar path.
+            let sq = _mm_cvtepi32_ps(_mm_unpacklo_epi32(lo, hi));
+            // SAFETY: unaligned loads of [f32; 4] arrays.
+            let ldf = |a: &[f32; 4]| unsafe { _mm_loadu_ps(a.as_ptr()) };
+            let cov = _mm_sub_ps(sq, _mm_div_ps(_mm_mul_ps(sum1, ldf(&p.q1)), sixteen));
+            let r = _mm_sub_ps(vs, _mm_mul_ps(_mm_mul_ps(cov, cov), ldf(&p.inv_vq)));
+            let r = _mm_min_ps(_mm_max_ps(r, _mm_setzero_ps()), cap);
+            let mut rs = [0f32; 4];
+            // SAFETY: an unaligned store into a [f32; 4].
+            unsafe { _mm_storeu_ps(rs.as_mut_ptr(), r) };
+            (sad, (((rs[0] + rs[1]) + rs[2]) + rs[3]) as u32)
         });
     }
 
@@ -571,6 +575,49 @@ mod tests {
             }
             let want = (acc[0] + acc[2]) + (acc[1] + acc[3]);
             assert_eq!(rs.mlp(&f).to_bits(), want.to_bits(), "d = {d}");
+        }
+    }
+
+    /// `prefilter_top`'s SIMD keys pick exactly what the portable `prefilter` keys pick.
+    #[test]
+    fn prefilter_top_matches_portable() {
+        let mut x = 777u32;
+        let mut rnd = || {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            x >> 8
+        };
+        let mut blk = |flat: bool| {
+            let mut b: Block = [[0u8; 4]; 16];
+            let base = (rnd() as u8, rnd() as u8 % 8 + 1);
+            for t in &mut b {
+                for c in t.iter_mut() {
+                    // Some blocks flat in some channels: zero variance takes the 0 residual path.
+                    *c = if flat && rnd() % 2 == 0 {
+                        base.0
+                    } else {
+                        base.0.wrapping_add(rnd() as u8 % base.1 * 9)
+                    };
+                }
+            }
+            let raw: [u8; 16] = std::array::from_fn(|_| rnd() as u8);
+            (b, raw)
+        };
+        let blocks: Vec<RankBlock7> = (0..600)
+            .map(|k| {
+                let (b, raw) = blk(k % 3 == 0);
+                RankBlock7::new(&b, &raw)
+            })
+            .collect();
+        for k in 0..20 {
+            let (src, base) = blk(k % 2 == 0);
+            let rs = RankSrc7::new(&src, &base, 999, 1.25, 0.5);
+            let (mut pre, mut res, mut pre2, mut res2) = (vec![], vec![], vec![], vec![]);
+            rs.prefilter_top(&blocks, 599, 1..=599, 24, &mut pre, &mut res);
+            top_with(&blocks, 599, 1..=599, 24, &mut pre2, &mut res2, |p| rs.prefilter(p));
+            for l in [&mut pre, &mut res, &mut pre2, &mut res2] {
+                l.sort_unstable();
+            }
+            assert_eq!((pre, res), (pre2, res2), "source {k}");
         }
     }
 

@@ -284,12 +284,25 @@ pub fn unpack(raw: &[u8]) -> Option<Bc7Block> {
 /// Every field before the indices (left zero), and the reader positioned at the indices.
 fn unpack_head(raw: &[u8]) -> Option<(Bc7Block, Bits)> {
     let v = u128::from_le_bytes(raw[..16].try_into().ok()?);
-    let first = v as u8;
-    if first == 0 {
-        return None;
-    }
-    let mode = first.trailing_zeros() as u8;
-    let mi = MODES[mode as usize];
+    // One copy per mode: with the layout constant, the reads unroll to fixed shifts (RDO
+    // decodes the heads of thousands of candidate blocks per block).
+    Some(match (v as u8).trailing_zeros() {
+        0 => unpack_head_mode::<0>(v),
+        1 => unpack_head_mode::<1>(v),
+        2 => unpack_head_mode::<2>(v),
+        3 => unpack_head_mode::<3>(v),
+        4 => unpack_head_mode::<4>(v),
+        5 => unpack_head_mode::<5>(v),
+        6 => unpack_head_mode::<6>(v),
+        7 => unpack_head_mode::<7>(v),
+        _ => return None,
+    })
+}
+
+#[inline(always)]
+fn unpack_head_mode<const MODE: u8>(v: u128) -> (Bc7Block, Bits) {
+    let mode = MODE;
+    let mi = const { MODES[MODE as usize] };
     let mut b = Bits {
         v,
         pos: mode as u32 + 1,
@@ -329,7 +342,7 @@ fn unpack_head(raw: &[u8]) -> Option<(Bc7Block, Bits)> {
             blk.pbits[s] = [p, p];
         }
     }
-    Some((blk, b))
+    (blk, b)
 }
 
 /// Packs a block. Anchor indices must already have their top bit clear.
@@ -383,7 +396,7 @@ pub fn pack(blk: &Bc7Block) -> [u8; 16] {
 }
 
 /// Expands a quantized channel (plus optional p-bit) to 8 bits by bit replication.
-#[inline]
+#[inline(always)]
 fn dequant(q: u8, bits: u8, p: Option<u8>) -> u32 {
     if bits == 0 {
         return 255;
@@ -396,7 +409,7 @@ fn dequant(q: u8, bits: u8, p: Option<u8>) -> u32 {
     (v << (8 - n)) | (v >> (2 * n - 8))
 }
 
-#[inline]
+#[inline(always)]
 fn dequant_endpoint(q: &[u8; 4], mi: &ModeInfo, p: u8) -> [u32; 4] {
     let p = (mi.epb == 1 || mi.spb == 1).then_some(p);
     [
@@ -1272,12 +1285,30 @@ pub fn reindex_bounded(
     bound: u64,
     seg: &mut SegBound,
 ) -> Option<([u8; 16], u64)> {
-    // The indices are all re-chosen, so only the fields before them are read.
-    let (mut b, _) = unpack_head(raw)?;
-    let mi = MODES[b.mode as usize];
-    if mi.ib2 > 0 {
-        return None;
+    let v = u128::from_le_bytes(raw[..16].try_into().ok()?);
+    // One copy per mode, as in `unpack_head`; two-index modes (4, 5) are not re-indexed.
+    match (v as u8).trailing_zeros() {
+        0 => reindex_bounded_mode::<0>(v, px, w, bound, seg),
+        1 => reindex_bounded_mode::<1>(v, px, w, bound, seg),
+        2 => reindex_bounded_mode::<2>(v, px, w, bound, seg),
+        3 => reindex_bounded_mode::<3>(v, px, w, bound, seg),
+        6 => reindex_bounded_mode::<6>(v, px, w, bound, seg),
+        7 => reindex_bounded_mode::<7>(v, px, w, bound, seg),
+        _ => None,
     }
+}
+
+#[inline(always)]
+fn reindex_bounded_mode<const MODE: u8>(
+    v: u128,
+    px: &Block,
+    w: &[u32; 4],
+    bound: u64,
+    seg: &mut SegBound,
+) -> Option<([u8; 16], u64)> {
+    // The indices are all re-chosen, so only the fields before them are read.
+    let (mut b, _) = unpack_head_mode::<MODE>(v);
+    let mi = const { MODES[MODE as usize] };
     let anc = anchors(mi.ns, b.partition);
     let ends: [[[u32; 4]; 2]; 3] = std::array::from_fn(|s| {
         if s < mi.ns as usize {
