@@ -141,7 +141,8 @@ Open for v0.9.x:
 
 ## Pipeline quality (unversioned)
 
-- [ ] RDO rate model for the split layout (`--prep`), so RDO and the transform stop fighting; a KTX2
+- [ ] RDO rate model for the split layout (`--prep`), so RDO and the transform stop fighting (design notes and
+  other next steps: [research/field-split.md](research/field-split.md)); a KTX2
   key/value flag for the layout and a GPU (compute shader) inverse, so loaders can undo it after hardware
   decompression.
 - [x] Alpha as transparency (BC7 colour textures by default): alpha-weighted mips, push-pull bleed of hidden colour,
@@ -150,5 +151,5 @@ Open for v0.9.x:
   RDO matching of hidden texels to anything (now they are pinned to the visible mean).
 - [ ] Better mip filters (Kaiser/Lanczos).
 - [ ] Per-role presets (`--role albedo|normal|mask|ui`) choosing format, λ and smooth protection.
-- [ ] Rate models for Kraken (if licensed) and GDeflate; `--backend` switch for verification.
+- [ ] Rate model for GDeflate (GPU decompression); `--backend` switch for verification.
 - [ ] `ktx validate` (KTX-Software) in CI.
