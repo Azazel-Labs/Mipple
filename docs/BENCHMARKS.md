@@ -400,7 +400,9 @@ The multi-subset rejection then stopped at the first subset that decides it, deq
 reaches (byte-identical, about 5% less, to about 77). The far search's prefilter then also screened
 multi-subset candidates before re-indexing them: the endpoint channels fully inside a candidate's first 64 bits
 (the rest come from the current block) pin each endpoint to within half a quantization step, and a subset's
-mean texel too far from that segment rejects (byte-identical, about 2% less). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
+mean texel too far from that segment rejects (byte-identical, about 2% less), and mode-6 re-indexing chose
+all 16 indices at once with AVX2 (the same projection, window and ties; byte-identical, about 2.5% less, to
+about 80). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,

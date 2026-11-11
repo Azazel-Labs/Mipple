@@ -923,6 +923,90 @@ impl LinePal {
         }
         (best.1 as u8, best.0)
     }
+
+    /// [`Self::nearest`] for all 16 texels of `px` at once, for a 16-entry palette and weights
+    /// of at most 128: the same projection (the same operations in the same order), window and
+    /// tie-breaking, so the same indices and errors exactly.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    fn nearest16_avx2(&self, px: &Block, w: &[u32; 4]) -> ([u8; 16], [u32; 16]) {
+        use std::arch::x86_64::*;
+        debug_assert!(self.n == 16 && w.iter().all(|&x| x <= 128));
+        let pal: [u32; 16] = self.pal.map(u32::from_le_bytes);
+        let tex: [u32; 16] = px.map(u32::from_le_bytes);
+        // SAFETY: the loads read 8 u32s inside 16-element arrays; the rest needs AVX2 only.
+        unsafe {
+            let pa = _mm256_loadu_si256(pal.as_ptr().cast());
+            let pb = _mm256_loadu_si256(pal.as_ptr().add(8).cast());
+            // Weights as 16-bit pairs per lane: channels 0 and 2 (even bytes), 1 and 3 (odd).
+            let we = _mm256_set1_epi32((w[0] | w[2] << 16) as i32);
+            let wo = _mm256_set1_epi32((w[1] | w[3] << 16) as i32);
+            let (m8, lo8, seven) = (_mm256_set1_epi32(0xff), _mm256_set1_epi16(0xff), _mm256_set1_epi32(7));
+            let (zero, fifteen) = (_mm256_setzero_si256(), _mm256_set1_epi32(15));
+            let (mut idx, mut err) = ([0u8; 16], [0u32; 16]);
+            for h in 0..2 {
+                let t = _mm256_loadu_si256(tex.as_ptr().add(8 * h).cast());
+                // Weighted squared error to palette entry `k` per lane: |t - p| per byte, split
+                // into even and odd bytes as 16-bit values, each squared and weighted by madd.
+                let sse = |k: __m256i| {
+                    let p = _mm256_blendv_epi8(
+                        _mm256_permutevar8x32_epi32(pa, k),
+                        _mm256_permutevar8x32_epi32(pb, k),
+                        _mm256_cmpgt_epi32(k, seven),
+                    );
+                    let ad = _mm256_sub_epi8(_mm256_max_epu8(t, p), _mm256_min_epu8(t, p));
+                    let (e, o) = (_mm256_and_si256(ad, lo8), _mm256_srli_epi16::<8>(ad));
+                    _mm256_add_epi32(
+                        _mm256_madd_epi16(e, _mm256_mullo_epi16(e, we)),
+                        _mm256_madd_epi16(o, _mm256_mullo_epi16(o, wo)),
+                    )
+                };
+                let mut s = _mm256_setzero_ps();
+                for c in 0..4 {
+                    let tc = _mm256_and_si256(_mm256_srlv_epi32(t, _mm256_set1_epi32(8 * c as i32)), m8);
+                    let d = _mm256_sub_ps(_mm256_cvtepi32_ps(tc), _mm256_set1_ps(self.origin[c]));
+                    s = _mm256_add_ps(s, _mm256_mul_ps(d, _mm256_set1_ps(self.dir[c])));
+                }
+                let r = _mm256_min_ps(
+                    _mm256_max_ps(_mm256_add_ps(s, _mm256_set1_ps(0.5)), _mm256_setzero_ps()),
+                    _mm256_set1_ps(64.0),
+                );
+                let mut gi = [0i32; 8];
+                _mm256_storeu_si256(gi.as_mut_ptr().cast(), _mm256_cvttps_epi32(r));
+                let gi = gi.map(|x| i32::from(self.lut[x as usize]));
+                let g = _mm256_loadu_si256(gi.as_ptr().cast());
+                let one = _mm256_set1_epi32(1);
+                let k0 = _mm256_max_epi32(_mm256_sub_epi32(g, one), zero);
+                let k2 = _mm256_min_epi32(_mm256_add_epi32(g, one), fifteen);
+                let (mut bk, mut be) = (k0, sse(k0));
+                for k in [g, k2] {
+                    let e = sse(k);
+                    let lt = _mm256_cmpgt_epi32(be, e);
+                    be = _mm256_blendv_epi8(be, e, lt);
+                    bk = _mm256_blendv_epi8(bk, k, lt);
+                }
+                // Lanes whose next lower entry ties continue down one at a time below.
+                let kp = _mm256_max_epi32(_mm256_sub_epi32(bk, one), zero);
+                let tie = _mm256_and_si256(_mm256_cmpeq_epi32(sse(kp), be), _mm256_cmpgt_epi32(bk, zero));
+                let ties = _mm256_movemask_ps(_mm256_castsi256_ps(tie));
+                let (mut ks, mut es) = ([0i32; 8], [0u32; 8]);
+                _mm256_storeu_si256(ks.as_mut_ptr().cast(), bk);
+                _mm256_storeu_si256(es.as_mut_ptr().cast(), be);
+                for l in 0..8 {
+                    let i = 8 * h + l;
+                    let mut k = ks[l] as usize;
+                    if ties >> l & 1 != 0 {
+                        while k > 0 && texel_sse(&px[i], &self.pal[k - 1], w) == es[l] {
+                            k -= 1;
+                        }
+                    }
+                    idx[i] = k as u8;
+                    err[i] = es[l];
+                }
+            }
+            (idx, err)
+        }
+    }
 }
 
 #[inline]
@@ -1417,6 +1501,25 @@ fn reindex_bounded_mode<const MODE: u8>(
         })
     });
     let mut err = 0u64;
+    #[cfg(target_arch = "x86_64")]
+    if MODE == 6 && crate::simd::level() == crate::simd::Level::Avx2 && w.iter().all(|&x| x <= 128) {
+        let lp = pals[0].as_ref().unwrap();
+        // SAFETY: AVX2 was detected; the palette has 16 entries and the weights are in range.
+        let (idx, errs) = unsafe { lp.nearest16_avx2(px, w) };
+        for i in 0..16 {
+            let (k, e) = if i == 0 {
+                best_index(&px[0], &lp.pal, lp.n / 2, w)
+            } else {
+                (idx[i], errs[i])
+            };
+            b.idx[i] = k;
+            err += u64::from(e);
+            if err > bound {
+                return None;
+            }
+        }
+        return Some((pack(&b), err));
+    }
     for i in 0..16 {
         let lp = pals[subset_of(mi.ns, b.partition, i)].as_ref().unwrap();
         // Anchors must keep their top index bit clear (no endpoint swap here): search the lower
@@ -1763,10 +1866,53 @@ mod tests {
         *seed
     }
 
-    /// [`reindex_bounded`]'s rejection bounds never reject a block whose re-indexed error is
-    /// within the bound: smooth, noisy and flat source blocks against random heads of every
-    /// re-indexable mode, under even, alpha-free and uneven channel weights, with bounds at and
-    /// just below the exact error.
+    /// [`LinePal::nearest16_avx2`] gives [`LinePal::nearest`]'s indices and errors exactly:
+    /// random, near and equal mode-6 endpoints (palettes with tied entries), smooth and noisy
+    /// texels, under several weight sets up to 128.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn nearest16_avx2_matches_nearest() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mi = MODES[6];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for k in 0..20000 {
+            let w = [[1, 1, 1, 1], [1, 1, 1, 0], [2, 4, 1, 3], [128, 1, 77, 128]][k % 4];
+            let r = |seed: &mut u64, m: u64| (rng(seed) % m) as u8;
+            let a: [u8; 4] = std::array::from_fn(|_| r(&mut seed, 128));
+            let spread = [0u64, 1, 3, 128][k / 4 % 4];
+            let b: [u8; 4] = std::array::from_fn(|c| {
+                let d = if spread == 0 {
+                    0
+                } else {
+                    rng(&mut seed) % (2 * spread + 1)
+                } as i32
+                    - spread as i32;
+                (a[c] as i32 + d).clamp(0, 127) as u8
+            });
+            let qz = Quantized {
+                q: [a, b],
+                p: [r(&mut seed, 2), r(&mut seed, 2)],
+            };
+            let lp = LinePal::from_quantized(&qz, &mi, &w);
+            let base: [u8; 4] = std::array::from_fn(|_| rng(&mut seed) as u8);
+            let noise = [255u64, 9, 2][k / 16 % 3];
+            let px: Block = std::array::from_fn(|_| {
+                std::array::from_fn(|c| {
+                    (base[c] as i32 + (rng(&mut seed) % (noise + 1)) as i32 - noise as i32 / 2).clamp(0, 255) as u8
+                })
+            });
+            // SAFETY: AVX2 was detected; 16 entries; weights at most 128.
+            let (idx, err) = unsafe { lp.nearest16_avx2(&px, &w) };
+            for i in 0..16 {
+                assert_eq!((idx[i], err[i]), lp.nearest(&px[i], &w), "case {k} texel {i}");
+            }
+        }
+    }
+
+    /// [`multi_head_endpoints`]' known channels are within `half` of the decoded endpoints
+    /// (exactly, for alpha), whatever the p-bits past the first 8 bytes.
     #[test]
     fn multi_head_endpoints_bracket_the_decoded_ones() {
         let mut seed = 0x51_7cc1_b727_220au64;
@@ -1801,6 +1947,10 @@ mod tests {
         assert!(known_channels.iter().all(|&n| n == 0 || n > 1000), "{known_channels:?}");
     }
 
+    /// [`reindex_bounded`]'s rejection bounds never reject a block whose re-indexed error is
+    /// within the bound: smooth, noisy and flat source blocks against random heads of every
+    /// re-indexable mode, under even, alpha-free and uneven channel weights, with bounds at and
+    /// just below the exact error.
     #[test]
     fn reindex_rejection_is_a_lower_bound() {
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
