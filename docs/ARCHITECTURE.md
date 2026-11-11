@@ -148,8 +148,9 @@ keeps most of the accuracy a better base adds, and the base costs little next to
 For each block in storage order:
 
 1. Score the base encoding: `J = smooth · SSE / 16 + λ · bits`, where `bits` comes from `LzModel`.
-2. For each of the last `max_back` blocks (256, capped by the window: 256 BC1/BC4 blocks at the 2 KiB default,
-   256 BC7 blocks; BC5 uses 128 plus the localized search below), build candidates. Partial byte-span copies are only tried for the nearest `span_back` (8): far
+2. For each of the last `max_back` blocks (capped by the window: 256 for BC1; 128 for BC4/BC5 and 16 for BC7,
+   which add the localized search below), build candidates. Partial byte-span copies are only tried for the
+   nearest `span_back` blocks (8 for BC1/BC4, off for BC5/BC7, where they cost time for no measurable gain): far
    away they rarely win, while whole-block and whole-field copies keep paying off at every distance.
    * **BC1:** copy the whole block; take its endpoints and re-choose indices; take its indices and refit endpoints.
    * **BC4/BC5:** the same per 8-byte half, plus both halves edited together and, when R and G are

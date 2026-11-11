@@ -91,12 +91,13 @@ struct RdoArgs {
     #[arg(long)]
     window: Option<usize>,
     /// Previous blocks to try copying from (also capped by --window) [default: 128 for BC4/BC5
-    /// and 32 for BC7 with the localized search, 256 otherwise].
+    /// and 16 for BC7 with the localized search, 256 otherwise].
     #[arg(long)]
     max_back: Option<usize>,
-    /// Nearest previous blocks to also try partial byte-span copies from.
-    #[arg(long, default_value_t = 8)]
-    span_back: usize,
+    /// Nearest previous blocks to also try partial byte-span copies from [default: 8 for BC1/BC4,
+    /// 0 for BC5/BC7].
+    #[arg(long)]
+    span_back: Option<usize>,
     /// Previous blocks whose single fields are tried in the chosen block after the search
     /// (0 disables) [default: 256 for BC1/BC4/BC7, 0 for BC5].
     #[arg(long)]
@@ -107,7 +108,7 @@ struct RdoArgs {
     #[arg(long)]
     far_back: Option<usize>,
     /// Localized search: beyond --max-back, earlier blocks of the chunk picked by the learned
-    /// ranker for the full search (0 disables) [default: 16 for BC5/BC7, 32 for BC4, 0 otherwise;
+    /// ranker for the full search (0 disables) [default: 16 for BC5, 8 for BC7, 32 for BC4, 0 otherwise;
     /// BC4/BC5/BC7 only].
     #[arg(long)]
     local: Option<usize>,

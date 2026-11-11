@@ -35,8 +35,9 @@ pub struct RdoParams {
     /// per-format default ([`RdoParams::max_back_for`]).
     pub max_back: Option<usize>,
     /// Partial-span candidates are only tried for the nearest this many previous blocks; farther
-    /// ones get only whole-block and whole-field copies.
-    pub span_back: usize,
+    /// ones get only whole-block and whole-field copies. `None` picks a per-format default
+    /// ([`RdoParams::span_back_for`]).
+    pub span_back: Option<usize>,
     /// After the search, try replacing one field (endpoints or indices, per BC4 half for BC5)
     /// of the chosen block with that field of each of this many previous blocks. `None` picks a
     /// per-format default ([`RdoParams::refine_back_for`]); 0 disables it.
@@ -86,7 +87,7 @@ impl Default for RdoParams {
             // Wide search for whole-block and whole-field copies, partial spans only nearby:
             // far spans rarely win (BC1/BC5 within ~1% of trying them everywhere).
             max_back: None,
-            span_back: 8,
+            span_back: None,
             refine_back: None,
             far_back: None,
             // 4x falling as k²/(k²+std²) with k = 12 (was 5x ramping linearly to 1 at std 14): the
@@ -150,18 +151,30 @@ impl RdoParams {
     /// Haven −0.71% vs 256 deep without it, same time), 32 for BC7 with it (as good as 64 on
     /// held-out Poly Haven textures), 256 otherwise.
     pub fn max_back_for(&self, format: Format) -> usize {
+        // BC7 16 rather than 32 (the localized search finds the rest): Kodak-24 BD-rate -0.00%.
         self.max_back.unwrap_or(match self.local_k_for(format) {
             0 => 256,
-            _ if format == Format::Bc7 => 32,
+            _ if format == Format::Bc7 => 16,
             _ => 128,
         })
     }
 
-    /// Localized-search picks: by default 16 for BC5 and BC7, 32 for BC4 (each with its own
+    /// Partial-span distance: 8 for BC1/BC4, off for BC5 and BC7, where spans almost never win
+    /// (Kodak-24 BD-rate +0.00% and +0.02% without them, for 11% and 7% less time).
+    pub fn span_back_for(&self, format: Format) -> usize {
+        self.span_back.unwrap_or(match format {
+            Format::Bc5 | Format::Bc7 => 0,
+            _ => 8,
+        })
+    }
+
+    /// Localized-search picks: by default 16 for BC5, 8 for BC7, 32 for BC4 (each with its own
     /// ranker), off for BC1.
     pub fn local_k_for(&self, format: Format) -> usize {
+        // BC7 8 rather than 16: Kodak-24 BD-rate -0.01%, 8% less time.
         self.local_k.unwrap_or(match format {
-            Format::Bc5 | Format::Bc7 => 16,
+            Format::Bc7 => 8,
+            Format::Bc5 => 16,
             Format::Bc4 => 32,
             _ => 0,
         })
@@ -1371,6 +1384,7 @@ fn optimize_chunk(
     let n = format.block_bytes();
     let window = p.window_for(format);
     let refine_back = p.refine_back_for(format);
+    let span_back = p.span_back_for(format);
     let channels = w.iter().filter(|&&x| x > 0).count().max(1) as f64;
     let mut model = LzModel::new(window, p.chain_depth);
     // Literal costs from the chunk's base encoding rather than learned as the chunk goes: the
@@ -1616,7 +1630,7 @@ fn optimize_chunk(
                 s,
                 w,
                 p.reduce_entropy,
-                d <= p.span_back,
+                d <= span_back,
                 d <= CROSS_BACK || d == p.row,
                 &mut fields,
                 bound(best.0),
@@ -2079,7 +2093,7 @@ mod tests {
         let p = RdoParams {
             reduce_entropy: true,
             max_back: Some(env("MIPPLE_PROFILE_BACK", "32").parse().unwrap()),
-            span_back: env("MIPPLE_PROFILE_SPAN_BACK", "100000").parse().unwrap(),
+            span_back: Some(env("MIPPLE_PROFILE_SPAN_BACK", "100000").parse().unwrap()),
             window: Some(env("MIPPLE_PROFILE_WINDOW", "2048").parse().unwrap()),
             ..RdoParams::with_lambda(env("MIPPLE_PROFILE_LAMBDA", "1").parse().unwrap())
         };
@@ -2135,7 +2149,7 @@ mod tests {
                     s,
                     &w,
                     p.reduce_entropy,
-                    d <= p.span_back,
+                    d <= p.span_back_for(format),
                     false,
                     &mut fields,
                     limit.min((best.0 * 16.0 / smooth) as u64 + 2),
