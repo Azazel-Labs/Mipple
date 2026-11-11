@@ -516,6 +516,71 @@ pub fn mode6_head_endpoints(raw: &[u8]) -> [[u32; 4]; 2] {
     mode6_endpoints(u64::from_le_bytes(lo), 0)
 }
 
+/// What the first 8 bytes of a multi-subset block fix of its endpoints ([`multi_head_endpoints`]).
+pub struct HeadEndpoints {
+    /// Subsets (2 or 3).
+    pub ns: u8,
+    /// Partition.
+    pub part: u8,
+    /// `mid[s][e][c]`: endpoint `e` of subset `s`, channel `c`, 8-bit, halfway between its two
+    /// p-bit choices (where `known[s][c]`).
+    pub mid: [[[f32; 4]; 2]; 3],
+    /// Whether both endpoints of channel `c` of subset `s` lie in those bytes.
+    pub known: [[bool; 4]; 3],
+    /// Distance from `mid` to either p-bit choice (0 without p-bits).
+    pub half: f32,
+}
+
+/// What the first 8 bytes of a multi-subset block (modes 0-3 and 7) fix of its endpoints, for a
+/// lower bound on re-indexing it with the rest taken from another block. The p-bits lie past
+/// byte 8, so a known channel is pinned to within `half` of `mid`. The opaque modes' alpha (255)
+/// is known with no p-bit uncertainty. Other modes give `None`.
+pub fn multi_head_endpoints(raw: &[u8]) -> Option<HeadEndpoints> {
+    let lo = u64::from_le_bytes(raw[..8].try_into().ok()?);
+    let mode = (lo as u8).trailing_zeros() as usize;
+    if !matches!(mode, 0..=3 | 7) {
+        return None;
+    }
+    let mi = MODES[mode];
+    let ns = mi.ns as usize;
+    let part = ((lo >> (mode + 1)) & ((1 << mi.pb) - 1)) as u8;
+    let start = mode + 1 + mi.pb as usize;
+    let cb = mi.cb as usize;
+    let pbit = mi.epb + mi.spb > 0;
+    let bits = cb + usize::from(pbit);
+    let half = if pbit { (1u32 << (8 - bits)) as f32 / 2.0 } else { 0.0 };
+    let mut mid = [[[0f32; 4]; 2]; 3];
+    let mut known = [[false; 4]; 3];
+    for s in 0..ns {
+        if mi.ab == 0 {
+            known[s][3] = true;
+            mid[s] = [[0.0, 0.0, 0.0, 255.0]; 2];
+        }
+        for c in 0..3 {
+            let at = |e: usize| start + (c * 2 * ns + 2 * s + e) * cb;
+            if at(1) + cb > 64 {
+                continue;
+            }
+            known[s][c] = true;
+            for e in 0..2 {
+                let q = ((lo >> at(e)) & ((1 << cb) - 1)) as u32;
+                // The p-bit-clear value; with the p-bit set it is 2 * half more (the low bits
+                // replicated into the expansion are the top ones, which the p-bit leaves alone).
+                let v = if pbit { q << 1 } else { q };
+                let x = (v << (8 - bits)) | (v >> (2 * bits - 8));
+                mid[s][e][c] = x as f32 + half;
+            }
+        }
+    }
+    Some(HeadEndpoints {
+        ns: mi.ns,
+        part,
+        mid,
+        known,
+        half,
+    })
+}
+
 /// The 16-entry mode-6 palette from the low 64 bits of a mode-6 block and P1.
 fn mode6_palette(lo: u64, p1: u64) -> [[u8; 4]; 16] {
     let e = mode6_endpoints(lo, p1);
@@ -1702,6 +1767,40 @@ mod tests {
     /// within the bound: smooth, noisy and flat source blocks against random heads of every
     /// re-indexable mode, under even, alpha-free and uneven channel weights, with bounds at and
     /// just below the exact error.
+    #[test]
+    fn multi_head_endpoints_bracket_the_decoded_ones() {
+        let mut seed = 0x51_7cc1_b727_220au64;
+        let mut known_channels = [0usize; 8];
+        for k in 0..5000 {
+            let mode = [0u8, 1, 2, 3, 7][k % 5];
+            let mut raw: [u8; 16] = std::array::from_fn(|_| rng(&mut seed) as u8);
+            raw[0] = (raw[0] & !(((2u16 << mode) - 1) as u8)) | 1 << mode;
+            let HeadEndpoints {
+                ns,
+                part,
+                mid,
+                known,
+                half,
+            } = multi_head_endpoints(&raw).unwrap();
+            let b = unpack(&raw).unwrap();
+            let mi = MODES[mode as usize];
+            assert_eq!((ns, part, b.mode), (mi.ns, b.partition, mode));
+            for s in 0..ns as usize {
+                for e in 0..2 {
+                    let v = dequant_endpoint(&b.ep[s][e], &mi, b.pbits[s][e]);
+                    for c in 0..4 {
+                        if known[s][c] {
+                            let h = if c == 3 { 0.0 } else { half };
+                            assert_eq!((v[c] as f32 - mid[s][e][c]).abs(), h, "mode {mode} s {s} e {e} c {c}");
+                            known_channels[mode as usize] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(known_channels.iter().all(|&n| n == 0 || n > 1000), "{known_channels:?}");
+    }
+
     #[test]
     fn reindex_rejection_is_a_lower_bound() {
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;

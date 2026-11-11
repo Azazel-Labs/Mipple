@@ -397,7 +397,10 @@ The ranker's prefilter then took eight candidate blocks at a time (byte-identica
 about 83 CPU-seconds; both builds encoding each image back to back on the same core), and mode-6 re-indexing
 rejected more candidates on a per-texel lower bound before choosing indices (byte-identical, about 3% less).
 The multi-subset rejection then stopped at the first subset that decides it, dequantizing only the endpoints it
-reaches (byte-identical, about 5% less, to about 77). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
+reaches (byte-identical, about 5% less, to about 77). The far search's prefilter then also screened
+multi-subset candidates before re-indexing them: the endpoint channels fully inside a candidate's first 64 bits
+(the rest come from the current block) pin each endpoint to within half a quantization step, and a subset's
+mean texel too far from that segment rejects (byte-identical, about 2% less). mipple still takes about 1.3× Oodle's CPU time for the same size and quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
