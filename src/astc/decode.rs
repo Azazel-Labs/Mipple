@@ -104,7 +104,7 @@ pub fn infill(w: &[u8], gx: u32, gy: u32, planes: usize, plane: usize, bw: u32, 
     let w11 = (fs * ft + 8) >> 4;
     let w10 = ft - w11;
     let w01 = fs - w11;
-    let w00 = 16 - fs - ft + w11;
+    let w00 = 16 + w11 - fs - ft;
     (at(js, jt) * w00 + at(js + 1, jt) * w01 + at(js, jt + 1) * w10 + at(js + 1, jt + 1) * w11 + 8) >> 4
 }
 

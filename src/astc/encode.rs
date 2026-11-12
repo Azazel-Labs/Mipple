@@ -194,7 +194,7 @@ impl Footprint {
                             let gt = (dt * t * (gy - 1) + 32) >> 6;
                             let (js, fs, jt, ft) = (gs >> 4, gs & 15, gt >> 4, gt & 15);
                             let w11 = (fs * ft + 8) >> 4;
-                            let ws = [16 - fs - ft + w11, fs - w11, ft - w11, w11];
+                            let ws = [16 + w11 - fs - ft, fs - w11, ft - w11, w11];
                             let pts = [(js, jt), (js + 1, jt), (js, jt + 1), (js + 1, jt + 1)];
                             let mut tap = Tap::default();
                             for k in 0..4 {
