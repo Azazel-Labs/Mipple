@@ -869,13 +869,20 @@ fn candidates(
             if let Some(u) = unpacked {
                 match bc7::index_key(u.base, u.prev) {
                     Some(key) => {
-                        if fields.indices.insert(key) {
+                        // Refits that can't come within the bound would be rejected: skipped
+                        // (the bound only shrinks, so a repeat of the key stays skipped).
+                        if fields.indices.insert(key)
+                            && !bc7::refit_exceeds(u.base.mode, u.base.partition, &u.prev.idx, src, w, bound)
+                        {
                             let r = bc7::with_indices(u.base, &u.prev.idx, src, w, reduce_entropy);
                             out.push((r, UNKNOWN));
                         }
                     }
                     // A different mode or partition: take prev's whole layout instead.
-                    None if cross && bc7::layout_key(u.prev).is_some_and(|key| fields.indices.insert(key)) => {
+                    None if cross
+                        && bc7::layout_key(u.prev).is_some_and(|key| fields.indices.insert(key))
+                        && !bc7::refit_exceeds(u.prev.mode, u.prev.partition, &u.prev.idx, src, w, bound) =>
+                    {
                         let r = bc7::with_layout(u.prev, src, w, reduce_entropy);
                         out.push((r, UNKNOWN));
                     }

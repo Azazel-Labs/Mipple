@@ -1874,6 +1874,59 @@ pub fn with_indices(base: &Bc7Block, idx: &[u8; 16], px: &Block, w: &[u32; 4], r
     pack(&b)
 }
 
+/// Whether every block of `mode` and `partition` (one index set) with indices `idx`, whatever
+/// its endpoints, has a weighted SSE against `px` above `bound`: true means [`with_indices`] and
+/// [`with_layout`] with these fields cannot come within `bound`. Per subset and channel, the
+/// decoded values are those of a line `a + (b - a) t` (t: the index weights / 64) rounded to
+/// integers, at most 1/2 off it each, so their distance to the texels is at least the
+/// least-squares residual's root less `√n / 2` (alpha without endpoint bits decodes to 255).
+pub fn refit_exceeds(mode: u8, partition: u8, idx: &[u8; 16], px: &Block, w: &[u32; 4], bound: u64) -> bool {
+    let mi = MODES[mode as usize];
+    debug_assert_eq!(mi.ib2, 0);
+    let wt = weights(mi.ib);
+    // Per subset: n, Σt, Σt², then per channel Σx, Σx², Σtx.
+    let mut sum = [[0f64; 15]; 3];
+    for (i, p) in px.iter().enumerate() {
+        let s = &mut sum[subset_of(mi.ns, partition, i)];
+        let t = f64::from(wt[idx[i] as usize]) / 64.0;
+        s[0] += 1.0;
+        s[1] += t;
+        s[2] += t * t;
+        for c in 0..4 {
+            let x = f64::from(p[c]);
+            s[3 + c] += x;
+            s[7 + c] += x * x;
+            s[11 + c] += t * x;
+        }
+    }
+    let mut lb = 0f64;
+    for s in &sum[..mi.ns as usize] {
+        let [n, st, stt] = [s[0], s[1], s[2]];
+        if n == 0.0 {
+            continue;
+        }
+        let det = n * stt - st * st;
+        for c in 0..4 {
+            let (sx, sxx, stx) = (s[3 + c], s[7 + c], s[11 + c]);
+            if c == 3 && mi.ab == 0 {
+                // Alpha decodes to 255: its error exactly.
+                lb += f64::from(w[c]) * (sxx - 510.0 * sx + 65025.0 * n);
+                continue;
+            }
+            let r = if det > 1e-9 {
+                sxx - (sx * sx * stt - 2.0 * sx * st * stx + n * stx * stx) / det
+            } else {
+                sxx - sx * sx / n
+            };
+            let d = r.max(0.0).sqrt() - 0.5 * n.sqrt();
+            if d > 0.0 {
+                lb += f64::from(w[c]) * d * d;
+            }
+        }
+    }
+    lb * 0.999 > bound as f64
+}
+
 /// Key for [`with_layout`]: `prev`'s mode, partition, rotation and indices, or None for
 /// two-index modes. Equal keys give equal results for the same pixels.
 pub fn layout_key(prev: &Bc7Block) -> Option<u64> {
@@ -1998,6 +2051,46 @@ mod tests {
             }
         }
         assert!(rejected > kept, "rejected {rejected} kept {kept}");
+    }
+
+    /// [`refit_exceeds`] is a lower bound: never true at the error of a block with those fields,
+    /// random endpoints or refit ones ([`with_layout`]), of every one-index-set mode, over smooth,
+    /// noisy and flat sources under even, alpha-free and uneven weights.
+    #[test]
+    fn refit_bound_is_a_lower_bound() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut out = [[0u8; 4]; 16];
+        let mut rejected = 0;
+        for k in 0..30000 {
+            let w = [[1u32, 1, 1, 1], [1, 1, 1, 0], [5, 9, 2, 1]][k % 3];
+            let base: [u8; 4] = std::array::from_fn(|_| rng(&mut seed) as u8);
+            let step: [i32; 4] = std::array::from_fn(|_| (rng(&mut seed) % 9) as i32 - 4);
+            let noise = [0, 2, 8, 40][k % 4];
+            let px: Block = std::array::from_fn(|i| {
+                std::array::from_fn(|c| {
+                    let n = if noise > 0 {
+                        (rng(&mut seed) % (2 * noise + 1)) as i32 - noise as i32
+                    } else {
+                        0
+                    };
+                    (i32::from(base[c]) + step[c] * i as i32 + n).clamp(0, 255) as u8
+                })
+            });
+            let mut raw: [u8; 16] = std::array::from_fn(|_| rng(&mut seed) as u8);
+            let mode = [0u8, 1, 2, 3, 6, 6, 7, 7][k % 8];
+            raw[0] = (raw[0] & !(u8::MAX >> (7 - mode))) | (1 << mode);
+            let b = unpack(&raw).unwrap();
+            for r in [raw, with_layout(&b, &px, &w, k % 2 == 0)] {
+                decode(&r, &mut out);
+                let e = crate::surface::block_sse(&px, &out, &w);
+                assert!(
+                    !refit_exceeds(b.mode, b.partition, &b.idx, &px, &w, e),
+                    "mode {mode} error {e}"
+                );
+                rejected += usize::from(refit_exceeds(b.mode, b.partition, &b.idx, &px, &w, e / 2));
+            }
+        }
+        assert!(rejected > 1000, "rejected {rejected}");
     }
 
     /// Throwaway stage profile over a Kodak image (MIPPLE_PROFILE_IMG). Not a regression test.
