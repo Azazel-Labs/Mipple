@@ -2,6 +2,7 @@
 //! bc7f harness, texconv...) can be scored with the same metrics and back ends as mipple.
 //!
 //! Reads legacy FourCC (DXT1, DXT4/DXT5, ATI1/BC4U, ATI2/BC5U) and DX10-extended headers; writes DX10.
+//! DXGI has no ETC2 or EAC formats, so those are KTX2 only and [`write`] rejects them.
 
 // Header fields are untrusted: sizes and offsets go through checked conversions and arithmetic.
 #![warn(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
@@ -14,8 +15,8 @@ const MAGIC: &[u8; 4] = b"DDS ";
 const HEADER_LEN: usize = 124;
 const DX10_LEN: usize = 20;
 
-fn dxgi(format: Format, srgb: bool) -> u32 {
-    match (format, srgb) {
+fn dxgi(format: Format, srgb: bool) -> Option<u32> {
+    Some(match (format, srgb) {
         (Format::Bc1, false) => 71,
         (Format::Bc1, true) => 72,
         (Format::Bc3, false) => 77,
@@ -25,7 +26,8 @@ fn dxgi(format: Format, srgb: bool) -> u32 {
         (Format::Bc6h, _) => 95,
         (Format::Bc7, false) => 98,
         (Format::Bc7, true) => 99,
-    }
+        (Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11, _) => return None,
+    })
 }
 
 fn from_dxgi(v: u32) -> Option<(Format, bool)> {
@@ -48,8 +50,15 @@ fn u32_field(v: usize) -> u32 {
     u32::try_from(v).expect("DDS header field fits in 32 bits")
 }
 
-/// Writes a DX10-header DDS containing every level of `tex`.
-pub fn write(tex: &EncodedTexture) -> Vec<u8> {
+/// Writes a DX10-header DDS containing every level of `tex`. Fails for formats DXGI lacks
+/// (ETC2, EAC: use KTX2).
+pub fn write(tex: &EncodedTexture) -> Result<Vec<u8>> {
+    let Some(dxgi) = dxgi(tex.format, tex.srgb) else {
+        bail!(
+            "DDS has no {} format (DXGI lacks ETC2 and EAC); write KTX2 instead",
+            tex.format
+        );
+    };
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     let mut h = [0u32; 31];
@@ -70,13 +79,13 @@ pub fn write(tex: &EncodedTexture) -> Vec<u8> {
     for v in h {
         out.extend_from_slice(&v.to_le_bytes());
     }
-    for v in [dxgi(tex.format, tex.srgb), 3, 0, 1, 0] {
+    for v in [dxgi, 3, 0, 1, 0] {
         out.extend_from_slice(&v.to_le_bytes());
     }
     for l in &tex.levels {
         out.extend_from_slice(&l.data);
     }
-    out
+    Ok(out)
 }
 
 /// Reads all levels present in a DDS file.
@@ -141,7 +150,7 @@ mod tests {
         let img = crate::synth::foliage(8);
         let mut o = EncodeOptions::new(Format::Bc7);
         o.effort = 0;
-        let good = write(&pipeline::encode(&img, &o).0);
+        let good = write(&pipeline::encode(&img, &o).0).unwrap();
         let set =
             |b: &mut [u8], dword: usize, v: u32| b[4 + 4 * dword..8 + 4 * dword].copy_from_slice(&v.to_le_bytes());
         // A 2^32-1 square: the level size overflows usize arithmetic.
@@ -165,7 +174,11 @@ mod tests {
             let mut o = EncodeOptions::new(format);
             o.effort = 0;
             let (tex, _) = pipeline::encode(&img, &o);
-            let back = read(&write(&tex)).unwrap();
+            if format.is_etc() {
+                assert!(write(&tex).is_err(), "{format}");
+                continue;
+            }
+            let back = read(&write(&tex).unwrap()).unwrap();
             assert_eq!(back, tex, "{format}");
         }
     }

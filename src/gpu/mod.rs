@@ -135,6 +135,7 @@ impl Gpu {
         let _ = opts;
         match format {
             Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc5 | Format::Bc6h | Format::Bc7 => false,
+            Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
         }
     }
 
@@ -207,6 +208,7 @@ impl Gpu {
                 Format::Bc7 => self.dev.bc7(surfaces, opts).await,
                 // No kernel: `encodes` is false.
                 Format::Bc3 | Format::Bc6h => None,
+                Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => None,
             }
         }
         #[cfg(not(feature = "gpu"))]
@@ -735,6 +737,7 @@ mod tests {
                             crate::bc7::fast_cfg(opts).expect("plain BC7 has a fast configuration"),
                             opts,
                         ),
+                        other => unreachable!("{other} has no GPU kernel"),
                     };
                     let got = gpu.encode_surface(&surf, format, opts).expect("GPU encode failed");
                     assert_eq!(got.len(), cpu.len(), "{format} e{effort} {name}");

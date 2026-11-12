@@ -105,6 +105,15 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   single stage is worth 2×. As with BC6H, matching ISPC needs work across blocks or across
   texels in SIMD.
 
+## ETC2 / EAC
+
+Measured on the first 8 Kodak images (ETC2 RGBA: the twelve RGBA images of BENCHMARKS.md), effort 5,
+λ 0.5, 1 and 2.
+
+- **Field-swap refinement for ETC2 RGB.** `--refine-back 256` against 0 is even: sizes within 0.2% and
+  PSNR within 0.02 dB at each λ, so it is off by default. It stays on for ETC2 RGBA, where the alpha half
+  gains (1.2-1.7% smaller for 0.02-0.05 dB), and for EAC (RG11 2-4% smaller for 0.04-0.16 dB).
+
 ## Engineering
 
 - **Closures in `#[target_feature]` kernels.** A closure, including one inside `array::from_fn`,

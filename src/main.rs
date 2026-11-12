@@ -14,7 +14,7 @@ use std::time::Instant;
 #[command(
     name = "mipple",
     version,
-    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC6H/BC7 → KTX2)"
+    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC6H/BC7, ETC2/EAC → KTX2)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -88,8 +88,8 @@ enum Cmd {
 
 #[derive(Args, Clone)]
 struct RdoArgs {
-    /// LZ window the rate model searches, in bytes [default: 16384 for BC7, 8192 for BC1/BC3, 3072
-    /// for BC5, 2048 for BC4].
+    /// LZ window the rate model searches, in bytes [default: 16384 for BC7, 8192 for BC1/BC3/ETC2,
+    /// 3072 for BC5/EAC RG11, 2048 for BC4/EAC R11].
     #[arg(long)]
     window: Option<usize>,
     /// Previous blocks to try copying from (also capped by --window) [default: 128 for BC4/BC5
@@ -97,12 +97,12 @@ struct RdoArgs {
     #[arg(long)]
     max_back: Option<usize>,
     /// Nearest previous blocks to also try partial byte-span copies from [default: 8 for BC1/BC4,
-    /// 0 for BC3/BC5/BC7].
+    /// 0 otherwise].
     #[arg(long)]
     span_back: Option<usize>,
     /// Previous blocks whose single fields are tried in the chosen block after the search
-    /// (0 disables) [default: 256 for BC1/BC3/BC4/BC7, 0 for
-    /// BC5].
+    /// (0 disables) [default: 256 for BC1/BC3/BC4/BC7, ETC2 RGBA and EAC, 0 for BC5 and ETC2
+    /// RGB].
     #[arg(long)]
     refine_back: Option<usize>,
     /// Beyond --max-back, earlier blocks whose endpoints are tried re-indexed, each distinct pair
@@ -570,7 +570,7 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let zstd = (a.zstd > 0).then_some(a.zstd);
     let sc_params = format!("--format bc6h --effort {} --zstd {}", a.effort, a.zstd);
     let bytes = if is_dds {
-        dds::write(&tex)
+        dds::write(&tex)?
     } else {
         ktx2::write(&tex, zstd, Some(&sc_params), a.prep)?
     };
@@ -615,6 +615,12 @@ fn encode(a: EncodeArgs) -> Result<()> {
     if a.format == Format::Bc6h {
         return encode_bc6h(&a);
     }
+    if a.format.is_etc() && a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds")) {
+        bail!(
+            "DDS has no {} format (DXGI lacks ETC2 and EAC); write KTX2 instead",
+            a.format
+        );
+    }
     let surface = Surface::load(&a.input)?;
     let mut opts = EncodeOptions::new(a.format);
     opts.effort = a.effort;
@@ -657,7 +663,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
     );
     let is_dds = a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds"));
     let bytes = if is_dds {
-        dds::write(&tex)
+        dds::write(&tex)?
     } else {
         ktx2::write(&tex, zstd, Some(&sc_params), a.prep)?
     };

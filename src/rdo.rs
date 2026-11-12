@@ -16,6 +16,8 @@
 use crate::bc1;
 use crate::bc4;
 use crate::bc7;
+use crate::eac;
+use crate::etc;
 use crate::format::Format;
 use crate::ranker::bc4::{Rank1, RankSrc1};
 use crate::ranker::bc5::{RankBlock, RankSrc};
@@ -141,9 +143,9 @@ impl RdoParams {
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
             Format::Bc6h | Format::Bc7 => 16 * 1024,
-            Format::Bc1 | Format::Bc3 => 8 * 1024,
-            Format::Bc5 => 3072,
-            Format::Bc4 => 2048,
+            Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba => 8 * 1024,
+            Format::Bc5 | Format::EacRg11 => 3072,
+            Format::Bc4 | Format::EacR11 => 2048,
         })
     }
 
@@ -162,11 +164,12 @@ impl RdoParams {
     }
 
     /// Partial-span distance: 8 for BC1/BC4, off for BC5 and BC7, where spans almost never win
-    /// (Kodak-24 BD-rate +0.00% and +0.02% without them, for 11% and 7% less time).
+    /// (Kodak-24 BD-rate +0.00% and +0.02% without them, for 11% and 7% less time), and off for
+    /// ETC2/EAC, which have no span candidates.
     pub fn span_back_for(&self, format: Format) -> usize {
         self.span_back.unwrap_or(match format {
-            Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 => 0,
-            _ => 8,
+            Format::Bc1 | Format::Bc4 => 8,
+            _ => 0,
         })
     }
 
@@ -197,11 +200,13 @@ impl RdoParams {
     /// Field-swap refinement depth: by default 256 for BC1/BC4/BC7 (Kodak-24 BD-rate −1.0% /
     /// −0.4% / −0.1%; for BC7 it also trims 0.3-0.9 points off the equal-RMSE gap to Oodle at
     /// λ 10-40, for 1.07× the time), off for BC5 (−0.2% at depth 32, −0.3% at 256, but BC5 RDO
-    /// has no time to spare against bc7enc_rdo).
+    /// has no time to spare against bc7enc_rdo). For EAC 256 (RG11 Kodak-8: 2-4% smaller at
+    /// λ 0.5-2 for 0.04-0.16 dB), off for ETC2 RGB (Kodak-8: even, so not worth its time).
     pub fn refine_back_for(&self, format: Format) -> usize {
         self.refine_back.unwrap_or(match format {
             Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc7 => 256,
-            Format::Bc5 | Format::Bc6h => 0,
+            Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
+            Format::Bc5 | Format::Bc6h | Format::Etc2Rgb => 0,
         })
     }
 
@@ -909,6 +914,57 @@ fn candidates(
         // No candidates: BC6H errors are not on the 8-bit scale, and the pipeline never runs this
         // RDO for it.
         Format::Bc6h => {}
+        Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => {
+            // Per 8-byte half, with base's other half: ETC2 color takes prev's colors with the
+            // selectors re-chosen and prev's selectors with base's mode refit; EAC takes prev's
+            // base, multiplier and table re-indexed and prev's indices refit. Each is memoized by
+            // the field's value; two-half formats also copy each half whole.
+            let parts: &[(usize, Option<usize>)] = match format {
+                Format::Etc2Rgb => &[(0, None)],
+                Format::Etc2Rgba => &[(0, Some(3)), (8, None)],
+                Format::EacR11 => &[(0, Some(0))],
+                _ => &[(0, Some(0)), (8, Some(1))],
+            };
+            let eleven = matches!(format, Format::EacR11 | Format::EacRg11);
+            for (h, &(o, chan)) in parts.iter().enumerate() {
+                let r = o..o + 8;
+                let tag = (h as u64) << 56;
+                let mut push = |val: &[u8]| {
+                    let mut c = *base;
+                    c[o..o + 8].copy_from_slice(val);
+                    if c != *base {
+                        out.push((c, UNKNOWN));
+                    }
+                };
+                if parts.len() > 1 && fields.halves[h].insert(field_key(&prev[r.clone()])) {
+                    push(&prev[r.clone()]);
+                }
+                match chan {
+                    None => {
+                        if fields.endpoints.insert(tag | field_key(&prev[o..o + 4]))
+                            && let Some(v) = etc::reselect(&prev[r.clone()], src, w)
+                        {
+                            push(&v);
+                        }
+                        if etc::mode(&prev[r.clone()]) != etc::Mode::Planar
+                            && fields.indices.insert(tag | field_key(&prev[o + 4..o + 8]))
+                            && let Some(v) = etc::refit_selectors(&base[r.clone()], &prev[o + 4..o + 8], src)
+                        {
+                            push(&v);
+                        }
+                    }
+                    Some(c) => {
+                        let v = bc4::channel(src, c);
+                        if fields.endpoints.insert(tag | field_key(&prev[o..o + 2])) {
+                            push(&eac::reindex(&prev[r.clone()], &v, eleven));
+                        }
+                        if fields.indices.insert(tag | field_key(&prev[o + 2..o + 8])) {
+                            push(&eac::refit(&prev[o + 2..o + 8], &v, eleven));
+                        }
+                    }
+                }
+            }
+        }
         Format::Bc7 => {
             // Far back-references get only the endpoints re-indexed besides the whole-block copy
             // and the index copy below: the raw endpoint copy and the spans rarely win there
@@ -1786,6 +1842,7 @@ fn optimize_chunk(
         Format::Bc4 => w[1..] == [0, 0, 0],
         Format::Bc5 => w[2..] == [0, 0],
         Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
+        Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
     } && far_back > max_back;
     let mut far = FarEndpoints::new(format, if far_on { blocks.len() } else { 0 }, w);
     // Localized search (BC5's two channels): beyond the nearest `max_back` blocks, shape
@@ -2187,6 +2244,10 @@ fn optimize_chunk(
                 // Mode 6 (most RDO output): mode, endpoints and P0; then P1 and the indices.
                 Format::Bc7 => &[(0, 8), (8, 16)],
                 Format::Bc6h => &[(0, 16)],
+                Format::Etc2Rgb => &[(0, 4), (4, 8)],
+                Format::Etc2Rgba => &[(0, 2), (2, 8), (8, 12), (12, 16)],
+                Format::EacR11 => &[(0, 2), (2, 8)],
+                Format::EacRg11 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
             };
             let cur = best.1;
             // Each candidate changes one field, so for BC5 it keeps one half of `cur`.

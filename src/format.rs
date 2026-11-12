@@ -1,7 +1,7 @@
 //! Output format dispatch.
 
 use crate::surface::Block;
-use crate::{bc1, bc3, bc4, bc6h, bc7};
+use crate::{bc1, bc3, bc4, bc6h, bc7, eac, etc};
 
 /// When to use entropy-reduced base encoding ([`BlockOpts::reduce_entropy`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,16 +90,28 @@ pub enum Format {
     Bc6h,
     /// 8 bpp RGB/RGBA, highest quality.
     Bc7,
+    /// 4 bpp RGB for mobile (OpenGL ES 3 / Vulkan baseline): ETC1 modes plus T, H and planar.
+    Etc2Rgb,
+    /// 8 bpp RGBA for mobile: an EAC alpha block plus ETC2 RGB (the BC3 analogue).
+    Etc2Rgba,
+    /// 4 bpp single channel for mobile, 11-bit (the BC4 analogue).
+    EacR11,
+    /// 8 bpp two channels for mobile, 11-bit (the BC5 analogue: normals).
+    EacRg11,
 }
 
 impl Format {
-    pub const ALL: [Format; 6] = [
+    pub const ALL: [Format; 10] = [
         Format::Bc1,
         Format::Bc3,
         Format::Bc4,
         Format::Bc5,
         Format::Bc6h,
         Format::Bc7,
+        Format::Etc2Rgb,
+        Format::Etc2Rgba,
+        Format::EacR11,
+        Format::EacRg11,
     ];
 
     pub fn name(self) -> &'static str {
@@ -110,14 +122,26 @@ impl Format {
             Format::Bc5 => "bc5",
             Format::Bc6h => "bc6h",
             Format::Bc7 => "bc7",
+            Format::Etc2Rgb => "etc2-rgb",
+            Format::Etc2Rgba => "etc2-rgba",
+            Format::EacR11 => "eac-r11",
+            Format::EacRg11 => "eac-rg11",
         }
+    }
+
+    /// Whether this is an ETC2 or EAC format (mobile; no DDS container, no GPU encoder).
+    pub fn is_etc(self) -> bool {
+        matches!(
+            self,
+            Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11
+        )
     }
 
     /// Bytes per 4x4 block.
     pub fn block_bytes(self) -> usize {
         match self {
-            Format::Bc1 | Format::Bc4 => 8,
-            Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 => 16,
+            Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::EacR11 => 8,
+            Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgba | Format::EacRg11 => 16,
         }
     }
 
@@ -131,26 +155,38 @@ impl Format {
 
     /// Whether color data in this format is normally stored sRGB-encoded.
     pub fn default_srgb(self) -> bool {
-        matches!(self, Format::Bc1 | Format::Bc3 | Format::Bc7)
+        matches!(
+            self,
+            Format::Bc1 | Format::Bc3 | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba
+        )
     }
 
     /// Whether the format has an sRGB variant at all.
     pub fn supports_srgb(self) -> bool {
-        matches!(self, Format::Bc1 | Format::Bc3 | Format::Bc7)
+        matches!(
+            self,
+            Format::Bc1 | Format::Bc3 | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba
+        )
     }
 
     /// Vulkan `VkFormat` value, as stored in a KTX2 header.
     pub fn vk_format(self, srgb: bool) -> u32 {
         match (self, srgb) {
-            (Format::Bc1, false) => 131, // VK_FORMAT_BC1_RGB_UNORM_BLOCK
-            (Format::Bc1, true) => 132,  // VK_FORMAT_BC1_RGB_SRGB_BLOCK
-            (Format::Bc3, false) => 137, // VK_FORMAT_BC3_UNORM_BLOCK
-            (Format::Bc3, true) => 138,  // VK_FORMAT_BC3_SRGB_BLOCK
-            (Format::Bc4, _) => 139,     // VK_FORMAT_BC4_UNORM_BLOCK
-            (Format::Bc5, _) => 141,     // VK_FORMAT_BC5_UNORM_BLOCK
-            (Format::Bc6h, _) => 143,    // VK_FORMAT_BC6H_UFLOAT_BLOCK
-            (Format::Bc7, false) => 145, // VK_FORMAT_BC7_UNORM_BLOCK
-            (Format::Bc7, true) => 146,  // VK_FORMAT_BC7_SRGB_BLOCK
+            (Format::Bc1, false) => 131,      // VK_FORMAT_BC1_RGB_UNORM_BLOCK
+            (Format::Bc1, true) => 132,       // VK_FORMAT_BC1_RGB_SRGB_BLOCK
+            (Format::Bc3, false) => 137,      // VK_FORMAT_BC3_UNORM_BLOCK
+            (Format::Bc3, true) => 138,       // VK_FORMAT_BC3_SRGB_BLOCK
+            (Format::Bc4, _) => 139,          // VK_FORMAT_BC4_UNORM_BLOCK
+            (Format::Bc5, _) => 141,          // VK_FORMAT_BC5_UNORM_BLOCK
+            (Format::Bc6h, _) => 143,         // VK_FORMAT_BC6H_UFLOAT_BLOCK
+            (Format::Bc7, false) => 145,      // VK_FORMAT_BC7_UNORM_BLOCK
+            (Format::Bc7, true) => 146,       // VK_FORMAT_BC7_SRGB_BLOCK
+            (Format::Etc2Rgb, false) => 147,  // VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK
+            (Format::Etc2Rgb, true) => 148,   // VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK
+            (Format::Etc2Rgba, false) => 151, // VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
+            (Format::Etc2Rgba, true) => 152,  // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
+            (Format::EacR11, _) => 153,       // VK_FORMAT_EAC_R11_UNORM_BLOCK
+            (Format::EacRg11, _) => 155,      // VK_FORMAT_EAC_R11G11_UNORM_BLOCK
         }
     }
 
@@ -166,6 +202,12 @@ impl Format {
             143 => (Format::Bc6h, false),
             145 => (Format::Bc7, false),
             146 => (Format::Bc7, true),
+            147 => (Format::Etc2Rgb, false),
+            148 => (Format::Etc2Rgb, true),
+            151 => (Format::Etc2Rgba, false),
+            152 => (Format::Etc2Rgba, true),
+            153 => (Format::EacR11, false),
+            155 => (Format::EacRg11, false),
             _ => return None,
         })
     }
@@ -182,17 +224,21 @@ impl Format {
             Format::Bc5 => [1, 1, 0, 0],
             Format::Bc6h => [1, 1, 1, 0],
             Format::Bc7 => [1, 1, 1, 1],
+            Format::Etc2Rgb => [1, 1, 1, 0],
+            Format::Etc2Rgba => [1, 1, 1, 1],
+            Format::EacR11 => [1, 0, 0, 0],
+            Format::EacRg11 => [1, 1, 0, 0],
         }
     }
 
     /// Channels to score in metrics.
     pub fn metric_channels(self, has_alpha: bool) -> Vec<usize> {
         match self {
-            Format::Bc1 | Format::Bc6h => vec![0, 1, 2],
-            Format::Bc4 => vec![0],
-            Format::Bc5 => vec![0, 1],
-            Format::Bc3 | Format::Bc7 if has_alpha => vec![0, 1, 2, 3],
-            Format::Bc3 | Format::Bc7 => vec![0, 1, 2],
+            Format::Bc1 | Format::Bc6h | Format::Etc2Rgb => vec![0, 1, 2],
+            Format::Bc4 | Format::EacR11 => vec![0],
+            Format::Bc5 | Format::EacRg11 => vec![0, 1],
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba if has_alpha => vec![0, 1, 2, 3],
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => vec![0, 1, 2],
         }
     }
 
@@ -211,6 +257,13 @@ impl Format {
             }
             Format::Bc6h => out = bc6h::encode_ldr(px, effort),
             Format::Bc7 => out = bc7::encode(px, w, opts.searched()),
+            Format::Etc2Rgb => out[..8].copy_from_slice(&etc::encode_block(px, effort)),
+            Format::Etc2Rgba => out = etc::encode_block_rgba(px, effort),
+            Format::EacR11 => out[..8].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 0), effort)),
+            Format::EacRg11 => {
+                out[..8].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 0), effort));
+                out[8..].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 1), effort));
+            }
         }
         out
     }
@@ -224,6 +277,10 @@ impl Format {
             Format::Bc5 => bc4::decode_bc5(raw, out),
             Format::Bc6h => bc6h::decode_ldr(raw, out),
             Format::Bc7 => bc7::decode(raw, out),
+            Format::Etc2Rgb => etc::decode(raw, out),
+            Format::Etc2Rgba => etc::decode_rgba(raw, out),
+            Format::EacR11 => eac::decode_r11_block(raw, out),
+            Format::EacRg11 => eac::decode_rg11_block(raw, out),
         }
     }
 }
@@ -240,6 +297,6 @@ impl std::str::FromStr for Format {
         Format::ALL
             .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h or bc7)"))
+            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11 or eac-rg11)"))
     }
 }

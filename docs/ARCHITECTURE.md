@@ -29,6 +29,8 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | `src/bc7/mod.rs` | BC7: full 8-mode unpack/pack/decode; scalar encoder for every mode (all efforts; reference) |
 | `src/bc7/partition.rs` | Line fits of 8 partitions per SIMD step (one block), for partition ranking and pruning |
 | `src/bc7/batch.rs` | Batch encoder for entropy-reduced (RDO base) search levels 0-1, 8 opaque blocks at once, one per lane |
+| `src/etc.rs` | ETC2 RGB decoder and encoder (individual, differential, T, H and planar modes), RDO helpers (re-select, selector refit) |
+| `src/eac.rs` | EAC decoder and encoder: the ETC2 RGBA8 alpha half and EAC R11 / RG11 (unsigned), RDO helpers (re-index, refit) |
 | `src/format.rs` | `Format` enum (block size, vkFormat, error weights, encode/decode dispatch) and `BlockOpts` |
 | `src/rdo.rs` | The RDO pass and `LzModel` rate estimator |
 | `src/ranker/` | Learned rankers (small MLPs, CC0 Poly Haven training) for the localized RD search: `bc4.rs`, `bc5.rs`, `bc7.rs` |
@@ -82,6 +84,20 @@ still beat some lane's best. Effort 4+ adds greedy ±1 endpoint moves under the 
 second round sorted along the best endpoints' direction and exact evaluation of the best few splits. Every
 candidate is kept per lane only when its exact error is lower. The scalar encoder (`bc1::encode`) remains as
 the reference.
+
+**ETC2 RGB** (`etc.rs`, scalar, one block at a time): every mode is tried and the lowest squared RGB error
+wins. ETC1 (both flips, individual 444 and differential 555): a subblock's unclamped error splits into a
+chroma term (how far the base color is from the subblock mean, off the gray axis) and a luma term that
+depends only on the base's channel sum and the table, so lattice colors in a box around the mean are ranked
+with one luma table per distinct sum and only the best few (2 at effort 0, 20 at effort 9) are scored
+exactly, with clamping; differential pairs come from both subblocks' lists plus projections into the ±4
+delta window, then least-squares refits of the chosen bases. T and H (effort 1+): two clusters from
+principal-axis splits, colors from the cluster means, every distance, then alternating reassignment and
+refit and, from effort 4, a ±1 descent on the 444 colors. Planar: a least-squares plane per channel and a
+search of its quantized neighborhood, each channel on its own. **EAC** (`eac.rs`, the ETC2 RGBA8 alpha half
+and R11/RG11): per table, the base and multiplier that span the block's range, a window around them, then
+least-squares refits of (base, multiplier) to the chosen entries; 11-bit blocks are scored against the
+8-bit source scaled to 11 bits with two fractional bits. No GPU kernel and no DDS (DXGI has no ETC formats).
 
 **BC4/BC5** (`bc4/batch.rs`): eight blocks per SIMD batch, one per lane, read straight from the surface (eight
 blocks of a block row are four 32-texel loads per row and a 4×4 transpose; no intermediate blocks), written as
@@ -224,7 +240,7 @@ first. Supercompressed files use scheme 2 (Zstandard, one frame per level) and a
 
 | Test | What it proves |
 | --- | --- |
-| `tests/cross_decode.rs` | Every block we encode (all formats; efforts 0, 1 and 2, and effort 1 with entropy reduction, so both BC7 encoders) decodes identically in the independent `texture2ddecoder` crate; our BC7 decoder (including the mode-6 fast path) matches it on 16,000 random blocks across all 8 modes; entropy-reduced mode-6 blocks use only the 64 allowed levels, the right p-bits, and keep opaque blocks at alpha 255 |
+| `tests/cross_decode.rs` | Every block we encode (all formats; efforts 0, 1 and 2, and effort 1 with entropy reduction, so both BC7 encoders) decodes identically in the independent `texture2ddecoder` crate; our BC7 decoder (including the mode-6 fast path) matches it on 16,000 random blocks across all 8 modes; the ETC2 RGB and RGBA8 decoders match it on 40,000 random blocks covering all five modes, and the EAC decoders match a separate transcription of the spec (`texture2ddecoder`'s EAC R11 departs from it); entropy-reduced mode-6 blocks use only the 64 allowed levels, the right p-bits, and keep opaque blocks at alpha 255 |
 | `tests/ktx2_container.rs` | Files round-trip through our reader; the `ktx2` crate parses header, levels, DFD and writer string; DFD equals the crate's generator; mips are smallest-first and aligned |
 | `tests/alpha.rs` | Alpha as transparency on a foliage cutout: at least 20% smaller, visible texels no worse, no hidden colour in the mips |
 | `tests/quality.rs` | PSNR floors per format; effort 3 never worse than effort 0; RDO never grows real Zstd size, λ = 0 is a no-op, and the per-block error cap holds |

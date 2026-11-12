@@ -533,6 +533,73 @@ fast and 13% faster. Effort 2 is ahead of ISPC basic at half of basic's time, an
 3.6 s. Only ISPC veryfast is faster, at 1.9 dB lower quality. Zstd sizes are within 0.5% of each other
 for every encoder at this quality (BC6H has no RDO yet).
 
+## ETC2 and EAC vs Compressonator
+
+ETC2 RGB on all 24 Kodak images, one thread for every encoder, top level only, `python scripts/compete_etc.py
+test-images/kodak --threads 1`. Compressonator 4.6.0 (`-fd ETC2_RGB`; `-Quality` and `-CompressionSpeed`
+change nothing on its ETC2 path) is the only ETC2 encoder on disk: etcpak and etc2comp could not be built
+here, so they are not graded. PSNR is over RGB, bits/texel after Zstd-19, and time is the total over the 24
+images (mipple's encode loop; process wall time for Compressonator, which includes loading and writing):
+
+| encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
+| --- | ---: | ---: | ---: | ---: |
+| mipple effort 0 | 37.074 | 0.97850 | 3.056 | 4.4 |
+| mipple effort 1 | 37.640 | 0.98090 | 3.066 | 18.2 |
+| mipple effort 2 | 37.660 | 0.98091 | 3.068 | 20.7 |
+| mipple effort 3 | 37.697 | 0.98096 | 3.071 | 31.2 |
+| mipple effort 5 | 37.728 | 0.98099 | 3.073 | 43.1 |
+| mipple effort 7 | 37.756 | 0.98102 | 3.079 | 77.1 |
+| mipple effort 9 | 37.776 | 0.98104 | 3.081 | 131 |
+| Compressonator | 36.700 | 0.98103 | 3.013 | 33.6 |
+
+Effort 0 (ETC1 modes and planar only, two exact candidates per subblock) is 0.37 dB ahead of Compressonator
+in an eighth of its time; effort 1 adds T and H and is 0.94 dB ahead in half its time. Compressonator's blocks
+are 1.4% smaller after Zstd at λ = 0, which the RDO pass more than recovers (below).
+
+ETC2 RGBA8 on the twelve RGBA images of the BC3 section (Kodak 1, 3, 5, 13, 18 and 23 with luma and radial
+alpha), `--alpha data`, one thread, RGBA PSNR:
+
+| encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
+| --- | ---: | ---: | ---: | ---: |
+| mipple effort 0 | 37.254 | 0.97968 | 5.898 | 3.3 |
+| mipple effort 1 | 37.818 | 0.98184 | 5.905 | 12.8 |
+| mipple effort 5 | 37.903 | 0.98195 | 5.909 | 26.0 |
+| mipple effort 9 | 37.951 | 0.98201 | 5.916 | 73.4 |
+| Compressonator | 36.793 | 0.98154 | 5.339 | 20.7 |
+
+Here Compressonator's files are 10% smaller at λ = 0: mipple's alpha blocks are closer (radial alpha comes
+out exact, against 50 dB) but pick their table and multiplier per block, which Zstd finds less repetitive.
+
+RDO (effort 5, all threads, same images and scoring):
+
+| λ | ETC2 RGB PSNR | ETC2 RGB bpt | ETC2 RGBA PSNR | ETC2 RGBA bpt |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 37.728 | 3.073 | 37.903 | 5.909 |
+| 0.25 | 37.718 | 2.989 | 37.821 | 5.238 |
+| 0.5 | 37.675 | 2.882 | 37.713 | 4.948 |
+| 1 | 37.545 | 2.703 | 37.478 | 4.600 |
+| 2 | 37.225 | 2.479 | 36.988 | 4.188 |
+| 4 | 36.497 | 2.174 | 36.053 | 3.693 |
+| Compressonator | 36.700 | 3.013 | 36.793 | 5.339 |
+
+At Compressonator's PSNR, mipple's files are about 25% smaller for ETC2 RGB and 23% smaller for ETC2 RGBA
+(interpolating between λ 2 and 4); at λ 0.5 ETC2 RGB is 4% smaller and 1 dB closer. The RDO candidates per
+8-byte half are whole-block and whole-half copies, another block's colors with the selectors re-chosen,
+another block's selectors with the base colors and tables refit (individual and differential blocks), and for
+EAC another block's base, multiplier and table re-indexed or its indices refit. The RDO pass takes about 1.7 s
+per Kodak image on all threads (a machine shared with other builds), several times BC1's: ETC candidates are
+scored by a full decode.
+
+EAC R11 and RG11 have no competitor on disk (Compressonator has no EAC-only formats). On Kodak, one thread,
+R11 from the red channel and RG11 from red and green, PSNR over those channels:
+
+| encoder | R11 PSNR | R11 bpt | R11 s | RG11 PSNR | RG11 bpt | RG11 s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| mipple effort 0 | 44.412 | 3.694 | 2.2 | 44.372 | 7.114 | 4.0 |
+| mipple effort 2 | 45.011 | 3.694 | 8.4 | 44.974 | 7.130 | 15.7 |
+| mipple effort 5 | 45.106 | 3.698 | 13.2 | 45.066 | 7.138 | 25.1 |
+| mipple effort 9 | 45.208 | 3.701 | 23.2 | 45.167 | 7.157 | 47.2 |
+
 ## Lossless field split (`--prep`)
 
 `src/prep.rs` applies a BC7Prep-style lossless transform before Zstd: blocks are split into byte streams of

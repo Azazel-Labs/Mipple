@@ -87,9 +87,9 @@ impl EncodeOptions {
     }
 
     /// Whether alpha is treated as transparency ([`Self::alpha`]): only for formats that keep
-    /// alpha (BC3, BC7) and never for normal maps.
+    /// alpha (BC3, BC7, ETC2 RGBA8) and never for normal maps.
     pub fn alpha_transparency(&self) -> bool {
-        matches!(self.format, Format::Bc3 | Format::Bc7)
+        matches!(self.format, Format::Bc3 | Format::Bc7 | Format::Etc2Rgba)
             && !self.normal_map
             && match self.alpha {
                 AlphaMode::Auto => self.srgb,
@@ -246,6 +246,10 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
         Format::Bc6h => crate::bc6h::encode_surface_ldr(surface, opts.effort),
         Format::Bc4 => crate::bc4::encode_surface(surface, 1, opts.effort),
         Format::Bc5 => crate::bc4::encode_surface(surface, 2, opts.effort),
+        Format::Etc2Rgb => crate::etc::encode_surface(surface, opts.effort),
+        Format::Etc2Rgba => crate::etc::encode_surface_rgba(surface, opts.effort),
+        Format::EacR11 => crate::eac::encode_surface(surface, (0, 1), true, opts.effort),
+        Format::EacRg11 => crate::eac::encode_surface(surface, (0, 2), true, opts.effort),
         Format::Bc7 => crate::bc7::fast::encode_surface(
             surface,
             crate::bc7::fast_cfg(opts).expect("BC7 direct path without a fast configuration"),

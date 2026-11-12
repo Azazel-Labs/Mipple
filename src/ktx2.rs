@@ -1,6 +1,6 @@
 //! Minimal KTX 2.0 writer and reader for block-compressed 2D textures.
 //!
-//! Supports BC1/BC4/BC5/BC7, full mip chains, and supercompression scheme 0 (none) or
+//! Supports every [`Format`] (BCn, ETC2, EAC), full mip chains, and supercompression scheme 0 (none) or
 //! 2 (Zstandard). Layout follows the KTX 2.0 specification:
 //!
 //! ```text
@@ -25,12 +25,13 @@ const LEVEL_ENTRY_LEN: usize = 24;
 /// KHR_DF color model for each format.
 fn color_model(format: Format) -> u8 {
     match format {
-        Format::Bc1 => 128,  // KHR_DF_MODEL_BC1A
-        Format::Bc3 => 130,  // KHR_DF_MODEL_BC3
-        Format::Bc4 => 131,  // KHR_DF_MODEL_BC4
-        Format::Bc5 => 132,  // KHR_DF_MODEL_BC5
-        Format::Bc6h => 133, // KHR_DF_MODEL_BC6H
-        Format::Bc7 => 134,  // KHR_DF_MODEL_BC7
+        Format::Bc1 => 128,                                                           // KHR_DF_MODEL_BC1A
+        Format::Bc3 => 130,                                                           // KHR_DF_MODEL_BC3
+        Format::Bc4 => 131,                                                           // KHR_DF_MODEL_BC4
+        Format::Bc5 => 132,                                                           // KHR_DF_MODEL_BC5
+        Format::Bc6h => 133,                                                          // KHR_DF_MODEL_BC6H
+        Format::Bc7 => 134,                                                           // KHR_DF_MODEL_BC7
+        Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 161, // KHR_DF_MODEL_ETC2
     }
 }
 
@@ -47,6 +48,14 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         // KHR_DF_SAMPLE_DATATYPE_FLOAT; unsigned.
         Format::Bc6h => &[(0, 127, 0x80)],
         Format::Bc7 => &[(0, 127, 0)],
+        // KHR_DF_CHANNEL_ETC2_COLOR.
+        Format::Etc2Rgb => &[(0, 63, 2)],
+        // KHR_DF_CHANNEL_ETC2_ALPHA (linear even in an sRGB texture), then color.
+        Format::Etc2Rgba if srgb => &[(0, 63, 15 | 0x10), (64, 63, 2)],
+        Format::Etc2Rgba => &[(0, 63, 15), (64, 63, 2)],
+        // KHR_DF_CHANNEL_ETC2_RED and _GREEN.
+        Format::EacR11 => &[(0, 63, 0)],
+        Format::EacRg11 => &[(0, 63, 0), (64, 63, 1)],
     };
     let block_size = 24 + 16 * samples.len();
     let mut v = Vec::with_capacity(4 + block_size);

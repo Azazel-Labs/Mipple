@@ -8,6 +8,9 @@
 //! * BC1: color0 bytes, color1 bytes (each as low-byte plane then high-byte plane), selector bytes.
 //! * BC4 / BC5: per channel, endpoint 0 bytes, endpoint 1 bytes, then the 6 index bytes.
 //! * BC3: the BC4 streams of the alpha halves, then the BC1 streams of the color halves.
+//! * ETC2 RGB, EAC R11 / RG11, ETC2 RGBA8: the BC1, BC4 / BC5 and BC3 splits, which fit their
+//!   layouts (four header bytes then four selector bytes; base and multiplier/table bytes then
+//!   six index bytes).
 //! * BC7: mode byte per block (8 = invalid block, stored raw in the escape stream); shape byte
 //!   (partition, or rotation + index selection); endpoint channels one per byte (with the p-bit
 //!   folded in as the low bit for modes with a p-bit per endpoint); shared p-bits (mode 1); index
@@ -21,10 +24,10 @@ use crate::format::Format;
 /// Splits `raw` blocks of `format` into field streams.
 pub fn forward(format: Format, raw: &[u8]) -> Vec<u8> {
     let streams = match format {
-        Format::Bc1 => split_bc1(raw),
-        Format::Bc3 => split_bc3(raw),
-        Format::Bc4 => split_bc4(raw, 1),
-        Format::Bc5 => split_bc4(raw, 2),
+        Format::Bc1 | Format::Etc2Rgb => split_bc1(raw),
+        Format::Bc3 | Format::Etc2Rgba => split_bc3(raw),
+        Format::Bc4 | Format::EacR11 => split_bc4(raw, 1),
+        Format::Bc5 | Format::EacRg11 => split_bc4(raw, 2),
         // No field split yet: one stream of whole blocks.
         Format::Bc6h => vec![raw.to_vec()],
         Format::Bc7 => split_bc7(raw),
@@ -48,10 +51,10 @@ pub fn max_len(raw_len: usize) -> usize {
 /// Restores the blocks of `forward(format, raw)`; `None` if `data` is malformed.
 pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
     let n = match format {
-        Format::Bc1 => 5,
-        Format::Bc3 => 8,
-        Format::Bc4 => 3,
-        Format::Bc5 => 6,
+        Format::Bc1 | Format::Etc2Rgb => 5,
+        Format::Bc3 | Format::Etc2Rgba => 8,
+        Format::Bc4 | Format::EacR11 => 3,
+        Format::Bc5 | Format::EacRg11 => 6,
         Format::Bc6h => 1,
         Format::Bc7 => 6,
     };
@@ -70,10 +73,10 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     match format {
-        Format::Bc1 => join_bc1(&streams),
-        Format::Bc3 => join_bc3(&streams),
-        Format::Bc4 => join_bc4(&streams, 1),
-        Format::Bc5 => join_bc4(&streams, 2),
+        Format::Bc1 | Format::Etc2Rgb => join_bc1(&streams),
+        Format::Bc3 | Format::Etc2Rgba => join_bc3(&streams),
+        Format::Bc4 | Format::EacR11 => join_bc4(&streams, 1),
+        Format::Bc5 | Format::EacRg11 => join_bc4(&streams, 2),
         Format::Bc6h => Some(streams[0].to_vec()).filter(|s| s.len() % 16 == 0),
         Format::Bc7 => join_bc7(&streams),
     }

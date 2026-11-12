@@ -7,7 +7,8 @@
 //!                                                                           \-> benchmark harness
 //! ```
 //!
-//! Covers BC1, BC4, BC5 and BC7 (every mode encoded and decoded),
+//! Covers BC1, BC3, BC4, BC5, BC6H and BC7 (every mode encoded and decoded), ETC2 RGB/RGBA8 and
+//! EAC R11/RG11 for mobile,
 //! a byte-level LZ rate model shared by every format, and a KTX2 writer/reader.
 
 pub mod alpha;
@@ -21,6 +22,8 @@ pub mod bench;
 pub mod check;
 pub mod color;
 pub mod dds;
+pub mod eac;
+pub mod etc;
 mod exact;
 pub mod fit;
 pub mod format;

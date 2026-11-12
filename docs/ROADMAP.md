@@ -8,7 +8,8 @@ milestone in progress; every green push to main is released as the next patch (`
 
 1. **ASTC LDR (4x4, 6x6, 8x8)** output, with the same RDO pass (v1.0 below).
 2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
-3. ETC2 / EAC for mobile fallbacks.
+3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
+   signed EAC, a SIMD batch encoder.
 
 ## v0.1 (pre-release): encoder and container
 
@@ -127,7 +128,12 @@ Open for v0.9.x:
     and 13% faster. The mode estimates still run one lane at a time.
   - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
 - [ ] **ASTC LDR (4x4, 6x6, 8x8)** output, with the same RDO pass. Next up.
-- [ ] ETC2 / EAC for mobile fallbacks.
+- [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
+  KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
+  eighth of its time and effort 1 0.94 dB ahead in half; with RDO, files are about 25% smaller at
+  Compressonator's PSNR (BENCHMARKS.md). etcpak and etc2comp were not available to grade.
+  - [ ] Punch-through alpha (ETC2 RGB A1, vkFormat 149/150), signed EAC, a SIMD batch encoder (eight blocks
+    per call, as BC1/BC6H), a GPU kernel, and a cheaper RDO candidate error than a full decode.
 
 ## v1.1: perception and speed
 

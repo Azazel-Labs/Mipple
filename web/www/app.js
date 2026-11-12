@@ -17,6 +17,8 @@ const FORMAT_NOTES = {
   bc3: "8 bits/texel · RGB plus a separate alpha channel · albedo with smooth alpha",
   bc4: "4 bits/texel · one channel (R, shown as gray) · roughness, masks, height",
   bc5: "8 bits/texel · two channels (R, G) · tangent-space normal maps",
+  "etc2-rgb": "4 bits/texel · RGB, opaque · the mobile (OpenGL ES 3, Vulkan) counterpart of BC1",
+  "etc2-rgba": "8 bits/texel · ETC2 RGB plus an EAC alpha channel · the mobile counterpart of BC3",
   bc7: "8 bits/texel · RGB or RGBA · best color quality. With RDO (λ > 0) it runs the effort-8 search first, which takes tens of seconds per 512² image in the browser",
 };
 

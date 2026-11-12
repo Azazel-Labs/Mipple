@@ -14,6 +14,10 @@ fn channels(format: Format) -> &'static [usize] {
         Format::Bc5 => &[0, 1],
         Format::Bc6h => &[],
         Format::Bc3 | Format::Bc7 => &[0, 1, 2, 3],
+        Format::Etc2Rgb => &[0, 1, 2],
+        Format::Etc2Rgba => &[0, 1, 2, 3],
+        Format::EacR11 => &[0],
+        Format::EacRg11 => &[0, 1],
     }
 }
 
@@ -45,6 +49,43 @@ fn encoded_blocks_match_reference_decoder() {
             }
         }
     }
+}
+
+/// Every ETC2 mode (individual, differential, T, H, planar) and EAC alpha on arbitrary bits, against
+/// `texture2ddecoder`; EAC R11 against the spec transcription in `common`.
+#[test]
+fn etc2_and_eac_decoders_match_reference_on_random_blocks() {
+    let mut seed = 0x51_7cc1_b727_220au64;
+    let mut ours = [[0u8; 4]; 16];
+    let mut modes = std::collections::HashSet::new();
+    for i in 0..40000u64 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let mut raw = [0u8; 16];
+        raw[..8].copy_from_slice(&seed.to_le_bytes());
+        raw[8..].copy_from_slice(&seed.rotate_left(23).wrapping_mul(i | 1).to_le_bytes());
+        if i % 5 == 0 {
+            raw[1] &= 0x0f; // EAC multiplier 0
+        }
+        modes.insert(format!("{:?}", mipple::etc::mode(&raw[8..])));
+        for format in [Format::Etc2Rgb, Format::Etc2Rgba, Format::EacR11, Format::EacRg11] {
+            let n = format.block_bytes();
+            let raw = if format == Format::Etc2Rgb {
+                &raw[8..]
+            } else {
+                &raw[..n]
+            };
+            format.decode_block(raw, &mut ours);
+            let theirs = reference_decode(format, raw);
+            for t in 0..16 {
+                for &c in channels(format) {
+                    assert_eq!(ours[t][c], theirs[t][c], "{format} texel {t} ch {c} raw {raw:02x?}");
+                }
+            }
+        }
+    }
+    assert_eq!(modes.len(), 5, "{modes:?}");
 }
 
 #[test]

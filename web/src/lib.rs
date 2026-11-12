@@ -138,7 +138,7 @@ pub struct Settings {
 
 #[wasm_bindgen]
 impl Settings {
-    /// `mipple encode` defaults for `format` (bc1, bc3, bc4, bc5, bc7) and BC7 `entropy` (off, on, auto).
+    /// `mipple encode` defaults for `format` (bc1, bc3, bc4, bc5, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11) and BC7 `entropy` (off, on, auto).
     #[wasm_bindgen(constructor)]
     pub fn new(format: &str, entropy: &str) -> Result<Settings, JsError> {
         Self::parse(format, entropy).map_err(|e| js_error(&e))
@@ -271,7 +271,7 @@ pub struct Encoded {
     /// Level 0 RMS error over the same channels, in 8-bit steps.
     #[wasm_bindgen(readonly)]
     pub rmse: f64,
-    /// Level 0 SSIM: luma for BC1/BC3/BC7, R for BC4, mean of R and G for BC5 (as `mipple score`).
+    /// Level 0 SSIM: luma for BC1/BC3/BC7/ETC2, R for BC4/EAC R11, mean of R and G for BC5/EAC RG11 (as `mipple score`).
     #[wasm_bindgen(readonly)]
     pub ssim: f64,
     /// Mean normal angular error in degrees (normal maps only, otherwise NaN).
@@ -469,18 +469,20 @@ async fn run(surface: &Surface, s: &Settings, gpu: Option<&'static Gpu>) -> Resu
     })
 }
 
-/// What a format stores, as RGBA8 for display: BC1 and BC6H opaque RGB, BC4 its R channel as gray, BC5 R
-/// and G (with Z rebuilt into blue for normal maps, as `mipple decode --normal` does), BC3 and BC7
-/// RGBA.
+/// What a format stores, as RGBA8 for display: BC1, ETC2 RGB and BC6H opaque RGB, BC4 and EAC R11 their
+/// R channel as gray, BC5 and EAC RG11 R and G (with Z rebuilt into blue for normal maps, as
+/// `mipple decode --normal` does), BC3, ETC2 RGBA and BC7 RGBA.
 fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.pixels.len() * 4);
     for &[r, g, b, a] in &s.pixels {
         out.extend_from_slice(&match format {
-            Format::Bc1 => [r, g, b, 255],
-            Format::Bc4 => [r, r, r, 255],
-            Format::Bc5 if normal => [r, g, ((normal_from_rg(r, g)[2] + 1.0) * 127.5 + 0.5) as u8, 255],
-            Format::Bc5 => [r, g, 0, 255],
-            Format::Bc3 | Format::Bc7 => [r, g, b, a],
+            Format::Bc1 | Format::Etc2Rgb => [r, g, b, 255],
+            Format::Bc4 | Format::EacR11 => [r, r, r, 255],
+            Format::Bc5 | Format::EacRg11 if normal => {
+                [r, g, ((normal_from_rg(r, g)[2] + 1.0) * 127.5 + 0.5) as u8, 255]
+            }
+            Format::Bc5 | Format::EacRg11 => [r, g, 0, 255],
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => [r, g, b, a],
             Format::Bc6h => [r, g, b, 255],
         });
     }
@@ -525,7 +527,17 @@ mod tests {
     #[test]
     fn matches_cli_options_and_reports_level_zero() {
         let src = gradient(36, 20);
-        for f in ["bc1", "bc3", "bc4", "bc5", "bc7"] {
+        for f in [
+            "bc1",
+            "bc3",
+            "bc4",
+            "bc5",
+            "bc7",
+            "etc2-rgb",
+            "etc2-rgba",
+            "eac-r11",
+            "eac-rg11",
+        ] {
             let mut s = Settings::parse(f, "auto").unwrap();
             s.lambda = 1.0;
             s.mips = false;
@@ -534,7 +546,9 @@ mod tests {
             assert_eq!(e.raw_bytes, 9 * 5 * s.format.block_bytes());
             assert!(e.stored_bytes < e.file_bytes);
             assert_eq!(e.decoded_view.len(), 36 * 20 * 4);
-            assert!((e.psnr - psnr_of(&src, &s)).abs() < 1e-9);
+            // BC4 is lossless on this gradient: both are infinite.
+            let p = psnr_of(&src, &s);
+            assert!(e.psnr == p || (e.psnr - p).abs() < 1e-9, "{f}: {} vs {p}", e.psnr);
             assert_eq!(ktx2::read(&e.ktx2).unwrap().levels[0].data.len(), e.raw_bytes);
         }
     }
@@ -570,7 +584,7 @@ mod tests {
             s.command("in.png"),
             "mipple encode in.png -o out.ktx2 -f bc7 -e 5 -l 0.5 --no-mips --smooth-scale 2.5"
         );
-        assert!(Settings::parse("bc3", "auto").is_err());
+        assert!(Settings::parse("bc2", "auto").is_err());
         assert!(Settings::parse("bc7", "maybe").is_err());
     }
 

@@ -4,8 +4,9 @@
 [![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
 
 A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC3 / BC4 / BC5 / BC7**
-blocks, tuned so Zstd or Deflate shrink them further, plus **BC6H** for HDR. Output goes to **KTX2** with
-optional Zstd supercompression. GPUs read it directly; nothing new runs at load time.
+blocks, tuned so Zstd or Deflate shrink them further, plus **BC6H** for HDR and **ETC2 / EAC** for mobile.
+Output goes to **KTX2** with optional Zstd supercompression. GPUs read it directly; nothing new runs at load
+time.
 
 <img src="docs/img/rdo.webp" alt="Animation: mipple's BC7 RDO sweeps Kodak 23 block by block, re-encoding blocks to copy or share bytes with earlier ones; Zstd size falls from 7.42 to 3.35 bits per texel while PSNR goes from 47.4 to 42.5 dB" width="100%">
 
@@ -113,7 +114,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 | Command | What it does |
 | --- | --- |
-| `encode IN -o OUT.ktx2\|OUT.dds [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw) or DDS by extension |
+| `encode IN -o OUT.ktx2\|OUT.dds [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw) or DDS by extension (ETC2/EAC: KTX2 only) |
 | `decode IN.ktx2\|IN.dds -o OUT.png [--level N] [--normal]` | Decode one mip level |
 | `info IN.ktx2` | Header, per-level offsets and sizes, key/value data |
 | `compare A B [--normal]` | PSNR (RGB, per channel, luma), SSIM, normal angular error |
@@ -148,6 +149,9 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - A BC6H encoder (unsigned half floats, all 14 modes) that reads Radiance `.hdr` and is scored with mPSNR
   and log2 RMSE in linear light; `scripts/compete_bc6h.py` grades it against ISPC, texconv and
   Compressonator. No RDO or GPU kernel for it yet.
+- ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGBA8, and EAC R11 / RG11 (unsigned)
+  encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against
+  Compressonator. CPU only.
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.
