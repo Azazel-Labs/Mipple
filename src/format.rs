@@ -1,7 +1,7 @@
 //! Output format dispatch.
 
 use crate::surface::Block;
-use crate::{bc1, bc4, bc7};
+use crate::{bc1, bc3, bc4, bc7};
 
 /// When to use entropy-reduced base encoding ([`BlockOpts::reduce_entropy`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -80,6 +80,8 @@ impl From<u8> for BlockOpts {
 pub enum Format {
     /// 4 bpp RGB (opaque albedo, bulk color).
     Bc1,
+    /// 8 bpp RGBA with smooth alpha (BC1 color plus a BC4 alpha channel).
+    Bc3,
     /// 4 bpp single channel (roughness, AO, masks, height).
     Bc4,
     /// 8 bpp two channels (tangent-space normals).
@@ -89,11 +91,12 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Bc1, Format::Bc4, Format::Bc5, Format::Bc7];
+    pub const ALL: [Format; 5] = [Format::Bc1, Format::Bc3, Format::Bc4, Format::Bc5, Format::Bc7];
 
     pub fn name(self) -> &'static str {
         match self {
             Format::Bc1 => "bc1",
+            Format::Bc3 => "bc3",
             Format::Bc4 => "bc4",
             Format::Bc5 => "bc5",
             Format::Bc7 => "bc7",
@@ -104,7 +107,7 @@ impl Format {
     pub fn block_bytes(self) -> usize {
         match self {
             Format::Bc1 | Format::Bc4 => 8,
-            Format::Bc5 | Format::Bc7 => 16,
+            Format::Bc3 | Format::Bc5 | Format::Bc7 => 16,
         }
     }
 
@@ -118,12 +121,12 @@ impl Format {
 
     /// Whether color data in this format is normally stored sRGB-encoded.
     pub fn default_srgb(self) -> bool {
-        matches!(self, Format::Bc1 | Format::Bc7)
+        matches!(self, Format::Bc1 | Format::Bc3 | Format::Bc7)
     }
 
     /// Whether the format has an sRGB variant at all.
     pub fn supports_srgb(self) -> bool {
-        matches!(self, Format::Bc1 | Format::Bc7)
+        matches!(self, Format::Bc1 | Format::Bc3 | Format::Bc7)
     }
 
     /// Vulkan `VkFormat` value, as stored in a KTX2 header.
@@ -131,6 +134,8 @@ impl Format {
         match (self, srgb) {
             (Format::Bc1, false) => 131, // VK_FORMAT_BC1_RGB_UNORM_BLOCK
             (Format::Bc1, true) => 132,  // VK_FORMAT_BC1_RGB_SRGB_BLOCK
+            (Format::Bc3, false) => 137, // VK_FORMAT_BC3_UNORM_BLOCK
+            (Format::Bc3, true) => 138,  // VK_FORMAT_BC3_SRGB_BLOCK
             (Format::Bc4, _) => 139,     // VK_FORMAT_BC4_UNORM_BLOCK
             (Format::Bc5, _) => 141,     // VK_FORMAT_BC5_UNORM_BLOCK
             (Format::Bc7, false) => 145, // VK_FORMAT_BC7_UNORM_BLOCK
@@ -143,6 +148,8 @@ impl Format {
         Some(match vk {
             131 => (Format::Bc1, false),
             132 => (Format::Bc1, true),
+            137 => (Format::Bc3, false),
+            138 => (Format::Bc3, true),
             139 => (Format::Bc4, false),
             141 => (Format::Bc5, false),
             145 => (Format::Bc7, false),
@@ -158,6 +165,7 @@ impl Format {
     pub fn error_weights(self) -> [u32; 4] {
         match self {
             Format::Bc1 => [1, 1, 1, 0],
+            Format::Bc3 => [1, 1, 1, 1],
             Format::Bc4 => [1, 0, 0, 0],
             Format::Bc5 => [1, 1, 0, 0],
             Format::Bc7 => [1, 1, 1, 1],
@@ -170,8 +178,8 @@ impl Format {
             Format::Bc1 => vec![0, 1, 2],
             Format::Bc4 => vec![0],
             Format::Bc5 => vec![0, 1],
-            Format::Bc7 if has_alpha => vec![0, 1, 2, 3],
-            Format::Bc7 => vec![0, 1, 2],
+            Format::Bc3 | Format::Bc7 if has_alpha => vec![0, 1, 2, 3],
+            Format::Bc3 | Format::Bc7 => vec![0, 1, 2],
         }
     }
 
@@ -182,6 +190,7 @@ impl Format {
         let mut out = [0u8; 16];
         match self {
             Format::Bc1 => out[..8].copy_from_slice(&bc1::encode_fast(px, effort)),
+            Format::Bc3 => out = bc3::encode_block(px, effort),
             Format::Bc4 => out[..8].copy_from_slice(&bc4::encode_channel(&bc4::channel(px, 0), effort)),
             Format::Bc5 => {
                 out[..8].copy_from_slice(&bc4::encode_channel(&bc4::channel(px, 0), effort));
@@ -196,6 +205,7 @@ impl Format {
     pub fn decode_block(self, raw: &[u8], out: &mut Block) {
         match self {
             Format::Bc1 => bc1::decode(raw, out),
+            Format::Bc3 => bc3::decode(raw, out),
             Format::Bc4 => bc4::decode_bc4(raw, out),
             Format::Bc5 => bc4::decode_bc5(raw, out),
             Format::Bc7 => bc7::decode(raw, out),
@@ -215,6 +225,6 @@ impl std::str::FromStr for Format {
         Format::ALL
             .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc4, bc5 or bc7)"))
+            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5 or bc7)"))
     }
 }

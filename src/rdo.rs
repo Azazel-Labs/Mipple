@@ -141,7 +141,7 @@ impl RdoParams {
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
             Format::Bc7 => 16 * 1024,
-            Format::Bc1 => 8 * 1024,
+            Format::Bc1 | Format::Bc3 => 8 * 1024,
             Format::Bc5 => 3072,
             Format::Bc4 => 2048,
         })
@@ -165,7 +165,7 @@ impl RdoParams {
     /// (Kodak-24 BD-rate +0.00% and +0.02% without them, for 11% and 7% less time).
     pub fn span_back_for(&self, format: Format) -> usize {
         self.span_back.unwrap_or(match format {
-            Format::Bc5 | Format::Bc7 => 0,
+            Format::Bc3 | Format::Bc5 | Format::Bc7 => 0,
             _ => 8,
         })
     }
@@ -200,7 +200,7 @@ impl RdoParams {
     /// has no time to spare against bc7enc_rdo).
     pub fn refine_back_for(&self, format: Format) -> usize {
         self.refine_back.unwrap_or(match format {
-            Format::Bc1 | Format::Bc4 | Format::Bc7 => 256,
+            Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc7 => 256,
             Format::Bc5 => 0,
         })
     }
@@ -648,11 +648,16 @@ fn candidates(
     // BC4/BC5 with the usual weights: candidate errors come out of generating them (exact, or
     // some value above `bound`), as sums of half errors.
     let exact = match format {
+        Format::Bc3 => true,
         Format::Bc4 => w[1..] == [0, 0, 0],
         Format::Bc5 => w[2..] == [0, 0],
         _ => false,
     };
-    let halves = if format == Format::Bc5 { 2 } else { 1 };
+    let halves = if matches!(format, Format::Bc3 | Format::Bc5) {
+        2
+    } else {
+        1
+    };
     let mut copy_err = [0u64; 2];
     // A half an earlier previous block already had only regenerates candidates already made
     // (copying it, its endpoints, its indices, its spans): those are skipped.
@@ -663,7 +668,7 @@ fn candidates(
             // The bound only shrinks over a block's search, so a stored error above an earlier
             // bound is still above the current one.
             let ((_, _, e), new) = fields.halves[h].get_or_insert(field_key(&prev[r.clone()]), || {
-                ([0; 8], false, bc4::sse_bounded(&prev[r], src, h, w[h], bound))
+                ([0; 8], false, half_sse(format, h, &prev[r], src, w, bound))
             });
             copy_err[h] = e;
             half_new[h] = new;
@@ -703,6 +708,71 @@ fn candidates(
                     out.push((c, UNKNOWN));
                 }
             }
+        }
+        Format::Bc3 => {
+            // Alpha half (BC4 on channel 3), then color half (4-color BC1), each with base's
+            // other half: the half copied, prev's endpoints re-indexed and prev's indices with
+            // refit endpoints, memoized by field value like BC5's.
+            let va = bc4::channel(src, 3);
+            let mut push = |h: usize, val: &[u8], err: u64| {
+                let mut c = *base;
+                c[h * 8..h * 8 + 8].copy_from_slice(val);
+                out.push((c, err.saturating_add(base_half[1 - h])));
+            };
+            for h in 0..2 {
+                if half_new[h] {
+                    push(h, &prev[h * 8..h * 8 + 8], copy_err[h]);
+                }
+            }
+            let ek = u64::from(prev[0]) << 8 | u64::from(prev[1]);
+            let ((val, _, err), new) = fields.endpoints.get_or_insert(ek, || {
+                let mut e = [0u8; 8];
+                e.copy_from_slice(&base[..8]);
+                e[..2].copy_from_slice(&prev[..2]);
+                let (val, err) = bc4::reindex_channel_err(&e, &va);
+                (val, true, err * u64::from(w[3]))
+            });
+            if new {
+                push(0, &val, err);
+            }
+            let ik = u64::from_le_bytes([prev[2], prev[3], prev[4], prev[5], prev[6], prev[7], 0, 0]);
+            let ((val, ok, err), new) = fields.indices.get_or_insert(ik, || {
+                let mut ix = [0u8; 8];
+                ix.copy_from_slice(&base[..8]);
+                ix[2..].copy_from_slice(&prev[2..8]);
+                match bc4::refit_channel(&ix, &va) {
+                    Some(rf) => (rf, true, half_sse(format, 0, &rf, src, w, u64::MAX)),
+                    None => (ix, false, 0),
+                }
+            });
+            if new && ok {
+                push(0, &val, err);
+            }
+            let ek = 1 << 56 | u64::from(u32::from_le_bytes([prev[8], prev[9], prev[10], prev[11]]));
+            let ((val, _, err), new) = fields.endpoints.get_or_insert(ek, || {
+                let mut e = [0u8; 8];
+                e.copy_from_slice(&base[8..]);
+                e[..4].copy_from_slice(&prev[8..12]);
+                let (val, err) = bc1::reindex_four_err(&e, src, w);
+                (val, true, err)
+            });
+            if new {
+                push(1, &val, err);
+            }
+            let ik = 1 << 56 | u64::from(u32::from_le_bytes([prev[12], prev[13], prev[14], prev[15]]));
+            let ((val, ok, err), new) = fields.indices.get_or_insert(ik, || {
+                let mut ix = [0u8; 8];
+                ix.copy_from_slice(&base[8..]);
+                ix[4..].copy_from_slice(&prev[12..16]);
+                match bc1::refit(&ix, src) {
+                    Some(rf) => (rf, true, half_sse(format, 1, &rf, src, w, u64::MAX)),
+                    None => (ix, false, 0),
+                }
+            });
+            if new && ok {
+                push(1, &val, err);
+            }
+            out.retain(|&(_, e)| e <= bound);
         }
         Format::Bc4 | Format::Bc5 => {
             let first = out.len();
@@ -908,14 +978,16 @@ fn block_err(
     match format {
         Format::Bc1 if w[3] == 0 => bc1::sse_bounded(raw, src, [w[0], w[1], w[2]], bound),
         Format::Bc4 if w[1..] == [0, 0, 0] => bc4::sse_bounded(&raw[..8], src, 0, w[0], bound),
-        Format::Bc5 if w[2..] == [0, 0] => {
+        // A color half a 4-color decoder reads differently is never a candidate.
+        Format::Bc3 if !bc1::is_four_safe(&raw[8..16]) => u64::MAX,
+        Format::Bc3 | Format::Bc5 if format == Format::Bc3 || w[2..] == [0, 0] => {
             // Most candidates keep one half of the base block: reuse its error.
             let half = |h: usize, bound: u64| {
                 let r = h * 8..h * 8 + 8;
                 if raw[r.clone()] == base.0[r.clone()] {
                     base.1[h]
                 } else {
-                    bc4::sse_bounded(&raw[r], src, h, w[h], bound)
+                    half_sse(format, h, &raw[r], src, w, bound)
                 }
             };
             let e = half(0, bound);
@@ -928,13 +1000,24 @@ fn block_err(
     }
 }
 
-/// Per-half errors of a BC5 base block, which [`block_err`] reuses for candidates that keep a
-/// half of it (zero for other formats, where they are unused).
+/// Per-half errors of a BC3/BC5 base block, which [`block_err`] reuses for candidates that keep
+/// a half of it (zero for other formats, where they are unused).
 fn base_half_err(format: Format, base: &[u8; 16], src: &Block, w: &[u32; 4]) -> [u64; 2] {
-    if format == Format::Bc5 && w[2..] == [0, 0] {
-        [0, 1].map(|h| bc4::sse_bounded(&base[h * 8..h * 8 + 8], src, h, w[h], u64::MAX))
+    if format == Format::Bc3 || (format == Format::Bc5 && w[2..] == [0, 0]) {
+        [0, 1].map(|h| half_sse(format, h, &base[h * 8..h * 8 + 8], src, w, u64::MAX))
     } else {
         [0; 2]
+    }
+}
+
+/// Weighted SSE of half `h` (8 bytes) of a BC3 or BC5 block: BC3's BC4 alpha and 4-color BC1
+/// color halves, BC5's red and green BC4 halves. May stop past `bound` like [`block_err`].
+#[inline]
+fn half_sse(format: Format, h: usize, raw: &[u8], src: &Block, w: &[u32; 4], bound: u64) -> u64 {
+    match (format, h) {
+        (Format::Bc3, 0) => bc4::sse_bounded(raw, src, 3, w[3], bound),
+        (Format::Bc3, _) => bc1::sse_bounded(raw, src, [w[0], w[1], w[2]], bound),
+        _ => bc4::sse_bounded(raw, src, h, w[h], bound),
     }
 }
 
@@ -1699,7 +1782,7 @@ fn optimize_chunk(
         Format::Bc1 => w[3] == 0,
         Format::Bc4 => w[1..] == [0, 0, 0],
         Format::Bc5 => w[2..] == [0, 0],
-        Format::Bc7 => false,
+        Format::Bc3 | Format::Bc7 => false,
     } && far_back > max_back;
     let mut far = FarEndpoints::new(format, if far_on { blocks.len() } else { 0 }, w);
     // Localized search (BC5's two channels): beyond the nearest `max_back` blocks, shape
@@ -2095,6 +2178,7 @@ fn optimize_chunk(
         if refine_back > 0 && best.1[..n] != base[..n] {
             let flds: &[(usize, usize)] = match format {
                 Format::Bc1 => &[(0, 4), (4, 8)],
+                Format::Bc3 => &[(0, 2), (2, 8), (8, 12), (12, 16)],
                 Format::Bc4 => &[(0, 2), (2, 8)],
                 Format::Bc5 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
                 // Mode 6 (most RDO output): mode, endpoints and P0; then P1 and the indices.
@@ -2395,6 +2479,7 @@ mod tests {
         let env = |k: &str, d: &str| std::env::var(k).unwrap_or(d.into());
         let format = match env("MIPPLE_PROFILE_FMT", "bc7").as_str() {
             "bc1" => Format::Bc1,
+            "bc3" => Format::Bc3,
             "bc4" => Format::Bc4,
             "bc5" => Format::Bc5,
             _ => Format::Bc7,

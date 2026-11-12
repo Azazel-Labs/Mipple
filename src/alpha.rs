@@ -25,7 +25,7 @@ use crate::surface::Surface;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum AlphaMode {
-    /// Transparency for BC7 colour textures (sRGB, not normal maps), data otherwise.
+    /// Transparency for BC3 and BC7 colour textures (sRGB, not normal maps), data otherwise.
     #[default]
     Auto,
     /// Transparency: the colour under alpha 0 is free (see the module docs).

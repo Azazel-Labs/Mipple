@@ -1,7 +1,7 @@
-//! Minimal DDS reader/writer for BC1/BC4/BC5/BC7, so other encoders' output (bc7enc_rdo,
+//! Minimal DDS reader/writer for BC1/BC3/BC4/BC5/BC7, so other encoders' output (bc7enc_rdo,
 //! bc7f harness, texconv...) can be scored with the same metrics and back ends as mipple.
 //!
-//! Reads legacy FourCC (DXT1, ATI1/BC4U, ATI2/BC5U) and DX10-extended headers; writes DX10.
+//! Reads legacy FourCC (DXT1, DXT4/DXT5, ATI1/BC4U, ATI2/BC5U) and DX10-extended headers; writes DX10.
 
 // Header fields are untrusted: sizes and offsets go through checked conversions and arithmetic.
 #![warn(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
@@ -18,6 +18,8 @@ fn dxgi(format: Format, srgb: bool) -> u32 {
     match (format, srgb) {
         (Format::Bc1, false) => 71,
         (Format::Bc1, true) => 72,
+        (Format::Bc3, false) => 77,
+        (Format::Bc3, true) => 78,
         (Format::Bc4, _) => 80,
         (Format::Bc5, _) => 83,
         (Format::Bc7, false) => 98,
@@ -29,6 +31,8 @@ fn from_dxgi(v: u32) -> Option<(Format, bool)> {
     Some(match v {
         70..=71 => (Format::Bc1, false),
         72 => (Format::Bc1, true),
+        76..=77 => (Format::Bc3, false),
+        78 => (Format::Bc3, true),
         79..=80 => (Format::Bc4, false),
         82..=83 => (Format::Bc5, false),
         97..=98 => (Format::Bc7, false),
@@ -93,6 +97,7 @@ pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
             }
         }
         b"DXT1" => (Format::Bc1, false),
+        b"DXT4" | b"DXT5" => (Format::Bc3, false),
         b"ATI1" | b"BC4U" => (Format::Bc4, false),
         b"ATI2" | b"BC5U" => (Format::Bc5, false),
         other => bail!("unsupported DDS FourCC {:?}", String::from_utf8_lossy(other)),

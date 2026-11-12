@@ -7,7 +7,7 @@
 mod batch;
 mod order;
 
-pub use batch::{encode_block as encode_fast, encode_surface};
+pub use batch::{encode_block as encode_fast, encode_surface, encode_surface_four};
 
 use crate::fit::{V4, ls_endpoints, pca_endpoints};
 #[cfg(target_arch = "x86_64")]
@@ -71,6 +71,42 @@ pub fn palette(c0: u16, c1: u16) -> [[u8; 4]; 4] {
         }
     }
     p
+}
+
+/// The palette BC2/BC3 color halves decode with: always 4-color mode, whatever the endpoint
+/// order (`(2a + b) / 3` and `(a + 2b) / 3`).
+pub fn palette4(c0: u16, c1: u16) -> [[u8; 4]; 4] {
+    let a = unpack565(c0);
+    let b = unpack565(c1);
+    let mut p = [[0u8, 0, 0, 255]; 4];
+    for ch in 0..3 {
+        p[0][ch] = a[ch] as u8;
+        p[1][ch] = b[ch] as u8;
+        p[2][ch] = ((2 * a[ch] + b[ch]) / 3) as u8;
+        p[3][ch] = ((a[ch] + 2 * b[ch]) / 3) as u8;
+    }
+    p
+}
+
+/// Decodes a BC3 color half (8 bytes, BC1 layout, always 4-color mode). Alpha is left at 255.
+pub fn decode4(raw: &[u8], out: &mut Block) {
+    let c0 = u16::from_le_bytes([raw[0], raw[1]]);
+    let c1 = u16::from_le_bytes([raw[2], raw[3]]);
+    let pal = palette4(c0, c1);
+    let bits = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    for (i, t) in out.iter_mut().enumerate() {
+        *t = pal[((bits >> (2 * i)) & 3) as usize];
+    }
+}
+
+/// Whether a BC1 encoding decodes the same in BC1 and in a BC3 color half (always 4-color):
+/// c0 > c1, or equal endpoints without index 3 (the only entry where the modes differ then).
+/// Every BC3 color half mipple writes is such a block, so [`decode`] and the BC1 kernels apply.
+pub fn is_four_safe(raw: &[u8]) -> bool {
+    let c0 = u16::from_le_bytes([raw[0], raw[1]]);
+    let c1 = u16::from_le_bytes([raw[2], raw[3]]);
+    let bits = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    c0 > c1 || (c0 == c1 && bits & (bits >> 1) & 0x5555_5555 == 0)
 }
 
 /// Decodes one 8-byte block.
@@ -900,6 +936,22 @@ pub fn reindex_err(raw: &[u8], px: &Block, w: &[u32; 4]) -> ([u8; 8], u64) {
     (to_bytes(c0, c1, bits), err)
 }
 
+/// [`reindex_err`] for a BC3 color half ([`is_four_safe`] endpoints): equal endpoints never
+/// take index 3. Endpoints in 3-color order give `u64::MAX` as the error.
+pub fn reindex_four_err(raw: &[u8], px: &Block, w: &[u32; 4]) -> ([u8; 8], u64) {
+    let c0 = u16::from_le_bytes([raw[0], raw[1]]);
+    let c1 = u16::from_le_bytes([raw[2], raw[3]]);
+    if c0 < c1 {
+        return ([0; 8], u64::MAX);
+    }
+    let mut pal = palette(c0, c1);
+    if c0 == c1 {
+        pal = [pal[0]; 4];
+    }
+    let (bits, err) = assign(px, &pal, w);
+    (to_bytes(c0, c1, bits), err)
+}
+
 /// Keeps the index bytes of `raw` and least-squares refits the endpoints. Used by RDO.
 /// Returns `None` when the refit would flip the block out of 4-color mode.
 pub fn refit(raw: &[u8], px: &Block) -> Option<[u8; 8]> {
@@ -918,9 +970,89 @@ pub fn refit(raw: &[u8], px: &Block) -> Option<[u8; 8]> {
     Some(to_bytes(n0, n1, bits))
 }
 
+/// `(raw, error)` of 4-color-safe endpoints `q0`, `q1` (see [`is_four_safe`]): ordered c0 > c1,
+/// or, when they quantize equal, every texel on index 0.
+fn finalize_safe(q0: [i32; 3], q1: [i32; 3], px: &Block, w: &[u32; 4]) -> ([u8; 8], u64) {
+    let (mut c0, mut c1) = (pack565(q0), pack565(q1));
+    if c0 < c1 {
+        std::mem::swap(&mut c0, &mut c1);
+    }
+    let (bits, err) = if c0 == c1 {
+        let p = palette(c0, c0);
+        assign(px, &[p[0]; 4], w)
+    } else {
+        assign(px, &palette(c0, c1), w)
+    };
+    (to_bytes(c0, c1, bits), err)
+}
+
+/// [`finalize_safe`] on the endpoints of an encoding.
+fn make_safe(raw: &[u8; 8], px: &Block, w: &[u32; 4]) -> ([u8; 8], u64) {
+    let c0 = u16::from_le_bytes([raw[0], raw[1]]);
+    let c1 = u16::from_le_bytes([raw[2], raw[3]]);
+    finalize_safe(split565(c0), split565(c1), px, w)
+}
+
+/// Turns a BC1 encoding into one that decodes the same as a BC3 color half
+/// ([`is_four_safe`]). Safe blocks pass unchanged; a 3-color block becomes the best of its
+/// endpoints in 4-color order, a 4-color PCA fit and a ±1 endpoint search from the better.
+pub fn four_safe(raw: [u8; 8], px: &Block, w: &[u32; 4]) -> [u8; 8] {
+    if is_four_safe(&raw) {
+        return raw;
+    }
+    let mut best = make_safe(&raw, px, w);
+    let pts: [V4; 16] = std::array::from_fn(|i| [px[i][0] as f32, px[i][1] as f32, px[i][2] as f32, 0.0]);
+    let pca = make_safe(&encode_pca(px, w, &pts, 3).0, px, w);
+    if pca.1 < best.1 {
+        best = pca;
+    }
+    if best.1 > 0 {
+        let r = make_safe(&refine_neighbors(best, px, w, 2).0, px, w);
+        if r.1 < best.1 {
+            best = r;
+        }
+    }
+    best.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn four_safe_blocks_decode_alike() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let w = [1, 1, 1, 0];
+        for n in 0..4000 {
+            // Dark texels next to bright ones, where 3-color mode with black wins in BC1.
+            let base = [(next() % 256) as i32, (next() % 256) as i32, (next() % 256) as i32];
+            let spread = [0, 2, 10, 60, 255][n % 5];
+            let px: Block = std::array::from_fn(|_| {
+                if next() % 4 == 0 {
+                    [0, 0, 0, 255]
+                } else {
+                    let mut t = [0u8, 0, 0, 255];
+                    for c in 0..3 {
+                        t[c] = (base[c] + (next() % (2 * spread + 1)) as i32 - spread as i32).clamp(0, 255) as u8;
+                    }
+                    t
+                }
+            });
+            let raw = encode(&px, &w, (n % 4) as u8);
+            let safe = four_safe(raw, &px, &w);
+            assert!(is_four_safe(&safe));
+            let (mut a, mut b) = ([[0u8; 4]; 16], [[0u8; 4]; 16]);
+            decode(&safe, &mut a);
+            decode4(&safe, &mut b);
+            assert_eq!(a, b);
+        }
+    }
 
     #[test]
     fn single_color_tables_match_full_search() {

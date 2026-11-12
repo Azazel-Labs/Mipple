@@ -7,6 +7,7 @@
 //!
 //! * BC1: color0 bytes, color1 bytes (each as low-byte plane then high-byte plane), selector bytes.
 //! * BC4 / BC5: per channel, endpoint 0 bytes, endpoint 1 bytes, then the 6 index bytes.
+//! * BC3: the BC4 streams of the alpha halves, then the BC1 streams of the color halves.
 //! * BC7: mode byte per block (8 = invalid block, stored raw in the escape stream); shape byte
 //!   (partition, or rotation + index selection); endpoint channels one per byte (with the p-bit
 //!   folded in as the low bit for modes with a p-bit per endpoint); shared p-bits (mode 1); index
@@ -21,6 +22,7 @@ use crate::format::Format;
 pub fn forward(format: Format, raw: &[u8]) -> Vec<u8> {
     let streams = match format {
         Format::Bc1 => split_bc1(raw),
+        Format::Bc3 => split_bc3(raw),
         Format::Bc4 => split_bc4(raw, 1),
         Format::Bc5 => split_bc4(raw, 2),
         Format::Bc7 => split_bc7(raw),
@@ -45,6 +47,7 @@ pub fn max_len(raw_len: usize) -> usize {
 pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
     let n = match format {
         Format::Bc1 => 5,
+        Format::Bc3 => 8,
         Format::Bc4 => 3,
         Format::Bc5 => 6,
         Format::Bc7 => 6,
@@ -65,6 +68,7 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
     }
     match format {
         Format::Bc1 => join_bc1(&streams),
+        Format::Bc3 => join_bc3(&streams),
         Format::Bc4 => join_bc4(&streams, 1),
         Format::Bc5 => join_bc4(&streams, 2),
         Format::Bc7 => join_bc7(&streams),
@@ -100,6 +104,31 @@ fn join_bc1(s: &[&[u8]]) -> Option<Vec<u8>> {
     for i in 0..n {
         out.extend_from_slice(&[s[0][i], s[1][i], s[2][i], s[3][i]]);
         out.extend_from_slice(&s[4][4 * i..4 * i + 4]);
+    }
+    Some(out)
+}
+
+fn split_bc3(raw: &[u8]) -> Vec<Vec<u8>> {
+    let (mut alpha, mut color) = (Vec::with_capacity(raw.len() / 2), Vec::with_capacity(raw.len() / 2));
+    for b in raw.as_chunks::<16>().0 {
+        alpha.extend_from_slice(&b[..8]);
+        color.extend_from_slice(&b[8..]);
+    }
+    let mut s = split_bc4(&alpha, 1);
+    s.extend(split_bc1(&color));
+    s
+}
+
+fn join_bc3(s: &[&[u8]]) -> Option<Vec<u8>> {
+    let alpha = join_bc4(&s[..3], 1)?;
+    let color = join_bc1(&s[3..])?;
+    if alpha.len() != color.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(2 * alpha.len());
+    for (a, c) in alpha.as_chunks::<8>().0.iter().zip(color.as_chunks::<8>().0) {
+        out.extend_from_slice(a);
+        out.extend_from_slice(c);
     }
     Some(out)
 }

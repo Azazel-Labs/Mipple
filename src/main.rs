@@ -13,7 +13,7 @@ use std::time::Instant;
 #[command(
     name = "mipple",
     version,
-    about = "Rate-distortion optimized GPU texture encoder (BC1/BC4/BC5/BC7 → KTX2)"
+    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC7 → KTX2)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -86,7 +86,7 @@ enum Cmd {
 
 #[derive(Args, Clone)]
 struct RdoArgs {
-    /// LZ window the rate model searches, in bytes [default: 16384 for BC7, 8192 for BC1, 3072
+    /// LZ window the rate model searches, in bytes [default: 16384 for BC7, 8192 for BC1/BC3, 3072
     /// for BC5, 2048 for BC4].
     #[arg(long)]
     window: Option<usize>,
@@ -95,11 +95,12 @@ struct RdoArgs {
     #[arg(long)]
     max_back: Option<usize>,
     /// Nearest previous blocks to also try partial byte-span copies from [default: 8 for BC1/BC4,
-    /// 0 for BC5/BC7].
+    /// 0 for BC3/BC5/BC7].
     #[arg(long)]
     span_back: Option<usize>,
     /// Previous blocks whose single fields are tried in the chosen block after the search
-    /// (0 disables) [default: 256 for BC1/BC4/BC7, 0 for BC5].
+    /// (0 disables) [default: 256 for BC1/BC3/BC4/BC7, 0 for
+    /// BC5].
     #[arg(long)]
     refine_back: Option<usize>,
     /// Beyond --max-back, earlier blocks whose endpoints are tried re-indexed, each distinct pair
@@ -167,7 +168,7 @@ struct EncodeArgs {
     /// Treat the input as linear data (default for BC4/BC5).
     #[arg(long, conflicts_with = "srgb")]
     linear: bool,
-    /// Treat the input as sRGB color (default for BC1/BC7).
+    /// Treat the input as sRGB color (default for BC1/BC3/BC7).
     #[arg(long)]
     srgb: bool,
     /// Input is a tangent-space normal map (renormalized mips; implies linear).
@@ -178,7 +179,7 @@ struct EncodeArgs {
     no_mips: bool,
     /// What alpha means. transparency: the colour under alpha 0 is bled from the visible colour
     /// around it (no dark mip fringes) and costs no bits; data: an independent channel; auto:
-    /// transparency for BC7 colour textures.
+    /// transparency for BC3 and BC7 colour textures.
     #[arg(long, value_enum, default_value_t = mipple::alpha::AlphaMode::Auto)]
     alpha: mipple::alpha::AlphaMode,
     /// Alpha-test cutoff (0-1) whose coverage every mip keeps, for cutouts (foliage, fences)

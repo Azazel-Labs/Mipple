@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mipple: texture encoder in the browser</title>
-  <meta name="description" content="Try mipple, a rate-distortion optimized BC1/BC4/BC5/BC7 texture encoder with KTX2 + Zstd output, compiled to WebAssembly. Drop an image, move the sliders, compare pixels.">
+  <meta name="description" content="Try mipple, a rate-distortion optimized BC1/BC3/BC4/BC5/BC7 texture encoder with KTX2 + Zstd output, compiled to WebAssembly. Drop an image, move the sliders, compare pixels.">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
@@ -27,7 +27,7 @@
       </a>
     </div>
     <p class="lede">
-      mipple is a GPU texture encoder written in Rust: BC1, BC4, BC5 and BC7 with
+      mipple is a GPU texture encoder written in Rust: BC1, BC3, BC4, BC5 and BC7 with
       <strong>rate-distortion optimization</strong>, written to KTX2 with Zstd. RDO nudges each block toward
       bytes Zstd already saw, trading a little error for a smaller file. This page runs the real encoder,
       compiled to WebAssembly, on your machine. Pick a sample or drop your own image, move the sliders, and zoom
@@ -97,6 +97,7 @@
           <div class="field-label">Format</div>
           <div class="seg seg-fill" role="radiogroup" aria-label="Format" id="format">
             <button type="button" data-format="bc1" aria-pressed="true">BC1</button>
+            <button type="button" data-format="bc3" aria-pressed="false">BC3</button>
             <button type="button" data-format="bc4" aria-pressed="false">BC4</button>
             <button type="button" data-format="bc5" aria-pressed="false">BC5</button>
             <button type="button" data-format="bc7" aria-pressed="false">BC7</button>

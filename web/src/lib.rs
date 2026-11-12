@@ -138,7 +138,7 @@ pub struct Settings {
 
 #[wasm_bindgen]
 impl Settings {
-    /// `mipple encode` defaults for `format` (bc1, bc4, bc5, bc7) and BC7 `entropy` (off, on, auto).
+    /// `mipple encode` defaults for `format` (bc1, bc3, bc4, bc5, bc7) and BC7 `entropy` (off, on, auto).
     #[wasm_bindgen(constructor)]
     pub fn new(format: &str, entropy: &str) -> Result<Settings, JsError> {
         Self::parse(format, entropy).map_err(|e| js_error(&e))
@@ -271,7 +271,7 @@ pub struct Encoded {
     /// Level 0 RMS error over the same channels, in 8-bit steps.
     #[wasm_bindgen(readonly)]
     pub rmse: f64,
-    /// Level 0 SSIM: luma for BC1/BC7, R for BC4, mean of R and G for BC5 (as `mipple score`).
+    /// Level 0 SSIM: luma for BC1/BC3/BC7, R for BC4, mean of R and G for BC5 (as `mipple score`).
     #[wasm_bindgen(readonly)]
     pub ssim: f64,
     /// Mean normal angular error in degrees (normal maps only, otherwise NaN).
@@ -470,7 +470,8 @@ async fn run(surface: &Surface, s: &Settings, gpu: Option<&'static Gpu>) -> Resu
 }
 
 /// What a format stores, as RGBA8 for display: BC1 opaque RGB, BC4 its R channel as gray, BC5 R
-/// and G (with Z rebuilt into blue for normal maps, as `mipple decode --normal` does), BC7 RGBA.
+/// and G (with Z rebuilt into blue for normal maps, as `mipple decode --normal` does), BC3 and BC7
+/// RGBA.
 fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.pixels.len() * 4);
     for &[r, g, b, a] in &s.pixels {
@@ -479,7 +480,7 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
             Format::Bc4 => [r, r, r, 255],
             Format::Bc5 if normal => [r, g, ((normal_from_rg(r, g)[2] + 1.0) * 127.5 + 0.5) as u8, 255],
             Format::Bc5 => [r, g, 0, 255],
-            Format::Bc7 => [r, g, b, a],
+            Format::Bc3 | Format::Bc7 => [r, g, b, a],
         });
     }
     out
@@ -523,7 +524,7 @@ mod tests {
     #[test]
     fn matches_cli_options_and_reports_level_zero() {
         let src = gradient(36, 20);
-        for f in ["bc1", "bc4", "bc5", "bc7"] {
+        for f in ["bc1", "bc3", "bc4", "bc5", "bc7"] {
             let mut s = Settings::parse(f, "auto").unwrap();
             s.lambda = 1.0;
             s.mips = false;

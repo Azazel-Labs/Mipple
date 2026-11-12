@@ -5,14 +5,14 @@ mod common;
 
 use common::{corpus, reference_decode};
 use mipple::pipeline::encode_base;
-use mipple::{BlockOpts, Format, bc7};
+use mipple::{BlockOpts, Format, bc1, bc7};
 
 fn channels(format: Format) -> &'static [usize] {
     match format {
         Format::Bc1 => &[0, 1, 2],
         Format::Bc4 => &[0],
         Format::Bc5 => &[0, 1],
-        Format::Bc7 => &[0, 1, 2, 3],
+        Format::Bc3 | Format::Bc7 => &[0, 1, 2, 3],
     }
 }
 
@@ -65,6 +65,33 @@ fn bc7_decoder_matches_reference_on_random_blocks() {
             bc7::decode(&raw, &mut ours);
             let theirs = reference_decode(Format::Bc7, &raw);
             assert_eq!(ours, theirs, "mode {mode} raw {raw:02x?}");
+        }
+    }
+}
+
+/// Alpha always matches; color matches on the four-safe color halves mipple writes. Other color
+/// halves (c0 <= c1) are 4-color in the D3D spec, which mipple follows, while `texture2ddecoder`,
+/// like some older hardware, reads them as BC1's 3-color mode.
+#[test]
+fn bc3_decoder_matches_reference_on_random_blocks() {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut ours = [[0u8; 4]; 16];
+    for i in 0..20000u64 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let mut raw = [0u8; 16];
+        raw[..8].copy_from_slice(&seed.to_le_bytes());
+        raw[8..].copy_from_slice(&seed.rotate_left(29).wrapping_mul(i | 1).to_le_bytes());
+        if i % 7 == 0 {
+            raw.copy_within(8..10, 10);
+        }
+        Format::Bc3.decode_block(&raw, &mut ours);
+        let theirs = reference_decode(Format::Bc3, &raw);
+        if bc1::is_four_safe(&raw[8..]) {
+            assert_eq!(ours, theirs, "raw {raw:02x?}");
+        } else {
+            assert_eq!(ours.map(|p| p[3]), theirs.map(|p| p[3]), "raw {raw:02x?}");
         }
     }
 }

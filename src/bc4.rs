@@ -6,7 +6,7 @@
 
 pub(crate) mod batch;
 
-pub use batch::{encode_batch, encode_channels8, encode_surface};
+pub use batch::{encode_batch, encode_channels8, encode_surface, encode_surface_channel};
 
 use crate::surface::Block;
 

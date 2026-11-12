@@ -30,7 +30,7 @@ pub struct EncodeOptions {
     pub mips: bool,
     /// What alpha means: with transparency, the colour under transparent texels is bled from the
     /// visible colour around it and freed for the encoder, and mips weight RGB by alpha
-    /// ([`crate::alpha`]). [`AlphaMode::Auto`] (default) picks it for BC7 colour textures.
+    /// ([`crate::alpha`]). [`AlphaMode::Auto`] (default) picks it for BC3 and BC7 colour textures.
     pub alpha: AlphaMode,
     /// An alpha-test cutoff (0-1) whose coverage every mip keeps (cutouts drawn with alpha test or
     /// alpha to coverage); `None` averages alpha plainly.
@@ -87,9 +87,9 @@ impl EncodeOptions {
     }
 
     /// Whether alpha is treated as transparency ([`Self::alpha`]): only for formats that keep
-    /// alpha (BC7) and never for normal maps.
+    /// alpha (BC3, BC7) and never for normal maps.
     pub fn alpha_transparency(&self) -> bool {
-        self.format == Format::Bc7
+        matches!(self.format, Format::Bc3 | Format::Bc7)
             && !self.normal_map
             && match self.alpha {
                 AlphaMode::Auto => self.srgb,
@@ -242,6 +242,7 @@ fn direct(format: Format, opts: BlockOpts) -> bool {
 fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec<u8> {
     match format {
         Format::Bc1 => crate::bc1::encode_surface(surface, opts.effort),
+        Format::Bc3 => crate::bc3::encode_surface(surface, opts.effort),
         Format::Bc4 => crate::bc4::encode_surface(surface, 1, opts.effort),
         Format::Bc5 => crate::bc4::encode_surface(surface, 2, opts.effort),
         Format::Bc7 => crate::bc7::fast::encode_surface(

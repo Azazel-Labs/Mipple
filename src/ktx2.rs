@@ -26,6 +26,7 @@ const LEVEL_ENTRY_LEN: usize = 24;
 fn color_model(format: Format) -> u8 {
     match format {
         Format::Bc1 => 128, // KHR_DF_MODEL_BC1A
+        Format::Bc3 => 130, // KHR_DF_MODEL_BC3
         Format::Bc4 => 131, // KHR_DF_MODEL_BC4
         Format::Bc5 => 132, // KHR_DF_MODEL_BC5
         Format::Bc7 => 134, // KHR_DF_MODEL_BC7
@@ -37,6 +38,9 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
     // (bitOffset, bitLength - 1, channelType)
     let samples: &[(u16, u8, u8)] = match format {
         Format::Bc1 => &[(0, 63, 0)],
+        // Alpha (KHR_DF_CHANNEL_BC3_ALPHA), linear even in an sRGB texture, then color.
+        Format::Bc3 if srgb => &[(0, 63, 15 | 0x10), (64, 63, 0)],
+        Format::Bc3 => &[(0, 63, 15), (64, 63, 0)],
         Format::Bc4 => &[(0, 63, 0)],
         Format::Bc5 => &[(0, 63, 0), (64, 63, 1)],
         Format::Bc7 => &[(0, 127, 0)],

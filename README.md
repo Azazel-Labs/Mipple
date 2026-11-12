@@ -142,8 +142,9 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 
 ## What's inside
 
-- BC1, BC4, BC5 and BC7 encoders (all 8 BC7 modes), with an entropy-reduced BC7 mode for RDO (mode-6
-  preference, 64-level mode-6 endpoints), and wgpu compute kernels that write the CPU's exact blocks.
+- BC1, BC3, BC4, BC5 and BC7 encoders (all 8 BC7 modes), with an entropy-reduced BC7 mode for RDO (mode-6
+  preference, 64-level mode-6 endpoints), and wgpu compute kernels that write the CPU's exact blocks (BC3
+  is CPU only for now).
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.

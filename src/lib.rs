@@ -12,6 +12,7 @@
 
 pub mod alpha;
 pub mod bc1;
+pub mod bc3;
 pub mod bc4;
 pub mod bc7;
 pub mod bench;

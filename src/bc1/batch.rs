@@ -1461,6 +1461,28 @@ pub fn encode_surface(surface: &Surface, effort: u8) -> Vec<u8> {
     encode_surface_cfg(surface, cfg(effort))
 }
 
+/// Encodes a whole surface as BC3 color halves (BC1 blocks a 4-color-only decoder reads the
+/// same, see [`super::is_four_safe`]): the search without 3-color fits, then
+/// [`super::four_safe`] on the rare block that still ends up in 3-color order.
+pub fn encode_surface_four(surface: &Surface, effort: u8) -> Vec<u8> {
+    let mut out = encode_surface_cfg(
+        surface,
+        Cfg {
+            three: false,
+            ..cfg(effort)
+        },
+    );
+    let w = crate::format::Format::Bc1.error_weights();
+    let bw = surface.blocks_x();
+    for (k, raw) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        if !super::is_four_safe(raw) {
+            let b = surface.read_block(k as u32 % bw, k as u32 / bw);
+            *raw = super::four_safe(*raw, &b, &w);
+        }
+    }
+    out
+}
+
 /// [`encode_surface`] with an explicit search configuration.
 pub(super) fn encode_surface_cfg(surface: &Surface, cfg: Cfg) -> Vec<u8> {
     use rayon::prelude::*;

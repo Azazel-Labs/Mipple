@@ -113,7 +113,10 @@ Open for v0.9.x:
 
 ## v1.0: more formats
 
-- [ ] BC3, BC6H (HDR, relative error metric; needs float input: EXR/HDR loading).
+- [x] BC3: a BC4 alpha half and a 4-color BC1 color half, both halves through the same RDO pass (each
+  half's copy, re-index and refit, like BC5), alpha as transparency like BC7; −15.7% BD-rate against
+  bc7enc_rdo at a fifth of its time (BENCHMARKS.md). No GPU kernel yet.
+- [ ] BC6H (HDR, relative error metric; needs float input: EXR/HDR loading).
 - [ ] ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.
 - [ ] ETC2 / EAC for mobile fallbacks.
 

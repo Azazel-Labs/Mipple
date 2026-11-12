@@ -482,6 +482,27 @@ kodim18 (512×512 crop), at RMSE / at SSIM: BC4 −5.2% / −1.5% at λ 0, then 
 −12.2% / +1.0%, −14.8% / +0.4%, −17.2% / +0.7% at λ 10-40. BC1 kodim18: −7.3% at λ 0, −0.8% to −1.8% at λ 10-40 on
 RMSE, −2.6% to −4.8% on SSIM.
 
+## BC3 vs bc7enc_rdo
+
+Twelve RGBA images: Kodak 1, 3, 5, 13, 18 and 23, each with alpha from the next Kodak image's luma (detailed
+alpha) and with a smooth radial alpha that reaches 0 in the corners. mipple effort 5 with `--alpha data` (so all
+four channels are scored against the source) against bc7enc_rdo `-3` (rgbcx L18 color, BC4 alpha at radius 5)
+with `-zc8192`, all threads, top level only. PSNR is over RGBA, bits/texel after Zstd-19, and time is the total
+wall time over the twelve images, process start included:
+
+| λ | mipple PSNR | mipple bpt | mipple s | bc7enc_rdo PSNR | bc7enc_rdo bpt | bc7enc_rdo s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 36.672 | 5.883 | 2.4 | 36.685 | 5.856 | 4.8 |
+| 0.5 | 36.530 | 4.852 | 6.7 | 36.404 | 5.104 | 35.3 |
+| 1 | 36.334 | 4.472 | 6.9 | 35.944 | 4.784 | 35.3 |
+| 2 | 35.910 | 4.011 | 6.7 | 34.970 | 4.404 | 32.9 |
+| 4 | 35.070 | 3.425 | 6.6 | 33.234 | 3.983 | 30.5 |
+
+BD-rate of the mean curves: −15.7% (Zstd-19). Every mipple RDO point is both smaller and closer to the
+source than the bc7enc_rdo point at the same λ, at about a fifth of the time. The base encoders are even: the
+color half is the BC1 encoder held to 4-color blocks (a BC3 color half never decodes in 3-color mode), the
+alpha half the BC4 encoder.
+
 ## Lossless field split (`--prep`)
 
 `src/prep.rs` applies a BC7Prep-style lossless transform before Zstd: blocks are split into byte streams of

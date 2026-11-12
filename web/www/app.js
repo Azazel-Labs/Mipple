@@ -14,6 +14,7 @@ const SAMPLES = [
 
 const FORMAT_NOTES = {
   bc1: "4 bits/texel · RGB, opaque · albedo and bulk color",
+  bc3: "8 bits/texel · RGB plus a separate alpha channel · albedo with smooth alpha",
   bc4: "4 bits/texel · one channel (R, shown as gray) · roughness, masks, height",
   bc5: "8 bits/texel · two channels (R, G) · tangent-space normal maps",
   bc7: "8 bits/texel · RGB or RGBA · best color quality. With RDO (λ > 0) it runs the effort-8 search first, which takes tens of seconds per 512² image in the browser",

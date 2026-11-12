@@ -19,6 +19,7 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
     let mut buf = [0u32; 16];
     match format {
         Format::Bc1 => texture2ddecoder::decode_bc1_block(raw, &mut buf),
+        Format::Bc3 => texture2ddecoder::decode_bc3_block(raw, &mut buf),
         Format::Bc4 => {
             buf = [0xFF00_0000; 16];
             texture2ddecoder::decode_bc4_block(raw, &mut buf);

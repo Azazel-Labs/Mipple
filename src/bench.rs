@@ -115,7 +115,7 @@ pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) ->
     let channels = format.metric_channels(source.has_alpha());
     let psnr = metrics::psnr(source, dec, &channels);
     let ssim = match format {
-        Format::Bc1 | Format::Bc7 => metrics::ssim_luma(source, dec),
+        Format::Bc1 | Format::Bc3 | Format::Bc7 => metrics::ssim_luma(source, dec),
         Format::Bc4 => metrics::ssim_channel(source, dec, 0),
         Format::Bc5 => (metrics::ssim_channel(source, dec, 0) + metrics::ssim_channel(source, dec, 1)) / 2.0,
     };

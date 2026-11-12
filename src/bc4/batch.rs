@@ -441,7 +441,7 @@ fn encode8<V: SimdF32>(v: &[[u8; 16]; LANES], effort: u8) -> [[u8; 8]; LANES] {
 /// eight blocks inside one block row load texels with [`SimdI32::load_block_row`]; the rest
 /// gather per block.
 #[inline(always)]
-fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], channels: usize, effort: u8) {
+fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], (ch0, channels): (usize, usize), effort: u8) {
     let bw = s.blocks_x() as usize;
     let (w, h) = (s.width as usize, s.height as usize);
     let bb = 8 * channels;
@@ -467,7 +467,11 @@ fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], channels: 
                 let mut x = [V::splat(0.0); 16];
                 let mut i = 0;
                 while i < 16 {
-                    let v = if c == 0 { px[i] } else { px[i] >> (8 * c as i32) };
+                    let v = if ch0 + c == 0 {
+                        px[i]
+                    } else {
+                        px[i] >> (8 * (ch0 + c) as i32)
+                    };
                     x[i] = (v & V::Int::splat(0xff)).to_float();
                     i += 1;
                 }
@@ -480,7 +484,7 @@ fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], channels: 
                 let mut v = [[0u8; 16]; LANES];
                 for (l, vl) in v.iter_mut().enumerate().take(n) {
                     let i = (k + l) as u32;
-                    *vl = s.read_block_channel(i % bw as u32, i / bw as u32, c);
+                    *vl = s.read_block_channel(i % bw as u32, i / bw as u32, ch0 + c);
                 }
                 let enc = encode_x(&load::<V>(&v), effort, false);
                 put(o, &enc, c, channels);
@@ -505,8 +509,8 @@ fn put(o: &mut [u8], enc: &[u8; 64], c: usize, channels: usize) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn encode_span_avx2(s: &Surface, first: usize, out: &mut [u8], channels: usize, effort: u8) {
-    encode_span::<crate::simd::avx2::F>(s, first, out, channels, effort);
+fn encode_span_avx2(s: &Surface, first: usize, out: &mut [u8], chans: (usize, usize), effort: u8) {
+    encode_span::<crate::simd::avx2::F>(s, first, out, chans, effort);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -546,6 +550,17 @@ pub fn encode_batch(blocks: &[Block], channels: usize, effort: u8) -> Vec<[u8; 1
 /// straight from the surface (no intermediate blocks). Returns the raw blocks in raster order
 /// (8 or 16 bytes each).
 pub fn encode_surface(surface: &Surface, channels: usize, effort: u8) -> Vec<u8> {
+    encode_channels(surface, (0, channels), effort)
+}
+
+/// Encodes channel `c` of a surface as BC4 blocks (8 bytes each, raster order): BC3's alpha half
+/// for `c == 3`.
+pub fn encode_surface_channel(surface: &Surface, c: usize, effort: u8) -> Vec<u8> {
+    encode_channels(surface, (c, 1), effort)
+}
+
+/// Encodes channels `ch0..ch0 + channels` (one BC4 block each, in order) of every block.
+fn encode_channels(surface: &Surface, (ch0, channels): (usize, usize), effort: u8) -> Vec<u8> {
     use rayon::prelude::*;
     // Spans of whole SIMD batches; 512 blocks keeps rayon's per-task overhead negligible.
     const SPAN: usize = 512;
@@ -555,8 +570,8 @@ pub fn encode_surface(surface: &Surface, channels: usize, effort: u8) -> Vec<u8>
     out.par_chunks_mut(SPAN * bb).enumerate().for_each(|(ci, o)| match lvl {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
-        Level::Avx2 => unsafe { encode_span_avx2(surface, ci * SPAN, o, channels, effort) },
-        _ => encode_span::<f32x8>(surface, ci * SPAN, o, channels, effort),
+        Level::Avx2 => unsafe { encode_span_avx2(surface, ci * SPAN, o, (ch0, channels), effort) },
+        _ => encode_span::<f32x8>(surface, ci * SPAN, o, (ch0, channels), effort),
     });
     out
 }
@@ -690,7 +705,7 @@ mod profile {
             let mut out = vec![0u8; s.block_count() * 8];
             let t = std::time::Instant::now();
             // SAFETY: the profile only runs on AVX2 machines.
-            unsafe { encode_span_avx2(&s, 0, &mut out, 1, 0) };
+            unsafe { encode_span_avx2(&s, 0, &mut out, (0, 1), 0) };
             println!(
                 "rep {rep}: kernel e0 {t1:.3} ms, encode_surface e0 {t2:.3} ms, one span {:.3} ms ({sum} {} {})",
                 t.elapsed().as_secs_f64() * 1e3,

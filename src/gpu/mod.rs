@@ -134,7 +134,7 @@ impl Gpu {
     pub fn preferred(format: Format, opts: BlockOpts) -> bool {
         let _ = opts;
         match format {
-            Format::Bc1 | Format::Bc4 | Format::Bc5 | Format::Bc7 => false,
+            Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc5 | Format::Bc7 => false,
         }
     }
 
@@ -205,6 +205,8 @@ impl Gpu {
                 Format::Bc4 => self.dev.bc4(surfaces, 1, opts.effort).await,
                 Format::Bc5 => self.dev.bc4(surfaces, 2, opts.effort).await,
                 Format::Bc7 => self.dev.bc7(surfaces, opts).await,
+                // No kernel: `encodes` is false.
+                Format::Bc3 => None,
             }
         }
         #[cfg(not(feature = "gpu"))]
@@ -724,6 +726,7 @@ mod tests {
                     let opts = BlockOpts::from(effort);
                     let cpu = match format {
                         Format::Bc1 => crate::bc1::encode_surface(&surf, effort),
+                        Format::Bc3 => crate::bc3::encode_surface(&surf, effort),
                         Format::Bc4 => crate::bc4::encode_surface(&surf, 1, effort),
                         Format::Bc5 => crate::bc4::encode_surface(&surf, 2, effort),
                         Format::Bc7 => crate::bc7::fast::encode_surface(
