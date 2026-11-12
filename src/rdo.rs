@@ -1334,6 +1334,44 @@ struct Far7Pre {
     /// later blocks, and re-indexing it then skips building them.
     w: [u32; 4],
     pal6: Vec<Option<bc7::Pal6>>,
+    /// Per block: the latest earlier mode-6 block with the same head (low 8 bytes), or
+    /// `u32::MAX`; `last` maps each head to its latest block.
+    prv: Vec<u32>,
+    last: std::collections::HashMap<u64, u32, std::hash::BuildHasherDefault<KeyHasher>>,
+    /// The mode-6 blocks of the filtered range whose head no later block of the range has, from
+    /// `live[head..]` (in block order; `la`/`lb`: their `a`/`b`). Only those can need a far
+    /// re-index: the scan reaches a head's latest block first, and its verdict (and the
+    /// endpoints memo) then covers the head's earlier blocks. `live_at`: a block's index into
+    /// `live`, or `u32::MAX` once it left; a block that left in the middle (a later twin entered)
+    /// stays in `live` with a NaN `la`, which fails the test. `dead` counts those, `entered` is
+    /// the end of the range last filtered.
+    live: Vec<u32>,
+    la: [Vec<f32>; 4],
+    lb: [Vec<f32>; 4],
+    live_at: Vec<u32>,
+    head: usize,
+    dead: usize,
+    entered: usize,
+    /// Per live block of the last filter: whether its re-index may pass (as mask bit 1).
+    hit: Vec<u8>,
+}
+
+/// Multiply-rotate hashing for `u64` keys.
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl std::hash::Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0 ^ x).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    }
 }
 
 /// One current block's side of [`Far7Pre::filter`].
@@ -1362,6 +1400,16 @@ impl Far7Pre {
             mask: Vec::new(),
             w: *w,
             pal6: Vec::with_capacity(cap),
+            prv: Vec::with_capacity(cap),
+            last: Default::default(),
+            live: Vec::new(),
+            la: Default::default(),
+            lb: Default::default(),
+            live_at: Vec::with_capacity(cap),
+            head: 0,
+            dead: 0,
+            entered: 0,
+            hit: Vec::new(),
         }
     }
 
@@ -1369,6 +1417,10 @@ impl Far7Pre {
         let t = sums.map_or([1e9; 4], |t| t.map(|x| x as f32));
         let ends = bc7::is_mode6(raw).then(|| bc7::mode6_head_endpoints(raw));
         self.pal6.push(bc7::Pal6::new(raw, &self.w));
+        let at = self.prv.len() as u32;
+        let twin = ends.and_then(|_| self.last.insert(field_key(&raw[..8]), at));
+        self.prv.push(twin.unwrap_or(u32::MAX));
+        self.live_at.push(u32::MAX);
         for c in 0..4 {
             self.sums[c].push(t[c]);
             let [a, b] = ends.map_or([f32::NAN; 2], |e| [0, 1].map(|k| e[k][c] as f32 * self.sw[c]));
@@ -1400,10 +1452,71 @@ impl Far7Pre {
         }
     }
 
-    /// Fills `mask` for blocks `lo..hi`.
+    /// Moves the live range to `lo..hi` (neither end may move back).
+    fn advance(&mut self, lo: usize, hi: usize) {
+        while self.entered < hi {
+            let p = self.entered;
+            self.entered += 1;
+            if self.a[0][p].is_nan() {
+                continue;
+            }
+            self.live_at[p] = self.live.len() as u32;
+            self.live.push(p as u32);
+            for c in 0..4 {
+                self.la[c].push(self.a[c][p]);
+                self.lb[c].push(self.b[c][p]);
+            }
+            let q = self.prv[p];
+            if q != u32::MAX {
+                let k = std::mem::replace(&mut self.live_at[q as usize], u32::MAX);
+                if k != u32::MAX {
+                    self.la[0][k as usize] = f32::NAN;
+                    self.dead += 1;
+                }
+            }
+        }
+        while self.head < self.live.len() && (self.live[self.head] as usize) < lo {
+            let p = self.live[self.head] as usize;
+            if self.live_at[p] == u32::MAX {
+                self.dead -= 1;
+            } else {
+                self.live_at[p] = u32::MAX;
+            }
+            self.head += 1;
+        }
+        let stale = self.head + self.dead;
+        if stale > 64 && stale * 2 > self.live.len() {
+            let mut k = 0;
+            for r in self.head..self.live.len() {
+                let p = self.live[r] as usize;
+                if self.live_at[p] as usize != r {
+                    continue;
+                }
+                self.live[k] = p as u32;
+                self.live_at[p] = k as u32;
+                for c in 0..4 {
+                    self.la[c][k] = self.la[c][r];
+                    self.lb[c][k] = self.lb[c][r];
+                }
+                k += 1;
+            }
+            self.live.truncate(k);
+            for c in 0..4 {
+                self.la[c].truncate(k);
+                self.lb[c].truncate(k);
+            }
+            self.head = 0;
+            self.dead = 0;
+        }
+    }
+
+    /// Fills `mask` for blocks `lo..hi` (neither end may move back between calls).
     fn filter(&mut self, lo: usize, hi: usize, q: &Far7Query) {
+        self.advance(lo, hi);
         self.mask.clear();
         self.mask.resize(hi - lo, 0);
+        self.hit.clear();
+        self.hit.resize(self.live.len() - self.head, 0);
         #[cfg(target_arch = "x86_64")]
         if crate::simd::level() == crate::simd::Level::Avx2 {
             // SAFETY: AVX2 and FMA were detected.
@@ -1419,22 +1532,31 @@ impl Far7Pre {
         self.filter_body(lo, hi, q);
     }
 
-    /// Branch-free so it vectorizes. NaN endpoints (not mode 6) give a NaN `d2`, which fails.
+    /// Branch-free so it vectorizes: the whole-copy test over every block, then the re-index
+    /// test over the live blocks (a NaN `la` gives a NaN `d2`, which fails), merged into `mask`.
     #[inline(always)]
     fn filter_body(&mut self, lo: usize, hi: usize, q: &Far7Query) {
         let n = hi - lo;
         let sums: [&[f32]; 4] = std::array::from_fn(|c| &self.sums[c][lo..hi]);
-        let a: [&[f32]; 4] = std::array::from_fn(|c| &self.a[c][lo..hi]);
-        let b: [&[f32]; 4] = std::array::from_fn(|c| &self.b[c][lo..hi]);
         let mask = &mut self.mask[..n];
         for k in 0..n {
             let mut lb = 0f32;
+            for c in 0..4 {
+                let d = q.sums[c] - sums[c][k];
+                lb += q.w[c] * d * d;
+            }
+            mask[k] = u8::from(lb <= q.lb_thr);
+        }
+        let h = self.head;
+        let m = self.live.len() - h;
+        let a: [&[f32]; 4] = std::array::from_fn(|c| &self.la[c][h..h + m]);
+        let b: [&[f32]; 4] = std::array::from_fn(|c| &self.lb[c][h..h + m]);
+        let hit = &mut self.hit[..m];
+        for k in 0..m {
             let (mut len2, mut dot) = (0f32, 0f32);
             let mut ab = [0f32; 4];
             let mut am = [0f32; 4];
             for c in 0..4 {
-                let d = q.sums[c] - sums[c][k];
-                lb += q.w[c] * d * d;
                 ab[c] = b[c][k] + q.p1[c] - a[c][k];
                 am[c] = q.mean[c] - a[c][k];
                 len2 += ab[c] * ab[c];
@@ -1446,7 +1568,10 @@ impl Far7Pre {
                 let e = am[c] - t * ab[c];
                 d2 += e * e;
             }
-            mask[k] = u8::from(lb <= q.lb_thr) | u8::from(d2 <= q.thr6) << 1;
+            hit[k] = u8::from(d2 <= q.thr6) << 1;
+        }
+        for (&p, &x) in self.live[h..].iter().zip(hit.iter()) {
+            mask[p as usize - lo] |= x;
         }
     }
 }
@@ -2490,6 +2615,71 @@ mod tests {
         // It must also drop something.
         println!("dropped {dropped} of {tested} at half the error");
         assert!(dropped * 4 > tested, "dropped {dropped} of {tested}");
+    }
+
+    /// [`Far7Pre::filter`] over a sliding range of blocks with many repeated heads: the
+    /// whole-copy bit of every block, and the re-index bit exactly for the mode-6 blocks that pass
+    /// the segment test and whose head no later block of the range has (a full scan's verdicts,
+    /// with the twins the endpoints memo would skip dropped).
+    #[test]
+    fn far7_live_heads_match_a_full_scan() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let w = [2u32, 3, 1, 5];
+        let heads: Vec<[u8; 8]> = (0..12)
+            .map(|k| {
+                let mut h: [u8; 8] = std::array::from_fn(|_| next() as u8);
+                let mode = if k < 9 { 6 } else { [0u8, 1, 7][k % 3] };
+                h[0] = (h[0] & !(((2u16 << mode) - 1) as u8)) | 1 << mode;
+                h
+            })
+            .collect();
+        let (back, far) = (3, 40);
+        let mut pre = Far7Pre::new(&w, 2000);
+        let mut raws: Vec<[u8; 16]> = Vec::new();
+        let (mut ones, mut twos) = (0, 0);
+        for i in 1..2000usize {
+            let mut raw: [u8; 16] = std::array::from_fn(|_| next() as u8);
+            raw[..8].copy_from_slice(&heads[(next() % 12) as usize]);
+            let sums: [i32; 4] = std::array::from_fn(|_| 1740 + (next() % 600) as i32);
+            pre.push(&raw, (next() % 8 != 0).then_some(sums));
+            raws.push(raw);
+            let (lo, hi) = (i.saturating_sub(far), i.saturating_sub(back));
+            if hi <= lo {
+                continue;
+            }
+            let px: Block = std::array::from_fn(|_| std::array::from_fn(|_| next() as u8));
+            let base: [u8; 16] = std::array::from_fn(|_| next() as u8);
+            let q = pre.query(&px, &w, &base, next() % 60_000);
+            pre.filter(lo, hi, &q);
+            for j in lo..hi {
+                let mut lb = 0f32;
+                let (mut len2, mut dot) = (0f32, 0f32);
+                let mut ab = [0f32; 4];
+                let mut am = [0f32; 4];
+                for c in 0..4 {
+                    let d = q.sums[c] - pre.sums[c][j];
+                    lb += q.w[c] * d * d;
+                    ab[c] = pre.b[c][j] + q.p1[c] - pre.a[c][j];
+                    am[c] = q.mean[c] - pre.a[c][j];
+                    len2 += ab[c] * ab[c];
+                    dot += am[c] * ab[c];
+                }
+                let t = (dot / len2.max(1e-30)).clamp(0.0, 1.0);
+                let d2: f32 = (0..4).map(|c| (am[c] - t * ab[c]).powi(2)).sum();
+                let latest = !(j + 1..hi).any(|k| raws[k][..8] == raws[j][..8]);
+                let want = u8::from(lb <= q.lb_thr) | u8::from(d2 <= q.thr6 && latest) << 1;
+                assert_eq!(pre.mask[j - lo], want, "block {j} of {lo}..{hi}");
+                ones += usize::from(want & 1);
+                twos += usize::from(want >> 1);
+            }
+        }
+        assert!(ones > 1000 && twos > 1000, "copies {ones} re-indexes {twos}");
     }
 
     #[test]
