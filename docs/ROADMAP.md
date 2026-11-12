@@ -4,6 +4,12 @@ Each item should land with a benchmark delta (see `bench-results/`). Major and m
 milestone in progress; every green push to main is released as the next patch (`vX.Y.Z`, with binaries;
 `.github/workflows/release.yml`). Ideas tried and dropped are catalogued in [DEADENDS.md](DEADENDS.md).
 
+## Next up
+
+1. **ASTC LDR (4x4, 6x6, 8x8)** output, with the same RDO pass (v1.0 below).
+2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
+3. ETC2 / EAC for mobile fallbacks.
+
 ## v0.1 (pre-release): encoder and container
 
 - [x] BC1, BC4, BC5 and BC7 encoders and decoders, mip generation, KTX2 writer/reader with Zstd
@@ -116,12 +122,11 @@ Open for v0.9.x:
   Haven HDRIs effort 2 beats ISPC veryslow at a fifteenth of its time (BENCHMARKS.md). EXR input was dropped
   for build time (DEADENDS.md).
   - [x] Eight-block batch encoder (one block per lane, per-lane mode and partition): 2.0× faster at
-    effort 0 and 2.6-2.8× at efforts 5 and 9, with the same quality. Effort 0 is now 0.13 dB ahead of
-    ISPC fast at 1.07× its time.
-  - [ ] Close the last 7% to ISPC fast: partition ranking and the mode estimates still run one lane at
-    a time.
+    effort 0 and 2.6-2.8× at efforts 5 and 9, with the same quality.
+  - [x] Partition ranking across lanes (byte-identical output): effort 0 is 0.13 dB ahead of ISPC fast
+    and 13% faster. The mode estimates still run one lane at a time.
   - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
-- [ ] ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.
+- [ ] **ASTC LDR (4x4, 6x6, 8x8)** output, with the same RDO pass. Next up.
 - [ ] ETC2 / EAC for mobile fallbacks.
 
 ## v1.1: perception and speed

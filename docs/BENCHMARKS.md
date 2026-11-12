@@ -514,10 +514,10 @@ time for texconv and Compressonator, which includes loading and writing):
 
 | encoder | mPSNR dB | log2 RMSE | Zstd-19 bpt | time s |
 | --- | ---: | ---: | ---: | ---: |
-| mipple effort 0 | 46.713 | 0.03980 | 7.388 | 1.20 |
-| mipple effort 2 | 46.873 | 0.03901 | 7.387 | 1.66 |
-| mipple effort 5 | 47.022 | 0.03830 | 7.392 | 3.61 |
-| mipple effort 9 | 47.117 | 0.03785 | 7.400 | 91.5 |
+| mipple effort 0 | 46.713 | 0.03980 | 7.388 | 0.98 |
+| mipple effort 2 | 46.873 | 0.03901 | 7.387 | 1.39 |
+| mipple effort 5 | 47.022 | 0.03830 | 7.392 | 3.62 |
+| mipple effort 9 | 47.117 | 0.03785 | 7.400 | 83.9 |
 | ISPC veryfast | 44.857 | 0.05035 | 7.213 | 0.16 |
 | ISPC fast | 46.586 | 0.04034 | 7.370 | 1.12 |
 | ISPC basic | 46.745 | 0.03959 | 7.359 | 2.79 |
@@ -528,8 +528,8 @@ time for texconv and Compressonator, which includes loading and writing):
 | Compressonator q1.0 | 45.944 | 0.04552 | 7.243 | 2985 |
 
 mipple encodes eight blocks at a time, one per SIMD lane, as ISPC does. Effort 0 is 0.13 dB ahead of ISPC
-fast at 1.07× its time. Effort 2 is ahead of ISPC basic at 60% of basic's time, and ahead of ISPC veryslow
-(+0.03 dB) at a fifteenth of veryslow's time. Effort 5 is 0.17 dB ahead of every competitor setting in
+fast and 13% faster. Effort 2 is ahead of ISPC basic at half of basic's time, and ahead of ISPC veryslow
+(+0.03 dB) at an eighteenth of veryslow's time. Effort 5 is 0.17 dB ahead of every competitor setting in
 3.6 s. Only ISPC veryfast is faster, at 1.9 dB lower quality. Zstd sizes are within 0.5% of each other
 for every encoder at this quality (BC6H has no RDO yet).
 

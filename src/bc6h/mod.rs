@@ -11,7 +11,6 @@
 //! `tests/bc6h_reference.rs`.
 
 use crate::bc7::{anchors, subset_of};
-use crate::fit::V4;
 
 mod batch;
 
@@ -521,102 +520,6 @@ fn search(effort: u8) -> Search {
 const ONE_ORDER: [usize; 4] = [13, 12, 11, 10];
 /// Two-region modes, most precise endpoints first.
 const TWO_ORDER: [usize; 10] = [2, 3, 4, 0, 5, 6, 7, 8, 1, 9];
-
-/// Per-nibble moment tables of a block's texels (centered on the block mean): `tab[k][m]` sums
-/// r, g, b, rr, rg, rb, gg, gb, bb over texels `4k + j` with bit `j` of `m` set; and the totals.
-fn moment_tables(c: &[[f32; 3]; 16]) -> ([[[f32; 9]; 16]; 4], [f32; 9]) {
-    let mut tab = [[[0f32; 9]; 16]; 4];
-    let mut tot = [0f32; 9];
-    for (k, t) in tab.iter_mut().enumerate() {
-        for m in 1..16usize {
-            let p = c[4 * k + m.trailing_zeros() as usize];
-            let mo = [
-                p[0],
-                p[1],
-                p[2],
-                p[0] * p[0],
-                p[0] * p[1],
-                p[0] * p[2],
-                p[1] * p[1],
-                p[1] * p[2],
-                p[2] * p[2],
-            ];
-            let prev = t[m & (m - 1)];
-            t[m] = std::array::from_fn(|v| prev[v] + mo[v]);
-        }
-        for v in 0..9 {
-            tot[v] += t[15][v];
-        }
-    }
-    (tab, tot)
-}
-
-/// Adds to `out[p]` the estimated squared error of fitting partition `p`'s region (`n[p]` texels,
-/// moments `s[v][p]`) by a line with 3-bit indices: the scatter off the line, through the Rayleigh
-/// quotient after one power step from `axis`, plus the index rounding along it. Laid out across the
-/// 32 partitions so it vectorizes.
-fn region_estimates(s: &[[f32; 32]; 9], n: &[f32; 32], axis: &[f32; 3], out: &mut [f32; 32]) {
-    for p in 0..32 {
-        let n = n[p];
-        let (s0, s1, s2) = (s[0][p], s[1][p], s[2][p]);
-        // n times the scatter matrix.
-        let a0 = n * s[3][p] - s0 * s0;
-        let a1 = n * s[4][p] - s0 * s1;
-        let a2 = n * s[5][p] - s0 * s2;
-        let a3 = n * s[6][p] - s1 * s1;
-        let a4 = n * s[7][p] - s1 * s2;
-        let a5 = n * s[8][p] - s2 * s2;
-        let tr = a0 + a3 + a5;
-        let v0 = a0 * axis[0] + a1 * axis[1] + a2 * axis[2];
-        let v1 = a1 * axis[0] + a3 * axis[1] + a4 * axis[2];
-        let v2 = a2 * axis[0] + a4 * axis[1] + a5 * axis[2];
-        let w0 = a0 * v0 + a1 * v1 + a2 * v2;
-        let w1 = a1 * v0 + a3 * v1 + a4 * v2;
-        let w2 = a2 * v0 + a4 * v1 + a5 * v2;
-        let vv = v0 * v0 + v1 * v1 + v2 * v2;
-        let vw = v0 * w0 + v1 * w1 + v2 * w2;
-        let lambda = if vv > 0.0 { vw / vv } else { 0.0 };
-        let e = (tr - lambda * (48.0 / 49.0)).max(0.0) / n.max(1.0);
-        out[p] += if n >= 2.0 { e } else { 0.0 };
-    }
-}
-
-/// The two-region partitions by estimated error, the `k` best first and sorted, with the
-/// estimates (on the 16-bit scale).
-fn rank_partitions(t: &[V4; 16], mean: &V4, axis: &V4, k: usize) -> ([u8; 32], [f32; 32]) {
-    let c: [[f32; 3]; 16] = std::array::from_fn(|i| std::array::from_fn(|ch| t[i][ch] - mean[ch]));
-    let (tab, tot) = moment_tables(&c);
-    let ax = [axis[0], axis[1], axis[2]];
-    let mut s1 = [[0f32; 32]; 9];
-    let mut n1 = [0f32; 32];
-    for p in 0..32 {
-        let mask = crate::bc7::tables::PART2[p];
-        for (kk, t) in tab.iter().enumerate() {
-            let m = &t[((mask >> (4 * kk)) & 15) as usize];
-            for v in 0..9 {
-                s1[v][p] += m[v];
-            }
-        }
-        n1[p] = (mask & 0xffff).count_ones() as f32;
-    }
-    let s0: [[f32; 32]; 9] = std::array::from_fn(|v| std::array::from_fn(|p| tot[v] - s1[v][p]));
-    let n0: [f32; 32] = std::array::from_fn(|p| 16.0 - n1[p]);
-    let mut e = [0f32; 32];
-    region_estimates(&s0, &n0, &ax, &mut e);
-    region_estimates(&s1, &n1, &ax, &mut e);
-    let mut est: [(f32, u8); 32] = std::array::from_fn(|p| (e[p], p as u8));
-    let k = k.clamp(1, 32);
-    if k == 1 {
-        let b = (1..32).fold(0, |b, p| if est[p].0 < est[b].0 { p } else { b });
-        est.swap(0, b);
-    } else {
-        if k < 32 {
-            est.select_nth_unstable_by(k - 1, |a, b| a.0.total_cmp(&b.0));
-        }
-        est[..k].sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    }
-    (est.map(|e| e.1), est.map(|e| e.0))
-}
 
 /// Encodes one block of half floats (negative values and NaN as 0) at effort 0..=9.
 pub fn encode_block(px: &HdrBlock, effort: u8) -> [u8; 16] {

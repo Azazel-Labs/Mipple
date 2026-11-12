@@ -10,9 +10,11 @@
 //! instantiates them with the target feature enabled. No closures inside kernels: they don't
 //! inherit the caller's target features (see docs/DEADENDS.md).
 
-use super::{Bc6hBlock, HALF_MAX, HdrBlock, MODES, ONE_ORDER, Search, TWO_ORDER, W3, W4, pack, rank_partitions};
+use super::{Bc6hBlock, HALF_MAX, HdrBlock, MODES, ONE_ORDER, Search, TWO_ORDER, W3, W4, pack};
 use crate::bc7::tables::{ANCHOR2, PART2};
-use crate::simd::{LANES, Level, SimdF32, SimdI32, f32x8};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::Level;
+use crate::simd::{LANES, SimdF32, SimdI32, f32x8};
 
 type Mask<V> = <V as SimdF32>::Mask;
 type Int<V> = <V as SimdF32>::Int;
@@ -713,6 +715,138 @@ fn pick_modes<V: SimdF32, const N: usize>(
     out
 }
 
+/// The moment sums of every subset of each row of four texels: `tab[k][m][v]` is moment `v` (x, y,
+/// z, then the six products) summed over the texels `4k + j` with bit `j` set in `m`; and the
+/// totals over all sixteen.
+#[inline(always)]
+fn moment_tables<V: SimdF32>(c: &[[V; 3]; 16]) -> ([[[V; 9]; 16]; 4], [V; 9]) {
+    let mut tab = [[[zero::<V>(); 9]; 16]; 4];
+    let mut tot = [zero::<V>(); 9];
+    for (k, t) in tab.iter_mut().enumerate() {
+        for m in 1..16usize {
+            let p = c[4 * k + m.trailing_zeros() as usize];
+            let mo = [
+                p[0],
+                p[1],
+                p[2],
+                p[0] * p[0],
+                p[0] * p[1],
+                p[0] * p[2],
+                p[1] * p[1],
+                p[1] * p[2],
+                p[2] * p[2],
+            ];
+            let prev = t[m & (m - 1)];
+            for v in 0..9 {
+                t[m][v] = prev[v] + mo[v];
+            }
+        }
+        for v in 0..9 {
+            tot[v] += t[15][v];
+        }
+    }
+    (tab, tot)
+}
+
+/// The estimated squared error of fitting a region of `n` texels (moments `s`) by a line with 3-bit
+/// indices: the scatter off the line, through the Rayleigh quotient after one power step from
+/// `axis`, plus the index rounding along it. Zero for fewer than two texels.
+#[inline(always)]
+fn region_estimate<V: SimdF32>(s: &[V; 9], n: f32, axis: &[V; 3]) -> V {
+    if n < 2.0 {
+        return zero();
+    }
+    let nv = V::splat(n);
+    let (s0, s1, s2) = (s[0], s[1], s[2]);
+    // n times the scatter matrix.
+    let a0 = nv * s[3] - s0 * s0;
+    let a1 = nv * s[4] - s0 * s1;
+    let a2 = nv * s[5] - s0 * s2;
+    let a3 = nv * s[6] - s1 * s1;
+    let a4 = nv * s[7] - s1 * s2;
+    let a5 = nv * s[8] - s2 * s2;
+    let tr = a0 + a3 + a5;
+    let v0 = a0 * axis[0] + a1 * axis[1] + a2 * axis[2];
+    let v1 = a1 * axis[0] + a3 * axis[1] + a4 * axis[2];
+    let v2 = a2 * axis[0] + a4 * axis[1] + a5 * axis[2];
+    let w0 = a0 * v0 + a1 * v1 + a2 * v2;
+    let w1 = a1 * v0 + a3 * v1 + a4 * v2;
+    let w2 = a2 * v0 + a4 * v1 + a5 * v2;
+    let vv = v0 * v0 + v1 * v1 + v2 * v2;
+    let vw = v0 * w0 + v1 * w1 + v2 * w2;
+    let lambda = V::select(zero::<V>().simd_lt(vv), vw / vv, zero());
+    (tr - lambda * V::splat(48.0 / 49.0)).simd_max(zero()) / V::splat(n.max(1.0))
+}
+
+/// Each lane's two-region partitions by estimated error (16-bit scale), the `k` best first and in
+/// order, and each lane's best estimate. The masks are the same in every lane, so the per-partition
+/// moment sums are plain vector adds; only the final ordering runs per lane.
+#[inline(always)]
+fn rank_partitions<V: SimdF32>(tg: &Target<V>, mean: &[V; 3], axis: &[V; 3], k: usize) -> ([[u8; 32]; LANES], V) {
+    let mut c = [[zero::<V>(); 3]; 16];
+    for i in 0..16 {
+        for ch in 0..3 {
+            c[i][ch] = tg.t[i][ch] - mean[ch];
+        }
+    }
+    let (tab, tot) = moment_tables(&c);
+    let mut est = [zero::<V>(); 32];
+    for p in 0..32 {
+        let mask = PART2[p];
+        let mut s1 = [zero::<V>(); 9];
+        for (kk, t) in tab.iter().enumerate() {
+            let m = &t[((mask >> (4 * kk)) & 15) as usize];
+            for v in 0..9 {
+                s1[v] += m[v];
+            }
+        }
+        let mut s0 = [zero::<V>(); 9];
+        for v in 0..9 {
+            s0[v] = tot[v] - s1[v];
+        }
+        let n1 = (mask & 0xffff).count_ones() as f32;
+        est[p] = zero::<V>() + region_estimate(&s0, 16.0 - n1, axis);
+        est[p] += region_estimate(&s1, n1, axis);
+    }
+    let mut parts = [[0u8; 32]; LANES];
+    let k = k.clamp(1, 32);
+    if k == 1 {
+        // The first least estimate.
+        let mut be = est[0];
+        let mut bi = zero::<V>();
+        for (p, &e) in est.iter().enumerate().skip(1) {
+            let lt = e.simd_lt(be);
+            be = V::select(lt, e, be);
+            bi = V::select(lt, V::splat(p as f32), bi);
+        }
+        let bi = bi.to_array();
+        for l in 0..LANES {
+            parts[l][0] = bi[l] as u8;
+        }
+        return (parts, be);
+    }
+    let mut lanes = [[0f32; LANES]; 32];
+    for p in 0..32 {
+        lanes[p] = est[p].to_array();
+    }
+    let mut best = [0f32; LANES];
+    for l in 0..LANES {
+        let mut e: [(f32, u8); 32] = [(0.0, 0); 32];
+        for p in 0..32 {
+            e[p] = (lanes[p][l], p as u8);
+        }
+        if k < 32 {
+            e.select_nth_unstable_by(k - 1, |a, b| a.0.total_cmp(&b.0));
+        }
+        e[..k].sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        for p in 0..32 {
+            parts[l][p] = e[p].1;
+        }
+        best[l] = e[0].0;
+    }
+    (parts, V::from_array(best))
+}
+
 /// Encodes eight blocks with search settings `s`.
 #[inline(always)]
 fn encode8<V: SimdF32>(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
@@ -740,36 +874,11 @@ fn encode8<V: SimdF32>(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
     if V::mask_any(active) {
         // Two regions: each lane ranks the partitions by estimated fit.
         let np = s.partitions.clamp(1, 32);
-        let mut parts = [[0u8; 32]; LANES];
-        let mut est0 = [0f32; LANES];
-        let mut tt = [[[0f32; LANES]; 3]; 16];
-        let mut ma = [[0f32; LANES]; 3];
-        let mut aa = [[0f32; LANES]; 3];
-        for c in 0..3 {
-            for i in 0..16 {
-                tt[i][c] = tg.t[i][c].to_array();
-            }
-            ma[c] = mean[c].to_array();
-            aa[c] = axis[c].to_array();
-        }
-        for l in 0..LANES {
-            let mut t = [[0f32; 4]; 16];
-            for i in 0..16 {
-                t[i] = [tt[i][0][l], tt[i][1][l], tt[i][2][l], 0.0];
-            }
-            let (pl, el) = rank_partitions(
-                &t,
-                &[ma[0][l], ma[1][l], ma[2][l], 0.0],
-                &[aa[0][l], aa[1][l], aa[2][l], 0.0],
-                np,
-            );
-            parts[l] = pl;
-            est0[l] = el[0];
-        }
+        let (parts, est0) = rank_partitions(&tg, &mean, &axis, np);
         if s.skip > 0.0 {
             // The estimate is on the 16-bit scale; errors are in half bits.
             let scale = (31.0f32 / 64.0) * (31.0 / 64.0);
-            let lim = V::from_array(est0) * V::splat(s.skip * scale);
+            let lim = est0 * V::splat(s.skip * scale);
             active = active & lim.simd_lt(best.t.err);
         }
         let k2 = s.modes2.clamp(1, TWO_ORDER.len());
