@@ -417,7 +417,10 @@ base's size there (byte-identical, about 2.5% less at λ 1), and the ranker's pr
 key, not 16 (λ 20 SSIM, λ 30 SSIM and λ 40 change by 0.1% in the table, each cell by at most 0.07%; about 2%
 less). The second base then skipped mode 3, which survives RDO in about 1 block in 12 of those it wins there:
 no cell moved by more than 0.05%, the larger moves gains (λ 20 at RMSE −0.3% to −0.4%), for about 6.5% less
-CPU at λ 1 and 3.7% at λ 4. mipple now takes about 1.1× Oodle's CPU time for the same size and quality.
+CPU at λ 1 and 3.7% at λ 4. It then refit endpoints once, not twice, and skipped mode 5 (no cell moved by
+more than 0.01% at RMSE, SSIM gains up to 0.03%; 3.4% less at λ 1). Chained, these paired measurements
+put mipple at about Oodle's CPU time for the same size and quality (1.0-1.1×; absolute timings on this
+laptop drift by about 5% between sessions, so the ratio wants a fresh side-by-side run).
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
 λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
