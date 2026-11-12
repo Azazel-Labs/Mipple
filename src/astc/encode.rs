@@ -6,7 +6,8 @@
 //! encoded exactly: weights quantized, endpoints refitted to them and quantized, the result decoded
 //! and measured.
 
-use super::decode::{ERROR, lerp1};
+use super::decode::ERROR;
+use super::lanes::{I16x8, I32x4};
 use super::{BlockMode, COLOR_UNQUANT, RANGES, Symbolic, WEIGHT_RANGES, WEIGHT_UNQUANT, block_mode, color_range};
 use crate::surface::{Rgba, Surface};
 
@@ -494,7 +495,6 @@ struct Texels<'a> {
     f: [[f32; 4]; MAX_TEXELS],
     n: usize,
     ch: usize,
-    srgb: bool,
 }
 
 /// No channel on a second weight plane.
@@ -529,9 +529,16 @@ impl Texels<'_> {
     /// Texel `i`'s squared error in channel `c` for endpoint values `e0`, `e1` and weight `w`.
     #[inline]
     fn channel_error(&self, i: usize, c: usize, e0: i32, e1: i32, w: u8) -> u32 {
-        let x = lerp1(e0, e1, w as u32, self.srgb && c < 3) - self.px[i][c] as i32;
+        let x = lerp8(e0, e1, w as i32) - self.px[i][c] as i32;
         (x * x) as u32
     }
+}
+
+/// The decoded value of eight-bit endpoints `e0`, `e1` at weight `w` (0..=64), in either color
+/// space: the sRGB path's `((e << 8 | 0x80) interpolated + 32) >> 14` is the linear one.
+#[inline]
+fn lerp8(e0: i32, e1: i32, w: i32) -> i32 {
+    (64 * e0 + 32 + w * (e1 - e0)) >> 6
 }
 
 /// One texel's weight from plane `pl` of grid weights `g` (0..=64, `planes` interleaved), as the
@@ -705,6 +712,11 @@ fn sym_endpoints(sym: &Symbolic, p: usize) -> ([i32; 4], [i32; 4]) {
 
 /// Coordinate descent on a finished block: steps each weight and endpoint code to its neighbor
 /// levels while the decoded error falls (the lower neighbor first). Returns the new error.
+///
+/// A texel's decoded channel at weight `w` is `(64 e0 + 32 + w (e1 - e0)) >> 6`, every term of
+/// which fits in i16, so the errors are taken eight lanes at a time: for a weight step, one texel's
+/// four channels at the step down and the step up; for an endpoint step, eight texels of the
+/// partition in one channel.
 fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usize) -> u32 {
     let tb = tables();
     let q = sym.mode.quant as usize;
@@ -721,6 +733,12 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
     for j in 0..kk {
         g[j] = wu[sym.weights[j] as usize];
     }
+    // The plane that drives channel `c`; per plane, a mask of the channel lanes it drives (lanes
+    // 0..4 and 4..8 are the same four channels).
+    let plane_of = |c: usize| (c == ccs) as usize;
+    let mask: [I16x8; 2] = std::array::from_fn(|pl| {
+        I16x8::from_array(std::array::from_fn(|l| -((l % 4 < ch && plane_of(l % 4) == pl) as i16)))
+    });
     // Each texel's infill sum (16 times its weight, plus the rounding 8), so a grid point's step
     // moves its texels' sums by its tap weight times the step.
     let mut sums = [[0u16; MAX_TEXELS]; 2];
@@ -733,47 +751,66 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             *o = v as u16;
         }
     }
+    // Per partition, `64 e0 + 32` and `e1 - e0` in each channel lane.
+    let lanes_of = |e: &([i32; 4], [i32; 4])| {
+        (
+            I16x8::from_array(std::array::from_fn(|l| (64 * e.0[l % 4] + 32) as i16)),
+            I16x8::from_array(std::array::from_fn(|l| (e.1[l % 4] - e.0[l % 4]) as i16)),
+        )
+    };
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    for (p, e) in eps.iter_mut().enumerate().take(parts) {
-        *e = sym_endpoints(sym, p);
+    let mut base = [I16x8::splat(0); 3];
+    let mut slope = [I16x8::splat(0); 3];
+    for p in 0..parts {
+        eps[p] = sym_endpoints(sym, p);
+        (base[p], slope[p]) = lanes_of(&eps[p]);
     }
-    // The texels of each partition: `order[at[p]..at[p + 1]]`.
-    let mut order = [0u8; MAX_TEXELS];
-    let mut at = [0usize; 4];
-    if parts == 1 {
-        for (i, o) in order[..n].iter_mut().enumerate() {
-            *o = i as u8;
+    let mut xs = [I16x8::splat(0); MAX_TEXELS];
+    for (x, p) in xs.iter_mut().zip(&t.px[..n]) {
+        *x = I16x8::from_array(std::array::from_fn(|l| p[l % 4] as i16));
+    }
+    // Texel `i`'s error at weight `w` over the channels of plane `pl`.
+    let texel_err = |base: &[I16x8; 3], slope: &[I16x8; 3], i: usize, pl: usize, w: u16| -> i32 {
+        let p = lay.labels[i] as usize;
+        let v = base[p].add(I16x8::splat(w as i16).mul(slope[p])).shr::<6>();
+        let s = v.sub(xs[i]).and(mask[pl]).sq_pairs().to_array();
+        s[0] + s[1]
+    };
+    // The texels by partition, eight lanes at a time: partition `p`'s are lanes `seg[p]..seg[p +
+    // 1]` (each start a multiple of eight; `live` masks off the padding), texel `i` is lane
+    // `pos[i]`, with its weight per plane in `wl` and its channels in `xl`.
+    const LANES: usize = MAX_TEXELS + 24;
+    let mut seg = [0usize; 4];
+    let mut cnt = [0usize; 3];
+    for &l in &lay.labels[..n] {
+        cnt[l as usize] += 1;
+    }
+    for p in 0..parts {
+        seg[p + 1] = seg[p] + cnt[p].next_multiple_of(8);
+    }
+    let mut pos = [0u8; MAX_TEXELS];
+    let mut live = [0i16; LANES];
+    let mut wl = [[0i16; LANES]; 2];
+    let mut xl = [[0i16; LANES]; 4];
+    let mut fill = seg;
+    for i in 0..n {
+        let p = lay.labels[i] as usize;
+        let k = fill[p];
+        fill[p] += 1;
+        pos[i] = k as u8;
+        live[k] = -1;
+        for pl in 0..planes {
+            wl[pl][k] = (sums[pl][i] >> 4) as i16;
         }
-    } else {
-        for i in 0..n {
-            at[lay.labels[i] as usize + 1] += 1;
-        }
-        for p in 0..parts {
-            at[p + 1] += at[p];
-        }
-        let mut fill = at;
-        for i in 0..n {
-            let p = lay.labels[i] as usize;
-            order[fill[p]] = i as u8;
-            fill[p] += 1;
+        for c in 0..4 {
+            xl[c][k] = t.px[i][c] as i16;
         }
     }
-    at[parts] = n;
-    // The plane that drives channel `c`, and the channels each plane drives.
-    let plane_of = |c: usize| (c == ccs) as usize;
-    let mut chans = [[0usize; 4]; 2];
-    let mut nch = [0usize; 2];
-    for c in 0..ch {
-        let pl = plane_of(c);
-        chans[pl][nch[pl]] = c;
-        nch[pl] += 1;
-    }
-    // Per channel and texel: every weight and endpoint step changes only some channels.
-    let mut errs = [[0u32; MAX_TEXELS]; 4];
-    for c in 0..ch {
+    // Each texel's error over the channels of each plane.
+    let mut errp = [[0i32; MAX_TEXELS]; 2];
+    for pl in 0..planes {
         for i in 0..n {
-            let e = eps[lay.labels[i] as usize];
-            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], (sums[plane_of(c)][i] >> 4) as u8);
+            errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
         }
     }
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
@@ -784,19 +821,23 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             let old = sym.weights[j];
             let nb = [tb.wnb[q][0][old as usize], tb.wnb[q][1][old as usize]];
             let d = nb.map(|c| wu[c as usize] as i32 - g[j] as i32);
-            let mut delta = [0i64; 2];
+            let dl = I16x8::from_array(std::array::from_fn(|l| d[l / 4] as i16));
+            // The error of the texels the grid point reaches, now and after each step.
+            let mut acc = I32x4::zero();
+            let mut cur = 0i32;
             for &(i, tw) in &grid.rev[gp] {
                 let i = i as usize;
-                let si = sums[pl][i] as i32;
-                let nw = d.map(|d| ((si + tw as i32 * d) >> 4) as u8);
-                let e = eps[lay.labels[i] as usize];
-                for &c in &chans[pl][..nch[pl]] {
-                    let cur = errs[c][i] as i64;
-                    delta[0] += t.channel_error(i, c, e.0[c], e.1[c], nw[0]) as i64 - cur;
-                    delta[1] += t.channel_error(i, c, e.0[c], e.1[c], nw[1]) as i64 - cur;
-                }
+                let p = lay.labels[i] as usize;
+                let w = I16x8::splat(sums[pl][i] as i16)
+                    .add(I16x8::splat(tw as i16).mul(dl))
+                    .shr::<4>();
+                let v = base[p].add(w.mul(slope[p])).shr::<6>();
+                acc = acc.add(v.sub(xs[i]).and(mask[pl]).sq_pairs());
+                cur += errp[pl][i];
             }
-            let Some(dir) = (0..2).find(|&dir| nb[dir] != old && delta[dir] < 0) else {
+            let a = acc.to_array();
+            let after = [a[0] + a[1], a[2] + a[3]];
+            let Some(dir) = (0..2).find(|&dir| nb[dir] != old && after[dir] < cur) else {
                 continue;
             };
             sym.weights[j] = nb[dir];
@@ -804,26 +845,22 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             for &(i, tw) in &grid.rev[gp] {
                 let i = i as usize;
                 sums[pl][i] = (sums[pl][i] as i32 + tw as i32 * d[dir]) as u16;
-                let nw = (sums[pl][i] >> 4) as u8;
-                let e = eps[lay.labels[i] as usize];
-                for &c in &chans[pl][..nch[pl]] {
-                    errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], nw);
-                }
+                let w = sums[pl][i] >> 4;
+                wl[pl][pos[i] as usize] = w as i16;
+                errp[pl][i] = texel_err(&base, &slope, i, pl, w);
             }
             improved = true;
         }
         for p in 0..parts {
-            let texels = &order[at[p]..at[p + 1]];
             for v in 0..2 * nv {
                 let c = v / 2;
-                let pos = 2 * nv * p + v;
-                let old = sym.colors[pos];
-                let sp = &sums[plane_of(c)];
-                let ec = &errs[c];
-                let cur: u32 = texels.iter().map(|&i| ec[i as usize]).sum();
+                let pl = plane_of(c);
+                let slot = 2 * nv * p + v;
+                let old = sym.colors[slot];
                 // The endpoints after each step, unless it leaves the second endpoint's sum below
                 // the first's (which would swap them).
                 let mut cand = [None; 2];
+                let mut pairs = [(eps[p].0[c], eps[p].1[c]); 3];
                 for dir in 0..2 {
                     let nc = tb.cnb[cq][dir][old as usize];
                     if nc == old {
@@ -837,28 +874,37 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
                     }
                     if e.1[0] + e.1[1] + e.1[2] >= e.0[0] + e.0[1] + e.0[2] {
                         cand[dir] = Some((nc, e));
+                        pairs[dir + 1] = (e.0[c], e.1[c]);
                     }
                 }
-                let (lo, hi) = (
-                    cand[0].map_or((0, 0), |x| (x.1.0[c], x.1.1[c])),
-                    cand[1].map_or((0, 0), |x| (x.1.0[c], x.1.1[c])),
-                );
-                let mut err = [0u32; 2];
-                for &i in texels {
-                    let (i, w) = (i as usize, (sp[i as usize] >> 4) as u8);
-                    err[0] += t.channel_error(i, c, lo.0, lo.1, w);
-                    err[1] += t.channel_error(i, c, hi.0, hi.1, w);
+                if cand == [None; 2] {
+                    continue;
                 }
-                let Some(dir) = (0..2).find(|&dir| cand[dir].is_some() && err[dir] < cur) else {
+                // The partition's error in channel `c` now and after each step.
+                let bs = pairs.map(|(e0, _)| I16x8::splat((64 * e0 + 32) as i16));
+                let ss = pairs.map(|(e0, e1)| I16x8::splat((e1 - e0) as i16));
+                let mut acc = [I32x4::zero(); 3];
+                for k in (seg[p]..seg[p + 1]).step_by(8) {
+                    let w = I16x8::load(&wl[pl][k..]);
+                    let x = I16x8::load(&xl[c][k..]);
+                    let m = I16x8::load(&live[k..]);
+                    for s in 0..3 {
+                        let y = bs[s].add(w.mul(ss[s])).shr::<6>();
+                        acc[s] = acc[s].add(y.sub(x).and(m).sq_pairs());
+                    }
+                }
+                let err = acc.map(|a| a.to_array().iter().sum::<i32>());
+                let Some(dir) = (0..2).find(|&dir| cand[dir].is_some() && err[dir + 1] < err[0]) else {
                     continue;
                 };
                 let (nc, e) = cand[dir].unwrap();
-                sym.colors[pos] = nc;
+                sym.colors[slot] = nc;
                 eps[p] = e;
-                let (e0, e1) = (e.0[c], e.1[c]);
-                for &i in texels {
-                    let i = i as usize;
-                    errs[c][i] = t.channel_error(i, c, e0, e1, (sums[plane_of(c)][i] >> 4) as u8);
+                (base[p], slope[p]) = lanes_of(&e);
+                for i in 0..n {
+                    if lay.labels[i] as usize == p {
+                        errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
+                    }
                 }
                 improved = true;
             }
@@ -867,7 +913,7 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             break;
         }
     }
-    errs[..ch].iter().map(|e| e[..n].iter().sum::<u32>()).sum()
+    errp[..planes].iter().map(|e| e[..n].iter().sum::<i32>()).sum::<i32>() as u32
 }
 
 /// A partitioning of the block's texels, the channel on a second weight plane if any, and the
@@ -1426,8 +1472,10 @@ fn effort_settings(effort: u8) -> Effort {
     }
 }
 
-/// Encodes one block of `fp`'s footprint (row-major texels).
+/// Encodes one block of `fp`'s footprint (row-major texels). `srgb` changes nothing: eight-bit
+/// endpoints decode to the same values either way (see `lerp8`).
 pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8; 16] {
+    let _ = srgb;
     let n = fp.texels();
     debug_assert_eq!(px.len(), n);
     if px.iter().all(|&p| p == px[0]) {
@@ -1439,7 +1487,6 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         f: [[0.0; 4]; MAX_TEXELS],
         n,
         ch: if alpha { 4 } else { 3 },
-        srgb,
     };
     for (f, p) in t.f.iter_mut().zip(px) {
         *f = p.map(|x| x as f32);

@@ -247,6 +247,18 @@ mod tests {
     }
 
     #[test]
+    fn srgb_lerp_is_the_linear_one() {
+        // (256 L + 8224) >> 14 with L + 32 = 64 q + r, r < 64, is q: the encoder relies on it.
+        for e0 in 0..256 {
+            for e1 in 0..256 {
+                for w in 0..=64 {
+                    assert_eq!(lerp1(e0, e1, w, true), lerp1(e0, e1, w, false), "{e0} {e1} {w}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn infill_hits_the_grid_at_the_corners() {
         // An 8x8 block from a 5x5 grid: corner texels take the corner weights exactly.
         let w: Vec<u8> = (0..25).map(|i| (i * 2) as u8).collect();

@@ -11,6 +11,7 @@
 pub mod decode;
 pub mod encode;
 pub mod file;
+mod lanes;
 
 pub use decode::{decode_block, decode_rgba};
 

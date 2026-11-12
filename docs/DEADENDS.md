@@ -92,8 +92,10 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
 0.151 / 0.160 s at 4x4 / 6x6 / 8x8.
 
 - **Compiling for AVX2 (`target-cpu=x86-64-v3`) to vectorize the per-block code.** About 1%
-  faster. The loops run over 16-64 texels with gathers through grid taps and per-partition
-  filters, which LLVM doesn't vectorize.
+  faster at first, 6% after decimation went dense (0.424 / 0.379 / 0.324 s -> 0.401 / 0.357 /
+  0.302 s). The loops run over 16-64 texels with gathers through grid taps and per-partition
+  filters, which LLVM doesn't vectorize; rewriting polish's loops as structure-of-arrays for the
+  autovectorizer did nothing either. Explicit i16 lanes (`src/astc/lanes.rs`) are what worked.
 - **Stopping the candidate loop once an estimate exceeds the best error by a margin.** At 1.5×
   and 2× it saves under 3% at efforts 0 and 2. The shortlist is short and its estimates are close
   to each other, so few candidates get cut.
