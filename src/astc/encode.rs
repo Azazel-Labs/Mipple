@@ -6,7 +6,7 @@
 //! encoded exactly: weights quantized, endpoints refitted to them and quantized, the result decoded
 //! and measured.
 
-use super::decode::{ERROR, lerp};
+use super::decode::{ERROR, lerp1};
 use super::{BlockMode, COLOR_UNQUANT, RANGES, Symbolic, WEIGHT_RANGES, WEIGHT_UNQUANT, block_mode, color_range};
 use crate::surface::{Rgba, Surface};
 
@@ -28,18 +28,33 @@ struct Grid {
     taps: Vec<Tap>,
     /// For each grid point, the texels it reaches and the weight (sixteenths).
     rev: Vec<Vec<(u8, u8)>>,
-    /// For each grid point, 1 / the sum of its weights.
-    rev_inv: Vec<f32>,
-    /// How much of the grid weights' quantization noise reaches a texel through the infill (the
-    /// mean over texels of the sum of squared tap weights, as fractions).
-    noise: f32,
+    /// The taps' weights as fractions.
+    tapf: Vec<[f32; 4]>,
+    /// `rev` flattened, grid point `j` at `revf[rev_at[j]..rev_at[j + 1]]`, each weight divided
+    /// by the grid point's total.
+    revf: Vec<(u8, f32)>,
+    rev_at: Vec<u16>,
     /// Single-plane block modes on this grid, with the endpoint range for one to three
     /// partitions of RGB (CEM 8) and RGBA (CEM 12); `u8::MAX` where the mode leaves too few bits.
     modes: Vec<(BlockMode, [[u8; 2]; 3])>,
     /// Dual-plane block modes on this grid, with the endpoint range for one partition of RGB and
     /// RGBA.
     dual: Vec<(BlockMode, [u8; 2])>,
+    /// Per mode (then per dual mode): the expected squared weight error per unit of color span,
+    /// from quantizing the weights (the part of that noise the infill passes on: the mean over
+    /// texels of the sum of squared tap weights) and from rounding the infill.
+    wnoise: Vec<f32>,
+    wnoise_dual: Vec<f32>,
 }
+
+/// Expected squared endpoint error per channel and texel for each color range: a uniform error
+/// over one quantization step, reduced by interpolation (about 1/18 of the step squared).
+static CNOISE: std::sync::LazyLock<[f32; 21]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|q| {
+        let step = 255.0 / (RANGES[q] as f32 - 1.0);
+        step * step / 18.0
+    })
+});
 
 /// A partition pattern: its seed and each texel's partition.
 struct Pattern {
@@ -59,7 +74,8 @@ pub struct Footprint {
     pmasks: [Vec<u64>; 2],
     /// Mask words per texel mask.
     nw: usize,
-    /// Orthonormal DCT-II bases across and down: `dct_x[f * bw + x]`, `dct_y[f * bh + y]`.
+    /// Orthonormal DCT-II bases across and down: `dct_x[x * bw + f]` (transposed),
+    /// `dct_y[f * bh + y]`.
     dct_x: Vec<f32>,
     dct_y: Vec<f32>,
 }
@@ -89,16 +105,26 @@ fn spectrum(fp: &Footprint, v: &[f32]) -> Spectrum {
     let (bw, bh) = (fp.bw as usize, fp.bh as usize);
     let mut r = [0f32; MAX_TEXELS];
     for y in 0..bh {
-        for f in 0..bw {
-            r[y * bw + f] = (0..bw).map(|x| v[y * bw + x] * fp.dct_x[f * bw + x]).sum();
+        let ry = &mut r[y * bw..(y + 1) * bw];
+        for x in 0..bw {
+            let vx = v[y * bw + x];
+            for (o, &b) in ry.iter_mut().zip(&fp.dct_x[x * bw..(x + 1) * bw]) {
+                *o += vx * b;
+            }
         }
     }
     let mut p = [[0f32; 13]; 13];
     for fy in 0..bh {
+        let mut c = [0f32; 12];
+        for y in 0..bh {
+            let d = fp.dct_y[fy * bh + y];
+            for (o, &x) in c.iter_mut().zip(&r[y * bw..(y + 1) * bw]) {
+                *o += d * x;
+            }
+        }
         let mut row = 0.0;
         for fx in 0..bw {
-            let c: f32 = (0..bh).map(|y| fp.dct_y[fy * bh + y] * r[y * bw + fx]).sum();
-            row += c * c;
+            row += c[fx] * c[fx];
             p[fy + 1][fx + 1] = p[fy][fx + 1] + row;
         }
     }
@@ -170,25 +196,39 @@ impl Footprint {
                         taps[i] = tap;
                     }
                 }
-                let rev_inv = rev
-                    .iter()
-                    .map(|r| 1.0 / r.iter().map(|e| e.1 as f32).sum::<f32>().max(1.0))
-                    .collect();
+                let tapf = taps.iter().map(|t| t.w.map(|w| w as f32 / 16.0)).collect();
+                let mut revf = Vec::new();
+                let mut rev_at = vec![0u16];
+                for r in &rev {
+                    let inv = 1.0 / r.iter().map(|e| e.1 as f32).sum::<f32>().max(1.0);
+                    revf.extend(r.iter().map(|&(i, w)| (i, w as f32 * inv)));
+                    rev_at.push(revf.len() as u16);
+                }
                 let noise = taps
                     .iter()
                     .map(|t| t.w.iter().map(|&w| (w as f32 / 16.0).powi(2)).sum::<f32>())
                     .sum::<f32>()
                     / n as f32;
+                let round = if identity { 0.0 } else { 1.0 / 12.0 };
+                let wn = |bm: &BlockMode| {
+                    let wstep = 64.0 / (RANGES[bm.quant as usize] as f32 - 1.0);
+                    noise * wstep * wstep / 12.0 + round
+                };
+                let wnoise = modes.iter().map(|m| wn(&m.0)).collect();
+                let wnoise_dual = dual.iter().map(|m| wn(&m.0)).collect();
                 grids.push(Grid {
                     gx: gx as u8,
                     gy: gy as u8,
                     identity,
                     taps,
                     rev,
-                    rev_inv,
-                    noise,
+                    tapf,
+                    revf,
+                    rev_at,
                     modes,
                     dual,
+                    wnoise,
+                    wnoise_dual,
                 });
             }
         }
@@ -243,7 +283,11 @@ impl Footprint {
             patterns,
             pmasks,
             nw,
-            dct_x: dct_basis(bw),
+            dct_x: {
+                let b = dct_basis(bw);
+                let w = bw as usize;
+                (0..w * w).map(|i| b[(i % w) * w + i / w]).collect()
+            },
             dct_y: dct_basis(bh),
         }
     }
@@ -326,16 +370,6 @@ struct Texels<'a> {
 /// No channel on a second weight plane.
 const NO_CCS: usize = 4;
 
-/// A texel's per-channel weights: `w` in every channel but `ccs`, which takes `w2`.
-#[inline]
-fn weights4(w: u8, w2: u8, ccs: usize) -> [u32; 4] {
-    let mut ws = [w as u32; 4];
-    if ccs < NO_CCS {
-        ws[ccs] = w2 as u32;
-    }
-    ws
-}
-
 impl Texels<'_> {
     /// The decoded block's squared error for each partition's endpoints (0..=255), texel labels
     /// and texel weights (0..=64: `w`, and `w2` in channel `ccs`), stopping once past `limit`.
@@ -351,11 +385,9 @@ impl Texels<'_> {
         let mut err = 0u32;
         for i in 0..self.n {
             let (e0, e1) = eps[labels[i] as usize];
-            let d = lerp(e0, e1, weights4(w[i], w2[i], ccs), self.srgb);
-            let p = self.px[i];
             for c in 0..self.ch {
-                let x = d[c] as i32 - p[c] as i32;
-                err += (x * x) as u32;
+                let wc = if c == ccs { w2[i] } else { w[i] };
+                err += self.channel_error(i, c, e0[c], e1[c], wc);
             }
             if err > limit {
                 return err;
@@ -364,12 +396,11 @@ impl Texels<'_> {
         err
     }
 
-    /// Texel `i`'s squared error for endpoints `e` and weights `w` (`w2` in channel `ccs`).
+    /// Texel `i`'s squared error in channel `c` for endpoint values `e0`, `e1` and weight `w`.
     #[inline]
-    fn texel_error(&self, i: usize, e: ([i32; 4], [i32; 4]), w: u8, w2: u8, ccs: usize) -> u32 {
-        let d = lerp(e.0, e.1, weights4(w, w2, ccs), self.srgb);
-        let p = self.px[i];
-        (0..self.ch).map(|c| (d[c] as i32 - p[c] as i32).pow(2) as u32).sum()
+    fn channel_error(&self, i: usize, c: usize, e0: i32, e1: i32, w: u8) -> u32 {
+        let x = lerp1(e0, e1, w as u32, self.srgb && c < 3) - self.px[i][c] as i32;
+        (x * x) as u32
     }
 }
 
@@ -399,20 +430,32 @@ fn decimate(grid: &Grid, u: &[f32], g: &mut [f32]) {
         return;
     }
     let k = grid.rev.len();
+    let back = |j: usize, x: &[f32]| -> f32 {
+        let (a, b) = (grid.rev_at[j] as usize, grid.rev_at[j + 1] as usize);
+        grid.revf[a..b].iter().map(|&(i, w)| w * x[i as usize]).sum()
+    };
     for j in 0..k {
-        g[j] = grid.rev[j].iter().map(|&(i, w)| w as f32 * u[i as usize]).sum::<f32>() * grid.rev_inv[j];
+        g[j] = back(j, u);
     }
     let mut r = [0f32; MAX_TEXELS];
     for _ in 0..2 {
-        for (i, tap) in grid.taps.iter().enumerate() {
-            let e: f32 = (0..4).map(|q| tap.w[q] as f32 * g[tap.idx[q] as usize]).sum::<f32>() * (1.0 / 16.0);
-            r[i] = u[i] - e;
+        for i in 0..u.len() {
+            r[i] = u[i] - infill_f(grid, i, g);
         }
         for j in 0..k {
-            let d = grid.rev[j].iter().map(|&(i, w)| w as f32 * r[i as usize]).sum::<f32>() * grid.rev_inv[j];
-            g[j] = (g[j] + d).clamp(0.0, 64.0);
+            g[j] = (g[j] + back(j, &r)).clamp(0.0, 64.0);
         }
     }
+}
+
+/// Texel `i`'s infilled value of (unquantized) grid weights `g`.
+#[inline]
+fn infill_f(grid: &Grid, i: usize, g: &[f32]) -> f32 {
+    let (tap, w) = (&grid.taps[i], &grid.tapf[i]);
+    w[0] * g[tap.idx[0] as usize]
+        + w[1] * g[tap.idx[1] as usize]
+        + w[2] * g[tap.idx[2] as usize]
+        + w[3] * g[tap.idx[3] as usize]
 }
 
 /// Like `decimate`, and returns the squared error the (unquantized) infilled weights leave, each
@@ -423,9 +466,9 @@ fn decimate_err(grid: &Grid, u: &[f32], g: &mut [f32], scale: impl Fn(usize) -> 
         return 0.0;
     }
     let mut err = 0.0;
-    for (i, tap) in grid.taps.iter().enumerate() {
-        let e: f32 = (0..4).map(|q| tap.w[q] as f32 * g[tap.idx[q] as usize]).sum::<f32>() * (1.0 / 16.0);
-        err += (u[i] - e) * (u[i] - e) * scale(i);
+    for i in 0..u.len() {
+        let d = u[i] - infill_f(grid, i, g);
+        err += d * d * scale(i);
     }
     err
 }
@@ -521,6 +564,7 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
     let ccs = if sym.mode.dual { sym.ccs as usize } else { NO_CCS };
     let kk = grid.rev.len() * planes;
     let n = t.n;
+    let ch = t.ch;
     let mut g = [0u8; 64];
     for j in 0..kk {
         g[j] = wu[sym.weights[j] as usize];
@@ -533,9 +577,15 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
     for (p, e) in eps.iter_mut().enumerate().take(lay.count as usize) {
         *e = sym_endpoints(sym, p);
     }
-    let mut errs = [0u32; MAX_TEXELS];
-    for i in 0..n {
-        errs[i] = t.texel_error(i, eps[lay.labels[i] as usize], w[0][i], w[1][i], ccs);
+    // The plane that drives channel `c`.
+    let plane_of = |c: usize| (c == ccs) as usize;
+    // Per channel and texel: every weight and endpoint step changes only some channels.
+    let mut errs = [[0u32; MAX_TEXELS]; 4];
+    for c in 0..ch {
+        for i in 0..n {
+            let e = eps[lay.labels[i] as usize];
+            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], w[plane_of(c)][i]);
+        }
     }
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
     for _ in 0..passes {
@@ -552,17 +602,21 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
                 let mut delta = 0i64;
                 for &(i, _) in &grid.rev[gp] {
                     let i = i as usize;
-                    let mut ww = [w[0][i], w[1][i]];
-                    ww[pl] = tap_weight(&grid.taps[i], &g, planes, pl);
-                    let e = t.texel_error(i, eps[lay.labels[i] as usize], ww[0], ww[1], ccs);
-                    delta += e as i64 - errs[i] as i64;
+                    let nw = tap_weight(&grid.taps[i], &g, planes, pl);
+                    let e = eps[lay.labels[i] as usize];
+                    for c in (0..ch).filter(|&c| plane_of(c) == pl) {
+                        delta += t.channel_error(i, c, e.0[c], e.1[c], nw) as i64 - errs[c][i] as i64;
+                    }
                 }
                 if delta < 0 {
                     sym.weights[j] = nc;
                     for &(i, _) in &grid.rev[gp] {
                         let i = i as usize;
                         w[pl][i] = tap_weight(&grid.taps[i], &g, planes, pl);
-                        errs[i] = t.texel_error(i, eps[lay.labels[i] as usize], w[0][i], w[1][i], ccs);
+                        let e = eps[lay.labels[i] as usize];
+                        for c in (0..ch).filter(|&c| plane_of(c) == pl) {
+                            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], w[pl][i]);
+                        }
                     }
                     improved = true;
                     break;
@@ -571,10 +625,15 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             }
         }
         for p in 0..lay.count as usize {
-            let mut cur: u32 = (0..n).filter(|&i| lay.labels[i] as usize == p).map(|i| errs[i]).sum();
             for v in 0..2 * nv {
+                let c = v / 2;
                 let at = 2 * nv * p + v;
                 let old = sym.colors[at];
+                let wc = &w[plane_of(c)];
+                let cur: u32 = (0..n)
+                    .filter(|&i| lay.labels[i] as usize == p)
+                    .map(|i| errs[c][i])
+                    .sum();
                 for dir in 0..2 {
                     let nc = tb.cnb[cq][dir][old as usize];
                     if nc == old {
@@ -588,13 +647,12 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
                     }
                     let err: u32 = (0..n)
                         .filter(|&i| lay.labels[i] as usize == p)
-                        .map(|i| t.texel_error(i, e, w[0][i], w[1][i], ccs))
+                        .map(|i| t.channel_error(i, c, e.0[c], e.1[c], wc[i]))
                         .sum();
                     if err < cur {
-                        cur = err;
                         eps[p] = e;
                         for i in (0..n).filter(|&i| lay.labels[i] as usize == p) {
-                            errs[i] = t.texel_error(i, e, w[0][i], w[1][i], ccs);
+                            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], wc[i]);
                         }
                         improved = true;
                         break;
@@ -607,7 +665,7 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             break;
         }
     }
-    errs[..n].iter().sum()
+    errs[..ch].iter().map(|e| e[..n].iter().sum::<u32>()).sum()
 }
 
 /// A partitioning of the block's texels, the channel on a second weight plane if any, and the
@@ -635,6 +693,7 @@ struct Layout {
 
 impl Layout {
     fn new(t: &Texels, count: u8, seed: u16, labels: &[u8], ccs: usize) -> Self {
+        let n = t.n;
         let mut l = Layout {
             count,
             seed,
@@ -646,45 +705,110 @@ impl Layout {
             scale2: 0.0,
             orth: 0.0,
         };
-        l.labels[..t.n].copy_from_slice(&labels[..t.n]);
-        for p in 0..count {
-            let (mut axis, mean) = principal_axis(t, labels, p, ccs);
+        l.labels[..n].copy_from_slice(&labels[..n]);
+        let ms = Moments::of(t, labels, count);
+        let mut axes = [[0f32; 4]; 3];
+        let mut means = [[0f32; 4]; 3];
+        for p in 0..count as usize {
+            let (mean, mut cov) = ms[p].mean_cov();
+            if ccs < NO_CCS {
+                for a in 0..4 {
+                    cov[a][ccs] = 0.0;
+                    cov[ccs][a] = 0.0;
+                }
+            }
+            let mut axis = dominant(&cov);
             // Point the axis so the second endpoint has the larger RGB sum, as the decoder wants.
             if axis[0] + axis[1] + axis[2] < 0.0 {
                 axis = axis.map(|x| -x);
             }
-            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-            for i in (0..t.n).filter(|&i| labels[i] == p) {
-                let d: f32 = (0..4).map(|c| (t.f[i][c] - mean[c]) * axis[c]).sum();
-                l.u[i] = d;
-                lo = lo.min(d);
-                hi = hi.max(d);
-                l.orth += (0..t.ch)
-                    .filter(|&c| c != ccs)
-                    .map(|c| {
-                        let r = t.f[i][c] - mean[c] - axis[c] * d;
-                        r * r
-                    })
-                    .sum::<f32>();
-            }
-            let len = (hi - lo).max(1e-3);
-            let sc = (len / 64.0) * (len / 64.0);
-            for i in (0..t.n).filter(|&i| labels[i] == p) {
-                l.u[i] = (l.u[i] - lo) * (64.0 / len);
-                l.scale[i] = sc;
-            }
+            // The scatter off the line: all of it, less the part along the axis.
+            let along: f32 = (0..4)
+                .map(|a| axis[a] * (0..4).map(|b| cov[a][b] * axis[b]).sum::<f32>())
+                .sum();
+            let total: f32 = (0..t.ch).map(|c| cov[c][c]).sum();
+            l.orth += (total - along).max(0.0);
+            axes[p] = axis;
+            means[p] = mean;
+        }
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for i in 0..n {
+            let p = labels[i] as usize;
+            let (m, a, q) = (&means[p], &axes[p], &t.f[i]);
+            let d = (q[0] - m[0]) * a[0] + (q[1] - m[1]) * a[1] + (q[2] - m[2]) * a[2] + (q[3] - m[3]) * a[3];
+            l.u[i] = d;
+            lo[p] = lo[p].min(d);
+            hi[p] = hi[p].max(d);
+        }
+        let mut sc = [0f32; 3];
+        let mut inv = [0f32; 3];
+        for p in 0..count as usize {
+            let len = (hi[p] - lo[p]).max(1e-3);
+            sc[p] = (len / 64.0) * (len / 64.0);
+            inv[p] = 64.0 / len;
+        }
+        for i in 0..n {
+            let p = labels[i] as usize;
+            l.u[i] = (l.u[i] - lo[p]) * inv[p];
+            l.scale[i] = sc[p];
         }
         if ccs < NO_CCS {
-            let (lo, hi) = (0..t.n).fold((f32::MAX, f32::MIN), |(lo, hi), i| {
+            let (lo, hi) = (0..n).fold((f32::MAX, f32::MIN), |(lo, hi), i| {
                 (lo.min(t.f[i][ccs]), hi.max(t.f[i][ccs]))
             });
             let len = (hi - lo).max(1e-3);
             l.scale2 = (len / 64.0) * (len / 64.0);
-            for i in 0..t.n {
+            for i in 0..n {
                 l.u2[i] = (t.f[i][ccs] - lo) * (64.0 / len);
             }
         }
         l
+    }
+}
+
+/// A partition's color moments, exact in integers: its texel count, channel sums and sums of
+/// channel products.
+#[derive(Clone, Copy, Default)]
+struct Moments {
+    n: u32,
+    s: [u32; 4],
+    ss: [[u32; 4]; 4],
+}
+
+impl Moments {
+    /// The moments of partitions 0..`count` of the texels by `labels`, in one pass.
+    fn of(t: &Texels, labels: &[u8], count: u8) -> [Moments; 3] {
+        let mut m = [Moments::default(); 3];
+        for i in 0..t.n {
+            let p = &t.px[i];
+            let mm = &mut m[labels[i] as usize];
+            mm.n += 1;
+            for a in 0..4 {
+                let x = p[a] as u32;
+                mm.s[a] += x;
+                for b in a..4 {
+                    mm.ss[a][b] += x * p[b] as u32;
+                }
+            }
+        }
+        debug_assert!(m[count as usize..].iter().all(|x| x.n == 0));
+        m
+    }
+
+    /// The mean and scatter matrix (the covariance times the count).
+    fn mean_cov(&self) -> ([f32; 4], [[f32; 4]; 4]) {
+        let n = self.n.max(1) as f64;
+        let mean = self.s.map(|x| (x as f64 / n) as f32);
+        let mut cov = [[0f32; 4]; 4];
+        for a in 0..4 {
+            for b in a..4 {
+                let v = (self.ss[a][b] as f64 - self.s[a] as f64 * self.s[b] as f64 / n) as f32;
+                cov[a][b] = v;
+                cov[b][a] = v;
+            }
+        }
+        (mean, cov)
     }
 }
 
@@ -809,49 +933,56 @@ fn void_extent(c: Rgba) -> [u8; 16] {
 /// The principal axis (unit length, or zero if they are all one color) and mean of the texels
 /// labelled `p`, leaving out channel `skip` (or none, if it is `NO_CCS`).
 fn principal_axis(t: &Texels, labels: &[u8], p: u8, skip: usize) -> ([f32; 4], [f32; 4]) {
-    let mut mean = [0f32; 4];
-    let mut count = 0f32;
-    for i in (0..t.n).filter(|&i| labels[i] == p) {
-        for c in 0..4 {
-            mean[c] += t.f[i][c];
-        }
-        count += 1.0;
-    }
-    let mean = mean.map(|x| x / count.max(1.0));
-    let mut cov = [[0f32; 4]; 4];
-    for i in (0..t.n).filter(|&i| labels[i] == p) {
-        let q = &t.f[i];
-        let mut d = [q[0] - mean[0], q[1] - mean[1], q[2] - mean[2], q[3] - mean[3]];
-        if skip < NO_CCS {
-            d[skip] = 0.0;
-        }
+    let (mean, mut cov) = moments(t, labels, p);
+    if skip < NO_CCS {
         for a in 0..4 {
+            cov[a][skip] = 0.0;
+            cov[skip][a] = 0.0;
+        }
+    }
+    (dominant(&cov), mean)
+}
+
+/// The mean and covariance (scatter) of the colors of the texels in partition `p`.
+fn moments(t: &Texels, labels: &[u8], p: u8) -> ([f32; 4], [[f32; 4]; 4]) {
+    let mut m = Moments::default();
+    for i in (0..t.n).filter(|&i| labels[i] == p) {
+        let q = &t.px[i];
+        m.n += 1;
+        for a in 0..4 {
+            let x = q[a] as u32;
+            m.s[a] += x;
             for b in a..4 {
-                cov[a][b] += d[a] * d[b];
+                m.ss[a][b] += x * q[b] as u32;
             }
         }
     }
-    for a in 0..4 {
-        for b in 0..a {
-            cov[a][b] = cov[b][a];
-        }
-    }
+    m.mean_cov()
+}
+
+/// The unit dominant eigenvector of a covariance matrix by power iteration (zero if it is
+/// degenerate).
+fn dominant(cov: &[[f32; 4]; 4]) -> [f32; 4] {
     // Start from the channel with the most variance.
+    let tr = cov[0][0] + cov[1][1] + cov[2][2] + cov[3][3];
+    if tr < 1e-3 {
+        return [0.0; 4];
+    }
+    // Scaled by the trace, no eigenvalue is above 1, so eight steps neither overflow nor need
+    // normalizing on the way.
+    let k = 1.0 / tr;
+    let a = cov.map(|r| r.map(|x| x * k));
     let mut v = [0f32; 4];
-    let top = (0..4).max_by(|&a, &b| cov[a][a].total_cmp(&cov[b][b])).unwrap();
+    let top = (0..4).max_by(|&i, &j| cov[i][i].total_cmp(&cov[j][j])).unwrap();
     v[top] = 1.0;
     for _ in 0..8 {
-        let mut nv = [0f32; 4];
-        for a in 0..4 {
-            nv[a] = (0..4).map(|b| cov[a][b] * v[b]).sum();
-        }
-        let len = nv.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if len < 1e-6 {
-            return ([0.0; 4], mean);
-        }
-        v = nv.map(|x| x / len);
+        v = std::array::from_fn(|i| a[i][0] * v[0] + a[i][1] * v[1] + a[i][2] * v[2] + a[i][3] * v[3]);
     }
-    (v, mean)
+    let len = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if len < 1e-20 {
+        return [0.0; 4];
+    }
+    v.map(|x| x / len)
 }
 
 /// A k-means clustering of the texels' colors into `k` groups (2 or 3), seeded from the extremes
@@ -1100,10 +1231,27 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let es = effort_settings(effort);
     let mut layouts = vec![Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS)];
     if es.dual > 0 {
-        let mut duals: Vec<Layout> = (0..t.ch).map(|c| Layout::new(&t, 1, 0, &[0; MAX_TEXELS], c)).collect();
-        duals.sort_by(|a, b| a.orth.total_cmp(&b.orth));
-        duals.truncate(es.dual);
-        layouts.extend(duals);
+        // Channels for the second plane, those leaving the rest closest to a line first: the
+        // variance of the other channels off their dominant axis.
+        let (_, cov) = moments(&t, &[0; MAX_TEXELS], 0);
+        let mut off: Vec<(f32, usize)> = (0..t.ch)
+            .map(|c| {
+                let mut sub = cov;
+                for a in 0..4 {
+                    sub[a][c] = 0.0;
+                    sub[c][a] = 0.0;
+                }
+                let v = dominant(&sub);
+                let along: f32 = (0..4)
+                    .map(|a| v[a] * (0..4).map(|b| sub[a][b] * v[b]).sum::<f32>())
+                    .sum();
+                ((0..t.ch).map(|a| sub[a][a]).sum::<f32>() - along, c)
+            })
+            .collect();
+        off.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for &(_, c) in off.iter().take(es.dual) {
+            layouts.push(Layout::new(&t, 1, 0, &[0; MAX_TEXELS], c));
+        }
     }
     for (pi, &want) in es.patterns.iter().enumerate() {
         let k = pi + 2;
@@ -1121,9 +1269,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     // and the texels' distance from their lines. The decimation error is first estimated from the
     // ideal weights' spectrum (what the grid's frequencies cannot hold), then measured for the
     // shortlist.
-    let ng = fp.grids.len();
-    // (score, score less the decimation error, layout, grid, mode)
-    let mut cands: Vec<(f32, f32, u16, u16, u16)> = Vec::with_capacity(1024);
+    // The `short` best so far, by estimate: (score, score less the decimation error, layout,
+    // grid, mode).
+    let short = es.candidates * SHORTLIST;
+    let mut cands: Vec<(f32, f32, u16, u16, u16)> = Vec::with_capacity(short + 1);
+    let cnoise = &*CNOISE;
+    let per_texel = n as f32 * t.ch as f32;
     let mut v = [0f32; MAX_TEXELS];
     for (li, lay) in layouts.iter().enumerate() {
         let dual = lay.ccs < NO_CCS;
@@ -1150,40 +1301,42 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             if let Some(sp2) = &sp2 {
                 derr += sp2[bh][bw] - sp2[gy][gx];
             }
-            let round = if grid.identity { 0.0 } else { 1.0 / 12.0 };
+            let wnoise = if dual { &grid.wnoise_dual } else { &grid.wnoise };
             for mi in 0..nm {
-                let (bm, cq) = mode_of(lay, grid, mi, ce);
+                let (_, cq) = mode_of(lay, grid, mi, ce);
                 if cq == u8::MAX {
                     continue;
                 }
-                let wstep = 64.0 / (RANGES[bm.quant as usize] as f32 - 1.0);
-                let step = 255.0 / (RANGES[cq as usize] as f32 - 1.0);
-                let cerr = n as f32 * t.ch as f32 * step * step / 18.0;
-                let rest = span * (grid.noise * wstep * wstep / 12.0 + round) + cerr + lay.orth;
-                cands.push((derr + rest, rest, li as u16, gi as u16, mi as u16));
+                let rest = span * wnoise[mi] + per_texel * cnoise[cq as usize] + lay.orth;
+                let score = derr + rest;
+                if cands.len() == short && score >= cands[short - 1].0 {
+                    continue;
+                }
+                let at = cands.partition_point(|c| c.0 <= score);
+                cands.insert(at, (score, rest, li as u16, gi as u16, mi as u16));
+                cands.truncate(short);
             }
         }
     }
     let by_score = |a: &(f32, f32, u16, u16, u16), b: &(f32, f32, u16, u16, u16)| a.0.total_cmp(&b.0);
-    let short = (es.candidates * SHORTLIST).min(cands.len());
-    if short < cands.len() {
-        cands.select_nth_unstable_by(short, by_score);
-    }
-    cands.truncate(short);
-    let mut measured = vec![f32::NAN; layouts.len() * ng];
+    // Measured decimation errors by (layout, grid).
+    let mut measured: Vec<(u16, u16, f32)> = Vec::with_capacity(short);
     let mut g = [0f32; 64];
     for c in &mut cands {
-        let (li, gi) = (c.2 as usize, c.3 as usize);
-        let at = li * ng + gi;
-        if measured[at].is_nan() {
-            let (lay, grid) = (&layouts[li], &fp.grids[gi]);
-            let mut derr = decimate_err(grid, &lay.u[..n], &mut g, |i| lay.scale[i]);
-            if lay.ccs < NO_CCS {
-                derr += decimate_err(grid, &lay.u2[..n], &mut g, |_| lay.scale2);
+        let (li, gi) = (c.2, c.3);
+        let derr = match measured.iter().find(|m| m.0 == li && m.1 == gi) {
+            Some(m) => m.2,
+            None => {
+                let (lay, grid) = (&layouts[li as usize], &fp.grids[gi as usize]);
+                let mut derr = decimate_err(grid, &lay.u[..n], &mut g, |i| lay.scale[i]);
+                if lay.ccs < NO_CCS {
+                    derr += decimate_err(grid, &lay.u2[..n], &mut g, |_| lay.scale2);
+                }
+                measured.push((li, gi, derr));
+                derr
             }
-            measured[at] = derr;
-        }
-        c.0 = c.1 + measured[at];
+        };
+        c.0 = c.1 + derr;
     }
     let keep = es.candidates.min(cands.len());
     if keep < cands.len() {

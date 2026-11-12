@@ -241,13 +241,14 @@ pub fn ise_encode(v: &mut u128, start: u32, q: usize, vals: &[u8]) {
     let n = vals.len();
     let (kind, bits) = LAYOUT[q];
     let bits = bits as u32;
-    let end = start + ise_bits(n, q) as u32;
-    let mut pos = start;
-    let mut put = |x: u32, w: u32, v: &mut u128| {
-        for i in 0..w {
-            if pos + i < end && (x >> i) & 1 != 0 {
-                *v |= 1u128 << (pos + i);
-            }
+    let len = ise_bits(n, q) as u32;
+    // Fields go into `acc` from bit 0, which is cut to the sequence's length at the end (the last
+    // trit or quint block is truncated).
+    let mut acc = 0u128;
+    let mut pos = 0u32;
+    let mut put = |x: u32, w: u32, _: &mut u128| {
+        if pos < 128 {
+            acc |= ((x & ((1u32 << w) - 1)) as u128) << pos;
         }
         pos += w;
     };
@@ -288,6 +289,9 @@ pub fn ise_encode(v: &mut u128, start: u32, q: usize, vals: &[u8]) {
                 }
             }
         }
+    }
+    if len > 0 {
+        *v |= (if len >= 128 { acc } else { acc & ((1u128 << len) - 1) }) << start;
     }
 }
 

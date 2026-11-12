@@ -81,7 +81,10 @@ pub fn endpoints(cem: u8, v: &[i32]) -> Option<([i32; 4], [i32; 4])> {
 /// Bilinear infill of a `gx` × `gy` weight grid (stride `planes`, offset `plane`) to texel (`s`, `t`)
 /// of a `bw` × `bh` block, per the spec's fixed-point rule.
 #[inline]
-#[expect(clippy::too_many_arguments, reason = "the spec's infill inputs, kept flat for the per-texel hot loop")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the spec's infill inputs, kept flat for the per-texel hot loop"
+)]
 pub fn infill(w: &[u8], gx: u32, gy: u32, planes: usize, plane: usize, bw: u32, bh: u32, s: u32, t: u32) -> u32 {
     if gx == bw && gy == bh {
         return w[(t * gx + s) as usize * planes + plane] as u32;
@@ -109,21 +112,19 @@ pub fn infill(w: &[u8], gx: u32, gy: u32, planes: usize, plane: usize, bw: u32, 
 /// interpolation, then rounded to eight bits (linear) or truncated (sRGB RGB, before conversion).
 #[inline]
 pub fn lerp(e0: [i32; 4], e1: [i32; 4], w: [u32; 4], srgb: bool) -> Rgba {
-    let mut out = [0u8; 4];
-    for c in 0..4 {
-        let (c0, c1) = if srgb && c < 3 {
-            ((e0[c] << 8 | 0x80) as u32, (e1[c] << 8 | 0x80) as u32)
-        } else {
-            (e0[c] as u32 * 257, e1[c] as u32 * 257)
-        };
-        let v = (c0 * (64 - w[c]) + c1 * w[c] + 32) >> 6;
-        out[c] = if srgb && c < 3 {
-            (v >> 8) as u8
-        } else {
-            ((v * 255 + 32767) / 65535) as u8
-        };
+    std::array::from_fn(|c| lerp1(e0[c], e1[c], w[c], srgb && c < 3) as u8)
+}
+
+/// One channel of [`lerp`]: `srgb` for an sRGB color channel (not alpha).
+#[inline]
+pub fn lerp1(e0: i32, e1: i32, w: u32, srgb: bool) -> i32 {
+    if srgb {
+        let (c0, c1) = ((e0 << 8 | 0x80) as u32, (e1 << 8 | 0x80) as u32);
+        ((c0 * (64 - w) + c1 * w + 32) >> 14) as i32
+    } else {
+        let v = ((e0 as u32 * (64 - w) + e1 as u32 * w) * 257 + 32) >> 6;
+        ((v * 255 + 32767) / 65535) as i32
     }
-    out
 }
 
 /// Decodes one block of a `bw` × `bh` footprint into `out` (row-major, `bw * bh` texels).
