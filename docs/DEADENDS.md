@@ -86,6 +86,25 @@ mipple effort 0 scores 45.18 dB in 0.385 s. (The 20-image results are in BENCHMA
   minutes to about 22. Radiance `.hdr` covers the test corpus. EXR could return through a
   separate helper crate or binary.
 
+## ASTC LDR
+
+Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast takes 0.235 /
+0.151 / 0.160 s at 4x4 / 6x6 / 8x8.
+
+- **Compiling for AVX2 (`target-cpu=x86-64-v3`) to vectorize the per-block code.** About 1%
+  faster. The loops run over 16-64 texels with gathers through grid taps and per-partition
+  filters, which LLVM doesn't vectorize.
+- **Stopping the candidate loop once an estimate exceeds the best error by a margin.** At 1.5×
+  and 2× it saves under 3% at efforts 0 and 2. The shortlist is short and its estimates are close
+  to each other, so few candidates get cut.
+- **A smaller shortlist, or half of polish, at effort 0.** Measuring two decimations per
+  candidate instead of four, or polishing only weights or only endpoints, each loses 0.1-0.3 dB
+  at 6x6 and 8x8.
+- **Scalar micro-optimization to reach ISPC fast's speed.** After the cheap early-outs, the time
+  is spread over polish (about 21%), layouts, candidate encoding, decimation and spectra, and no
+  single stage is worth 2×. As with BC6H, matching ISPC needs work across blocks or across
+  texels in SIMD.
+
 ## Engineering
 
 - **Closures in `#[target_feature]` kernels.** A closure, including one inside `array::from_fn`,

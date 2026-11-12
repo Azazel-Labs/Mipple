@@ -1127,25 +1127,31 @@ struct Effort {
     /// Dual-plane layouts tried (one channel on the second plane, those leaving the other
     /// channels closest to a line first).
     dual: usize,
+    /// Two- and three-partition patterns are tried only when the texels' mean squared distance
+    /// from one line, per channel, is at least this.
+    line: [f32; 2],
 }
 
 fn effort_settings(effort: u8) -> Effort {
     #[cfg(test)]
     if effort == u8::MAX {
-        // Tuning runs: `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual`.
+        // Tuning runs: `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3`.
         static E: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
         return *E.get_or_init(|| {
-            let v: Vec<usize> = std::env::var("MIPPLE_ASTC_EFFORT")
+            let mut v: Vec<f64> = std::env::var("MIPPLE_ASTC_EFFORT")
                 .unwrap()
                 .split(',')
                 .map(|x| x.parse().unwrap())
                 .collect();
+            v.resize(8, 0.0);
+            let u = |i: usize| v[i] as usize;
             Effort {
-                patterns: [v[0], v[1]],
-                candidates: v[2],
-                refine: v[3],
-                polish: v[4],
-                dual: v[5],
+                patterns: [u(0), u(1)],
+                candidates: u(2),
+                refine: u(3),
+                polish: u(4),
+                dual: u(5),
+                line: [v[6] as f32, v[7] as f32],
             }
         });
     }
@@ -1156,6 +1162,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 0,
             polish: 1,
             dual: 1,
+            line: [2.0, 16.0],
         },
         1 => Effort {
             patterns: [2, 0],
@@ -1163,6 +1170,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 1,
             polish: 1,
             dual: 1,
+            line: [2.0, 16.0],
         },
         2 => Effort {
             patterns: [2, 1],
@@ -1170,6 +1178,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 1,
             polish: 2,
             dual: 2,
+            line: [2.0, 16.0],
         },
         3 => Effort {
             patterns: [3, 1],
@@ -1177,6 +1186,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 1,
             polish: 2,
             dual: 2,
+            line: [1.0, 8.0],
         },
         4 => Effort {
             patterns: [4, 2],
@@ -1184,6 +1194,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 2,
             polish: 3,
             dual: 4,
+            line: [1.0, 8.0],
         },
         5 => Effort {
             patterns: [6, 3],
@@ -1191,6 +1202,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 2,
             polish: 4,
             dual: 4,
+            line: [0.5, 4.0],
         },
         6 => Effort {
             patterns: [8, 4],
@@ -1198,6 +1210,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 2,
             polish: 4,
             dual: 4,
+            line: [0.5, 4.0],
         },
         7 => Effort {
             patterns: [12, 6],
@@ -1205,6 +1218,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 3,
             polish: 6,
             dual: 4,
+            line: [0.25, 2.0],
         },
         8 => Effort {
             patterns: [16, 8],
@@ -1212,6 +1226,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 3,
             polish: 6,
             dual: 4,
+            line: [0.25, 2.0],
         },
         _ => Effort {
             patterns: [32, 16],
@@ -1219,6 +1234,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 4,
             polish: 8,
             dual: 4,
+            line: [0.0, 0.0],
         },
     }
 }
@@ -1245,6 +1261,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let ce = alpha as usize;
     let es = effort_settings(effort);
     let mut layouts = vec![Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS)];
+    // The texels' mean squared distance from their line, per channel.
+    let off_line = layouts[0].orth / (n * t.ch) as f32;
     if es.dual > 0 {
         // Channels for the second plane, those leaving the rest closest to a line first: the
         // variance of the other channels off their dominant axis.
@@ -1271,7 +1289,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     for (pi, &want) in es.patterns.iter().enumerate() {
         let k = pi + 2;
         let pats = &fp.patterns[pi];
-        if want == 0 || pats.is_empty() {
+        if want == 0 || pats.is_empty() || off_line < es.line[pi] {
             continue;
         }
         let km = kmeans(&t, k);
