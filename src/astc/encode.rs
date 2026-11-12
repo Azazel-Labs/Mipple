@@ -40,14 +40,28 @@ struct Grid {
     /// Dual-plane block modes on this grid, with the endpoint range for one partition of RGB and
     /// RGBA.
     dual: Vec<(BlockMode, [u8; 2])>,
-    /// Per mode (then per dual mode): the expected squared weight error per unit of color span,
-    /// from quantizing the weights (the part of that noise the infill passes on: the mean over
-    /// texels of the sum of squared tap weights) and from rounding the infill.
-    wnoise: Vec<f32>,
-    wnoise_dual: Vec<f32>,
-    /// The least of `wnoise` and of `wnoise_dual`.
-    wnoise_min: f32,
-    wnoise_dual_min: f32,
+    /// The modes for each kind of layout (`est_kind`), by increasing weight noise.
+    est: [Vec<Est>; 8],
+}
+
+/// A block mode's noise terms for the estimate.
+#[derive(Clone, Copy)]
+struct Est {
+    /// The expected squared weight error per unit of color span, from quantizing the weights
+    /// (the part of that noise the infill passes on: the mean over texels of the sum of squared
+    /// tap weights) and from rounding the infill.
+    wnoise: f32,
+    /// The expected squared endpoint error per channel and texel (`CNOISE` of its range).
+    cnoise: f32,
+    /// The least `cnoise` of this mode and those after it.
+    cnoise_after: f32,
+    mi: u16,
+}
+
+/// The index into `Grid::est` for a layout of `count` partitions, dual plane or not, with RGBA
+/// endpoints if `ce` is 1.
+fn est_kind(count: u8, dual: bool, ce: usize) -> usize {
+    if dual { 6 + ce } else { (count as usize - 1) * 2 + ce }
 }
 
 /// Expected squared endpoint error per channel and texel for each color range: a uniform error
@@ -217,10 +231,38 @@ impl Footprint {
                     let wstep = 64.0 / (RANGES[bm.quant as usize] as f32 - 1.0);
                     noise * wstep * wstep / 12.0 + round
                 };
-                let wnoise: Vec<f32> = modes.iter().map(|m| wn(&m.0)).collect();
-                let wnoise_dual: Vec<f32> = dual.iter().map(|m| wn(&m.0)).collect();
-                let wnoise_min = wnoise.iter().fold(f32::MAX, |a, &b| a.min(b));
-                let wnoise_dual_min = wnoise_dual.iter().fold(f32::MAX, |a, &b| a.min(b));
+                let est = std::array::from_fn(|kind| {
+                    let mut v: Vec<Est> = if kind >= 6 {
+                        let ce = kind - 6;
+                        (dual.iter().enumerate())
+                            .filter(|(_, m)| m.1[ce] != u8::MAX)
+                            .map(|(mi, m)| Est {
+                                wnoise: wn(&m.0),
+                                cnoise: CNOISE[m.1[ce] as usize],
+                                cnoise_after: 0.0,
+                                mi: mi as u16,
+                            })
+                            .collect()
+                    } else {
+                        let (p, ce) = (kind / 2, kind % 2);
+                        (modes.iter().enumerate())
+                            .filter(|(_, m)| m.1[p][ce] != u8::MAX)
+                            .map(|(mi, m)| Est {
+                                wnoise: wn(&m.0),
+                                cnoise: CNOISE[m.1[p][ce] as usize],
+                                cnoise_after: 0.0,
+                                mi: mi as u16,
+                            })
+                            .collect()
+                    };
+                    v.sort_by(|a, b| a.wnoise.total_cmp(&b.wnoise));
+                    let mut least = f32::MAX;
+                    for e in v.iter_mut().rev() {
+                        least = least.min(e.cnoise);
+                        e.cnoise_after = least;
+                    }
+                    v
+                });
                 grids.push(Grid {
                     gx: gx as u8,
                     gy: gy as u8,
@@ -232,10 +274,7 @@ impl Footprint {
                     rev_at,
                     modes,
                     dual,
-                    wnoise,
-                    wnoise_dual,
-                    wnoise_min,
-                    wnoise_dual_min,
+                    est,
                 });
             }
         }
@@ -1306,7 +1345,6 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     // grid, mode).
     let short = es.candidates * SHORTLIST;
     let mut cands: Vec<(f32, f32, u16, u16, u16)> = Vec::with_capacity(short + 1);
-    let cnoise = &*CNOISE;
     let per_texel = n as f32 * t.ch as f32;
     let mut v = [0f32; MAX_TEXELS];
     for (li, lay) in layouts.iter().enumerate() {
@@ -1324,36 +1362,36 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let (bw, bh) = (fp.bw as usize, fp.bh as usize);
         // Squared color per unit of weight squared, over the block.
         let span = lay.scale[..n].iter().sum::<f32>() + if dual { n as f32 * lay.scale2 } else { 0.0 };
+        let kind = est_kind(lay.count, dual, ce);
+        let mut thr = if cands.len() == short {
+            cands[short - 1].0
+        } else {
+            f32::MAX
+        };
         for (gi, grid) in fp.grids.iter().enumerate() {
-            let nm = if dual { grid.dual.len() } else { grid.modes.len() };
-            if nm == 0 {
-                continue;
-            }
             let (gx, gy) = (grid.gx as usize, grid.gy as usize);
             let mut derr = sp[bh][bw] - sp[gy][gx];
             if let Some(sp2) = &sp2 {
                 derr += sp2[bh][bw] - sp2[gy][gx];
             }
-            let wnoise = if dual { &grid.wnoise_dual } else { &grid.wnoise };
-            // No mode on this grid can do better than its decimation, the texels' distance from
-            // their lines and its finest weight range's noise.
-            let floor = derr + lay.orth + span * if dual { grid.wnoise_dual_min } else { grid.wnoise_min };
-            if cands.len() == short && floor >= cands[short - 1].0 {
-                continue;
-            }
-            for mi in 0..nm {
-                let (_, cq) = mode_of(lay, grid, mi, ce);
-                if cq == u8::MAX {
-                    continue;
+            for e in &grid.est[kind] {
+                // No later mode has less weight noise or less endpoint noise than this bound.
+                if derr + (span * e.wnoise + per_texel * e.cnoise_after + lay.orth) >= thr {
+                    break;
                 }
-                let rest = span * wnoise[mi] + per_texel * cnoise[cq as usize] + lay.orth;
+                let rest = span * e.wnoise + per_texel * e.cnoise + lay.orth;
                 let score = derr + rest;
-                if cands.len() == short && score >= cands[short - 1].0 {
+                if score >= thr {
                     continue;
                 }
                 let at = cands.partition_point(|c| c.0 <= score);
-                cands.insert(at, (score, rest, li as u16, gi as u16, mi as u16));
-                cands.truncate(short);
+                cands.insert(at, (score, rest, li as u16, gi as u16, e.mi));
+                if cands.len() > short {
+                    cands.pop();
+                }
+                if cands.len() == short {
+                    thr = cands[short - 1].0;
+                }
             }
         }
     }
