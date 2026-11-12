@@ -28,12 +28,11 @@ struct Grid {
     taps: Vec<Tap>,
     /// For each grid point, the texels it reaches and the weight (sixteenths).
     rev: Vec<Vec<(u8, u8)>>,
-    /// The taps' weights as fractions.
-    tapf: Vec<[f32; 4]>,
-    /// `rev` flattened, grid point `j` at `revf[rev_at[j]..rev_at[j + 1]]`, each weight divided
-    /// by the grid point's total.
-    revf: Vec<(u8, f32)>,
-    rev_at: Vec<u16>,
+    /// The infill taken as separable (bilinear across, then down), and its least-squares inverse
+    /// each way: `sep.pxt[x * gx + gx_i]` maps a row of texels to grid columns, `sep.py[gy_i * bh
+    /// + y]` texel rows to grid rows, `sep.fxt[gx_i * bw + x]` grid columns back to texels, and
+    /// `sep.fy[y]` is each texel row's two grid rows and the second's share.
+    sep: Sep,
     /// Single-plane block modes on this grid, with the endpoint range for one to three
     /// partitions of RGB (CEM 8) and RGBA (CEM 12); `u8::MAX` where the mode leaves too few bits.
     modes: Vec<(BlockMode, [[u8; 2]; 3])>,
@@ -42,6 +41,96 @@ struct Grid {
     dual: Vec<(BlockMode, [u8; 2])>,
     /// The modes for each kind of layout (`est_kind`), by increasing weight noise.
     est: [Vec<Est>; 8],
+}
+
+/// Separable infill and decimation matrices of a grid (see `Grid::sep`).
+#[derive(Default)]
+struct Sep {
+    bw: usize,
+    pxt: Vec<f32>,
+    py: Vec<f32>,
+    fxt: Vec<f32>,
+    fy: Vec<(usize, f32)>,
+}
+
+impl Sep {
+    fn new(bw: u32, bh: u32, gx: u32, gy: u32) -> Self {
+        // Texel `s` of `b` sits between grid points `j` and `j + 1` of `g`, a share `f` (of 16)
+        // toward the second, as the decoder places it.
+        let place = |b: u32, g: u32, s: u32| {
+            let d = (1024 + b / 2) / (b - 1);
+            let at = (d * s * (g - 1) + 32) >> 6;
+            ((at >> 4) as usize, (at & 15) as f64 / 16.0)
+        };
+        // The `b` x `g` interpolation matrix one way, and its pseudo-inverse (`g` x `b`).
+        let axis = |b: u32, g: u32| {
+            let (b, gu) = (b as usize, g as usize);
+            let mut f = vec![0f64; b * gu];
+            for s in 0..b {
+                let (j, w) = place(b as u32, g, s as u32);
+                f[s * gu + j.min(gu - 1)] += 1.0 - w;
+                f[s * gu + (j + 1).min(gu - 1)] += w;
+            }
+            // (FᵀF)⁻¹Fᵀ by Gauss-Jordan on [FᵀF | Fᵀ].
+            let cols = gu + b;
+            let mut m = vec![0f64; gu * cols];
+            for r in 0..gu {
+                for c in 0..gu {
+                    m[r * cols + c] = (0..b).map(|s| f[s * gu + r] * f[s * gu + c]).sum::<f64>();
+                }
+                m[r * cols + r] += 1e-9;
+                for s in 0..b {
+                    m[r * cols + gu + s] = f[s * gu + r];
+                }
+            }
+            for c in 0..gu {
+                let piv = (c..gu)
+                    .max_by(|&a, &b| m[a * cols + c].abs().total_cmp(&m[b * cols + c].abs()))
+                    .unwrap();
+                for k in 0..cols {
+                    m.swap(c * cols + k, piv * cols + k);
+                }
+                let d = m[c * cols + c];
+                for k in 0..cols {
+                    m[c * cols + k] /= d;
+                }
+                for r in 0..gu {
+                    if r != c {
+                        let x = m[r * cols + c];
+                        for k in 0..cols {
+                            m[r * cols + k] -= x * m[c * cols + k];
+                        }
+                    }
+                }
+            }
+            let pinv: Vec<f64> = (0..gu)
+                .flat_map(|r| (0..b).map(move |s| (r, s)))
+                .map(|(r, s)| m[r * cols + gu + s])
+                .collect();
+            (f, pinv)
+        };
+        let (fx, pinv_x) = axis(bw, gx);
+        let (_, pinv_y) = axis(bh, gy);
+        let (bwu, gxu) = (bw as usize, gx as usize);
+        Sep {
+            bw: bwu,
+            pxt: (0..bwu * gxu)
+                .map(|i| pinv_x[(i % gxu) * bwu + i / gxu] as f32)
+                .collect(),
+            py: pinv_y.iter().map(|&v| v as f32).collect(),
+            fxt: (0..gxu * bwu).map(|i| fx[(i % bwu) * gxu + i / bwu] as f32).collect(),
+            fy: (0..bh)
+                .map(|t| {
+                    let (j, w) = place(bh, gy, t);
+                    if j + 1 >= gy as usize {
+                        (gy as usize - 2, 1.0)
+                    } else {
+                        (j, w as f32)
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A block mode's noise terms for the estimate.
@@ -213,14 +302,11 @@ impl Footprint {
                         taps[i] = tap;
                     }
                 }
-                let tapf = taps.iter().map(|t| t.w.map(|w| w as f32 / 16.0)).collect();
-                let mut revf = Vec::new();
-                let mut rev_at = vec![0u16];
-                for r in &rev {
-                    let inv = 1.0 / r.iter().map(|e| e.1 as f32).sum::<f32>().max(1.0);
-                    revf.extend(r.iter().map(|&(i, w)| (i, w as f32 * inv)));
-                    rev_at.push(revf.len() as u16);
-                }
+                let sep = if identity {
+                    Sep::default()
+                } else {
+                    Sep::new(bw, bh, gx, gy)
+                };
                 let noise = taps
                     .iter()
                     .map(|t| t.w.iter().map(|&w| (w as f32 / 16.0).powi(2)).sum::<f32>())
@@ -269,9 +355,7 @@ impl Footprint {
                     identity,
                     taps,
                     rev,
-                    tapf,
-                    revf,
-                    rev_at,
+                    sep,
                     modes,
                     dual,
                     est,
@@ -468,53 +552,65 @@ fn infill(grid: &Grid, g: &[u8], planes: usize, pl: usize, out: &mut [u8]) {
     }
 }
 
-/// Least-squares grid weights for ideal texel weights `u`: the weighted mean of the texels each
-/// grid point reaches, then a few residual corrections.
+/// Least-squares grid weights (clamped to 0..=64) for ideal texel weights `u`, with the infill
+/// taken as separable: the pseudo-inverse down, then across.
 fn decimate(grid: &Grid, u: &[f32], g: &mut [f32]) {
     if grid.identity {
         g[..u.len()].copy_from_slice(u);
         return;
     }
-    let k = grid.rev.len();
-    let back = |j: usize, x: &[f32]| -> f32 {
-        let (a, b) = (grid.rev_at[j] as usize, grid.rev_at[j + 1] as usize);
-        grid.revf[a..b].iter().map(|&(i, w)| w * x[i as usize]).sum()
-    };
-    for j in 0..k {
-        g[j] = back(j, u);
-    }
-    let mut r = [0f32; MAX_TEXELS];
-    for _ in 0..2 {
-        for i in 0..u.len() {
-            r[i] = u[i] - infill_f(grid, i, g);
+    let sep = &grid.sep;
+    let (bw, gx, gy) = (sep.bw, grid.gx as usize, grid.gy as usize);
+    let bh = u.len() / bw;
+    let mut rows = [0f32; MAX_TEXELS];
+    for yy in 0..gy {
+        let row = &mut rows[yy * bw..(yy + 1) * bw];
+        for (y, &c) in sep.py[yy * bh..(yy + 1) * bh].iter().enumerate() {
+            for (o, &x) in row.iter_mut().zip(&u[y * bw..(y + 1) * bw]) {
+                *o += c * x;
+            }
         }
-        for j in 0..k {
-            g[j] = (g[j] + back(j, &r)).clamp(0.0, 64.0);
+    }
+    for yy in 0..gy {
+        let out = &mut g[yy * gx..(yy + 1) * gx];
+        out.fill(0.0);
+        for (x, &c) in rows[yy * bw..(yy + 1) * bw].iter().enumerate() {
+            for (o, &p) in out.iter_mut().zip(&sep.pxt[x * gx..(x + 1) * gx]) {
+                *o += c * p;
+            }
+        }
+        for o in out {
+            *o = o.clamp(0.0, 64.0);
         }
     }
 }
 
-/// Texel `i`'s infilled value of (unquantized) grid weights `g`.
-#[inline]
-fn infill_f(grid: &Grid, i: usize, g: &[f32]) -> f32 {
-    let (tap, w) = (&grid.taps[i], &grid.tapf[i]);
-    w[0] * g[tap.idx[0] as usize]
-        + w[1] * g[tap.idx[1] as usize]
-        + w[2] * g[tap.idx[2] as usize]
-        + w[3] * g[tap.idx[3] as usize]
-}
-
-/// Like `decimate`, and returns the squared error the (unquantized) infilled weights leave, each
-/// texel's weighted by `scale`.
+/// Like `decimate`, and returns the squared error the (unquantized, separably infilled) weights
+/// leave, each texel's weighted by `scale`.
 fn decimate_err(grid: &Grid, u: &[f32], g: &mut [f32], scale: impl Fn(usize) -> f32) -> f32 {
     decimate(grid, u, g);
     if grid.identity {
         return 0.0;
     }
+    let sep = &grid.sep;
+    let (bw, gx, gy) = (sep.bw, grid.gx as usize, grid.gy as usize);
+    // Across: each grid row to a row of texel columns.
+    let mut rows = [0f32; MAX_TEXELS];
+    for yy in 0..gy {
+        let row = &mut rows[yy * bw..(yy + 1) * bw];
+        for (xx, &c) in g[yy * gx..(yy + 1) * gx].iter().enumerate() {
+            for (o, &f) in row.iter_mut().zip(&sep.fxt[xx * bw..(xx + 1) * bw]) {
+                *o += c * f;
+            }
+        }
+    }
     let mut err = 0.0;
-    for i in 0..u.len() {
-        let d = u[i] - infill_f(grid, i, g);
-        err += d * d * scale(i);
+    for (y, &(j, w)) in sep.fy.iter().enumerate() {
+        let (r0, r1) = (&rows[j * bw..(j + 1) * bw], &rows[(j + 1) * bw..(j + 2) * bw]);
+        for x in 0..bw {
+            let d = u[y * bw + x] - (r0[x] + w * (r1[x] - r0[x]));
+            err += d * d * scale(y * bw + x);
+        }
     }
     err
 }
