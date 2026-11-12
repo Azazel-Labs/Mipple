@@ -7,6 +7,7 @@
 //     ispc_bc7:<ultrafast|veryfast|fast|basic|slow>               Intel ISPC Texture Compressor
 //     ispc_bc1 | ispc_bc4 | ispc_bc5
 //     ispc_bc6h:<veryfast|fast|basic|slow|veryslow>               ISPC BC6H_UF16 from a Radiance .hdr
+//     ispc_astc:<W>x<H>[:fast|alpha_fast|alpha_slow]              ISPC ASTC LDR; writes a .astc file
 //     icbc:<0-9>                                                  Ignacio Castano's icbc (BC1)
 //     stb_bc1 | stb_bc1hq | stb_bc4 | stb_bc5                     stb_dxt
 // threads (default 1): block rows are split across this many threads.
@@ -105,6 +106,24 @@ static bool write_dds(const char* path, uint32_t w, uint32_t h, uint32_t dxgi, c
 	hdr[26] = 0x1000;
 	for (uint32_t v : hdr) put32(out, v);
 	for (uint32_t v : { dxgi, 3u, 0u, 1u, 0u }) put32(out, v);
+	out.insert(out.end(), blocks.begin(), blocks.end());
+	FILE* f = fopen(path, "wb");
+	if (!f) return false;
+	const bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
+	fclose(f);
+	return ok;
+}
+
+// The .astc container: magic, block footprint (x, y, z), then the image size as three 24-bit values.
+static bool write_astc(const char* path, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh, const std::vector<uint8_t>& blocks)
+{
+	std::vector<uint8_t> out;
+	put32(out, 0x5CA1AB13);
+	out.push_back((uint8_t)bw);
+	out.push_back((uint8_t)bh);
+	out.push_back(1);
+	for (uint32_t v : { w, h, 1u })
+		for (int i = 0; i < 3; i++) out.push_back((uint8_t)(v >> (8 * i)));
 	out.insert(out.end(), blocks.begin(), blocks.end());
 	FILE* f = fopen(path, "wb");
 	if (!f) return false;
@@ -234,6 +253,40 @@ int main(int argc, char** argv)
 			rgba_surface surf{ (uint8_t*)&halves[a * 4 * img.pw * 4], (int32_t)img.pw, (int32_t)((b - a) * 4), (int32_t)(img.pw * 8) };
 			CompressBlocksBC6H(&surf, dst, &s);
 		};
+#else
+		fprintf(stderr, "built without ISPC Texture Compressor\n");
+		return 2;
+#endif
+	}
+	else if (family == "ispc_astc")
+	{
+#ifdef HAVE_ISPC
+		// The footprint, then the profile. The image is padded (edge texels repeated) to whole blocks
+		// before timing, since ISPC reads whole blocks.
+		int abw = 4, abh = 4;
+		if (sscanf(param.c_str(), "%dx%d", &abw, &abh) != 2) { fprintf(stderr, "ispc_astc needs <W>x<H>\n"); return 2; }
+		const std::string prof = param.find(':') == std::string::npos ? "fast" : param.substr(param.find(':') + 1);
+		static astc_enc_settings as;
+		if (prof == "fast") GetProfile_astc_fast(&as, abw, abh);
+		else if (prof == "alpha_fast") GetProfile_astc_alpha_fast(&as, abw, abh);
+		else if (prof == "alpha_slow") GetProfile_astc_alpha_slow(&as, abw, abh);
+		else { fprintf(stderr, "unknown ispc_astc profile %s\n", prof.c_str()); return 2; }
+		const uint32_t apw = (img.w + abw - 1) / abw * abw, aph = (img.h + abh - 1) / abh * abh;
+		std::vector<uint8_t> pad(apw * aph * 4);
+		for (uint32_t y = 0; y < aph; y++)
+			for (uint32_t x = 0; x < apw; x++)
+				memcpy(&pad[(y * apw + x) * 4], &img.rgba[(std::min(y, img.h - 1) * img.pw + std::min(x, img.w - 1)) * 4], 4);
+		const uint32_t abx = apw / abw, aby = aph / abh;
+		std::vector<uint8_t> out(abx * aby * 16);
+		const auto t0 = std::chrono::high_resolution_clock::now();
+		parallel_rows(aby, threads, [&](uint32_t a, uint32_t b) {
+			rgba_surface surf{ pad.data() + a * abh * apw * 4, (int32_t)apw, (int32_t)((b - a) * abh), (int32_t)(apw * 4) };
+			CompressBlocksASTC(&surf, &out[a * abx * 16], &as);
+		});
+		const double asecs = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count();
+		if (!write_astc(argv[3], img.w, img.h, abw, abh, out)) { fprintf(stderr, "failed to write %s\n", argv[3]); return 1; }
+		printf("secs=%.6f\n", asecs);
+		return 0;
 #else
 		fprintf(stderr, "built without ISPC Texture Compressor\n");
 		return 2;

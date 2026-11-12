@@ -11,6 +11,7 @@
 //! a byte-level LZ rate model shared by every format, and a KTX2 writer/reader.
 
 pub mod alpha;
+pub mod astc;
 pub mod bc1;
 pub mod bc3;
 pub mod bc4;
