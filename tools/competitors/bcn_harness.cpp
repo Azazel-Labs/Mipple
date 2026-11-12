@@ -6,13 +6,16 @@
 //     bc7f:<fastest|faster|fast|default|partial|nonanalytical>   Binomial bc7f (Basis Universal)
 //     ispc_bc7:<ultrafast|veryfast|fast|basic|slow>               Intel ISPC Texture Compressor
 //     ispc_bc1 | ispc_bc4 | ispc_bc5
+//     ispc_bc6h:<veryfast|fast|basic|slow|veryslow>               ISPC BC6H_UF16 from a Radiance .hdr
 //     icbc:<0-9>                                                  Ignacio Castano's icbc (BC1)
 //     stb_bc1 | stb_bc1hq | stb_bc4 | stb_bc5                     stb_dxt
 // threads (default 1): block rows are split across this many threads.
 // Prints "secs=<seconds>": wall time of the block-encoding loop only (no PNG load, no file write).
 //
 // BC4 encodes the red channel, BC5 red + green; BC1 is opaque RGB (3-colour mode allowed where the
-// encoder supports it, as in mipple and rgbcx; scoring is RGB-only).
+// encoder supports it, as in mipple and rgbcx; scoring is RGB-only). BC6H reads a Radiance .hdr (stb_image,
+// the same RGBE decode as the image crate mipple uses) and converts to half floats inside the timed loop
+// (round to nearest even; negatives and NaN to 0; clamped to 65504), as mipple does.
 //
 // Build: tools/competitors/CMakeLists.txt.
 
@@ -29,8 +32,12 @@
 #include "icbc.h"
 #define STB_DXT_IMPLEMENTATION
 #include "stb_dxt.h"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_HDR
+#include "stb_image.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -46,12 +53,36 @@ struct Image
 	uint32_t w = 0, h = 0;       // source size
 	uint32_t pw = 0, ph = 0;     // padded to a multiple of 4 (edge replicated)
 	std::vector<uint8_t> rgba;   // padded, pw * ph * 4
+	std::vector<float> rgbf;     // HDR input instead: padded, pw * ph * 3
 	void block(uint32_t bx, uint32_t by, uint8_t out[64]) const
 	{
 		for (uint32_t i = 0; i < 16; i++)
 			memcpy(out + i * 4, &rgba[((by * 4 + (i >> 2)) * pw + bx * 4 + (i & 3)) * 4], 4);
 	}
 };
+
+// f32 to an unsigned half: round to nearest even, NaN and negatives to 0, clamped to 65504.
+static uint16_t to_uf16(float f)
+{
+	if (!(f > 0.0f)) return 0;
+	if (f >= 65504.0f) return 0x7bff;
+	uint32_t x;
+	memcpy(&x, &f, 4);
+	const int e = (int)(x >> 23) - 127;
+	if (e < -24) return 0;
+	if (e < -14)
+	{
+		// Denormal half: value / 2^-24, rounded half to even.
+		const float v = f * 16777216.0f;
+		float r = std::nearbyint(v); // default rounding mode: nearest even
+		return (uint16_t)r;
+	}
+	uint32_t m = x & 0x7fffff;
+	uint32_t h = (uint32_t)((e + 15) << 10) | (m >> 13);
+	const uint32_t rest = m & 0x1fff;
+	if (rest > 0x1000 || (rest == 0x1000 && (h & 1))) h++;
+	return (uint16_t)std::min<uint32_t>(h, 0x7bff);
+}
 
 static void put32(std::vector<uint8_t>& v, uint32_t x)
 {
@@ -113,6 +144,26 @@ int main(int argc, char** argv)
 	const std::string param = enc.find(':') == std::string::npos ? "" : enc.substr(enc.find(':') + 1);
 
 	Image img;
+	if (family == "ispc_bc6h")
+	{
+		int w, h, n;
+		float* f = stbi_loadf(argv[2], &w, &h, &n, 3);
+		if (!f)
+		{
+			fprintf(stderr, "failed to load %s\n", argv[2]);
+			return 1;
+		}
+		img.w = w;
+		img.h = h;
+		img.pw = (img.w + 3) & ~3u;
+		img.ph = (img.h + 3) & ~3u;
+		img.rgbf.resize(img.pw * img.ph * 3);
+		for (uint32_t y = 0; y < img.ph; y++)
+			for (uint32_t x = 0; x < img.pw; x++)
+				memcpy(&img.rgbf[(y * img.pw + x) * 3], &f[(std::min(y, img.h - 1) * img.w + std::min(x, img.w - 1)) * 3], 12);
+		stbi_image_free(f);
+	}
+	else
 	{
 		std::vector<unsigned char> src;
 		if (lodepng::decode(src, img.w, img.h, argv[2]) != 0)
@@ -158,6 +209,33 @@ int main(int argc, char** argv)
 		};
 #else
 		fprintf(stderr, "built without bc7f\n");
+		return 2;
+#endif
+	}
+	else if (family == "ispc_bc6h")
+	{
+#ifdef HAVE_ISPC
+		static bc6h_enc_settings s;
+		if (param == "veryfast") GetProfile_bc6h_veryfast(&s);
+		else if (param == "fast") GetProfile_bc6h_fast(&s);
+		else if (param == "basic" || param.empty()) GetProfile_bc6h_basic(&s);
+		else if (param == "slow") GetProfile_bc6h_slow(&s);
+		else if (param == "veryslow") GetProfile_bc6h_veryslow(&s);
+		else { fprintf(stderr, "unknown ispc_bc6h profile %s\n", param.c_str()); return 2; }
+		dxgi = 95;
+		static std::vector<uint16_t> halves;
+		halves.resize(img.pw * img.ph * 4);
+		encode_rows = [&](uint32_t a, uint32_t b, uint8_t* dst) {
+			for (uint32_t i = a * 4 * img.pw; i < b * 4 * img.pw; i++)
+			{
+				for (int c = 0; c < 3; c++) halves[i * 4 + c] = to_uf16(img.rgbf[i * 3 + c]);
+				halves[i * 4 + 3] = 0x3c00;
+			}
+			rgba_surface surf{ (uint8_t*)&halves[a * 4 * img.pw * 4], (int32_t)img.pw, (int32_t)((b - a) * 4), (int32_t)(img.pw * 8) };
+			CompressBlocksBC6H(&surf, dst, &s);
+		};
+#else
+		fprintf(stderr, "built without ISPC Texture Compressor\n");
 		return 2;
 #endif
 	}

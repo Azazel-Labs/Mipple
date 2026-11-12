@@ -3,7 +3,7 @@ name = "mipple"
 version = "0.9.0"
 edition = "2024"
 rust-version = "1.90"
-description = "Rate-distortion optimized GPU texture encoder (BC1/BC4/BC5/BC7) with KTX2 + Zstd output"
+description = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC6H/BC7) with KTX2 + Zstd output"
 readme = "README.md"
 license = "MIT-0"
 repository = "https://github.com/Azazel-Labs/mipple"
@@ -63,7 +63,7 @@ workspace = true
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"], optional = true }
 flate2 = "1.1.11"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga", "hdr"] }
 rayon = "1.12.0"
 zstd = "0.14.3"
 # On wasm32 wgpu drives the browser's WebGPU (its default `webgpu` feature).

@@ -14,7 +14,9 @@ pub fn corpus(size: u32) -> Vec<(&'static str, Surface)> {
     ]
 }
 
-/// Decodes a block with the independent `texture2ddecoder` crate, returned as RGBA.
+/// Decodes a block with the independent `texture2ddecoder` crate, returned as RGBA. Not for BC6H:
+/// that crate's BC6H unquantization departs from the D3D specification (BC6H is checked against
+/// texconv in `bc6h_reference.rs` instead).
 pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
     let mut buf = [0u32; 16];
     match format {
@@ -29,6 +31,7 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
             texture2ddecoder::decode_bc5_block(raw, &mut buf);
         }
         Format::Bc7 => texture2ddecoder::decode_bc7_block(raw, &mut buf),
+        Format::Bc6h => panic!("no independent BC6H reference decoder here"),
     }
     // texture2ddecoder packs pixels as little-endian BGRA.
     buf.map(|p| {

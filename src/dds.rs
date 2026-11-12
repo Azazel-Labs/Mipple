@@ -1,4 +1,4 @@
-//! Minimal DDS reader/writer for BC1/BC3/BC4/BC5/BC7, so other encoders' output (bc7enc_rdo,
+//! Minimal DDS reader/writer for BC1/BC3/BC4/BC5/BC6H/BC7, so other encoders' output (bc7enc_rdo,
 //! bc7f harness, texconv...) can be scored with the same metrics and back ends as mipple.
 //!
 //! Reads legacy FourCC (DXT1, DXT4/DXT5, ATI1/BC4U, ATI2/BC5U) and DX10-extended headers; writes DX10.
@@ -22,6 +22,7 @@ fn dxgi(format: Format, srgb: bool) -> u32 {
         (Format::Bc3, true) => 78,
         (Format::Bc4, _) => 80,
         (Format::Bc5, _) => 83,
+        (Format::Bc6h, _) => 95,
         (Format::Bc7, false) => 98,
         (Format::Bc7, true) => 99,
     }
@@ -35,6 +36,7 @@ fn from_dxgi(v: u32) -> Option<(Format, bool)> {
         78 => (Format::Bc3, true),
         79..=80 => (Format::Bc4, false),
         82..=83 => (Format::Bc5, false),
+        94..=95 => (Format::Bc6h, false),
         97..=98 => (Format::Bc7, false),
         99 => (Format::Bc7, true),
         _ => return None,

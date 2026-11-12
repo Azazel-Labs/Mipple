@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use mipple::bench::{self, BenchConfig};
 use mipple::gpu::Gpu;
+use mipple::hdr::{self, HdrSurface};
 use mipple::pipeline::{self, EncodeOptions};
 use mipple::{EntropyMode, Format, RdoParams, Surface, dds, ktx2, metrics, synth};
 use std::path::PathBuf;
@@ -13,7 +14,7 @@ use std::time::Instant;
 #[command(
     name = "mipple",
     version,
-    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC7 → KTX2)"
+    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC6H/BC7 → KTX2)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,7 +25,7 @@ struct Cli {
 enum Cmd {
     /// Encode an image to a KTX2 file.
     Encode(EncodeArgs),
-    /// Decode one mip level of a KTX2 file to PNG.
+    /// Decode one mip level of a KTX2 file to PNG (BC6H also to Radiance .hdr, by extension).
     Decode {
         input: PathBuf,
         #[arg(short, long)]
@@ -52,7 +53,8 @@ enum Cmd {
     /// Exits non-zero on a regression.
     Check(CheckArgs),
     /// Score any encoder's output (KTX2 or DDS, top level) against its source image,
-    /// with the same metrics and back-end compressors as `bench`.
+    /// with the same metrics and back-end compressors as `bench`. BC6H is scored in linear light:
+    /// multi-exposure PSNR (the psnr column) and log2 RMSE (an extra last column).
     Score {
         source: PathBuf,
         encoded: PathBuf,
@@ -165,7 +167,8 @@ struct EncodeArgs {
     /// RDO lambda; 0 disables RDO. Try 0.5 – 4.
     #[arg(short, long, default_value_t = 0.0)]
     lambda: f32,
-    /// Treat the input as linear data (default for BC4/BC5).
+    /// Treat the input as linear data (default for BC4/BC5; for BC6H, 8-bit input as linear 0-1
+    /// instead of sRGB).
     #[arg(long, conflicts_with = "srgb")]
     linear: bool,
     /// Treat the input as sRGB color (default for BC1/BC3/BC7).
@@ -293,7 +296,18 @@ fn main() -> Result<()> {
             if level >= tex.levels.len() {
                 bail!("level {level} out of range (file has {})", tex.levels.len());
             }
-            pipeline::decode_level(&tex, level, normal).save_png(&output)?;
+            let float_out = output
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("hdr"));
+            if float_out {
+                if tex.format != Format::Bc6h {
+                    bail!("only BC6H decodes to .hdr; use .png for {}", tex.format);
+                }
+                pipeline::decode_level_hdr(&tex, level).save(&output)?;
+            } else {
+                pipeline::decode_level(&tex, level, normal).save_png(&output)?;
+            }
             println!(
                 "wrote {} ({}x{}, {})",
                 output.display(),
@@ -371,8 +385,11 @@ fn main() -> Result<()> {
             secs,
             csv,
         } => {
-            let src = Surface::load(&source)?;
             let tex = load_encoded(&encoded)?;
+            if tex.format == Format::Bc6h {
+                return score_hdr(&source, &encoded, &tex, zstd_level, deflate_level, label, secs, csv);
+            }
+            let src = Surface::load(&source)?;
             let s = bench::score(&src, &tex, normal, zstd_level, deflate_level)?;
             if csv {
                 println!(
@@ -474,7 +491,130 @@ fn parse_unit(s: &str) -> std::result::Result<f32, String> {
     }
 }
 
+/// `score` for BC6H: linear-light metrics against the source as BC6H can store it.
+#[expect(clippy::too_many_arguments, reason = "the Score subcommand's fields")]
+fn score_hdr(
+    source: &std::path::Path,
+    encoded: &std::path::Path,
+    tex: &mipple::EncodedTexture,
+    zstd_level: i32,
+    deflate_level: u32,
+    label: Option<String>,
+    secs: Option<f64>,
+    csv: bool,
+) -> Result<()> {
+    let src = HdrSurface::load(source, false)?.representable();
+    if (tex.width, tex.height) != (src.width, src.height) {
+        bail!(
+            "size mismatch: encoded {}x{}, source {}x{}",
+            tex.width,
+            tex.height,
+            src.width,
+            src.height
+        );
+    }
+    let dec = pipeline::decode_level_hdr(tex, 0);
+    let stops = hdr::exposure_range(&src);
+    let (mpsnr, lrmse) = (hdr::mpsnr(&src, &dec, stops), hdr::log_rmse(&src, &dec));
+    let data = &tex.levels[0].data;
+    let zstd_bytes = zstd::bulk::compress(data, zstd_level)?.len();
+    let deflate_bytes = bench::deflate_len(data, deflate_level)?;
+    let texels = f64::from(tex.width) * f64::from(tex.height);
+    let (zbpt, dbpt) = (zstd_bytes as f64 * 8.0 / texels, deflate_bytes as f64 * 8.0 / texels);
+    if csv {
+        println!(
+            "{},{},{},{},{},{:.4},,,{},{},{},{:.4},{:.4},{},{:.5}",
+            label.unwrap_or_default(),
+            source.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            tex.format,
+            tex.width,
+            tex.height,
+            mpsnr,
+            data.len(),
+            zstd_bytes,
+            deflate_bytes,
+            zbpt,
+            dbpt,
+            secs.map(|t| format!("{t:.6}")).unwrap_or_default(),
+            lrmse,
+        );
+    } else {
+        println!("{} vs {}: {}", encoded.display(), source.display(), tex.format);
+        println!(
+            "  mPSNR {mpsnr:.3} dB (stops {} to {}), log2 RMSE {lrmse:.5}",
+            stops.0, stops.1
+        );
+        println!(
+            "  raw {} bytes, zstd-{zstd_level} {zstd_bytes} bytes ({zbpt:.3} bpt), deflate-{deflate_level} \
+             {deflate_bytes} bytes ({dbpt:.3} bpt)",
+            data.len()
+        );
+    }
+    Ok(())
+}
+
+/// `encode -f bc6h`: float input (Radiance `.hdr`; 8-bit images decoded from sRGB unless `--linear`).
+fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
+    if a.lambda > 0.0 {
+        eprintln!("note: BC6H has no RDO yet; encoding without it");
+    }
+    let src = HdrSurface::load(&a.input, a.linear)?;
+    let mut opts = EncodeOptions::new(Format::Bc6h);
+    opts.effort = a.effort;
+    opts.mips = !a.no_mips;
+    rayon::broadcast(|_| ());
+    let t = Instant::now();
+    let (tex, report) = pipeline::encode_hdr(&src, &opts);
+    let encode_secs = t.elapsed().as_secs_f64();
+    let is_dds = a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds"));
+    let zstd = (a.zstd > 0).then_some(a.zstd);
+    let sc_params = format!("--format bc6h --effort {} --zstd {}", a.effort, a.zstd);
+    let bytes = if is_dds {
+        dds::write(&tex)
+    } else {
+        ktx2::write(&tex, zstd, Some(&sc_params), a.prep)?
+    };
+    std::fs::write(&a.output, &bytes).with_context(|| format!("writing {}", a.output.display()))?;
+    let raw: usize = tex.levels.iter().map(|l| l.data.len()).sum();
+    let texels: f64 = tex
+        .levels
+        .iter()
+        .map(|l| f64::from(l.width) * f64::from(l.height))
+        .sum();
+    let (rep, dec) = (src.representable(), pipeline::decode_level_hdr(&tex, 0));
+    let stops = hdr::exposure_range(&rep);
+    println!(
+        "{} -> {}: {}x{} bc6h, {} level(s)",
+        a.input.display(),
+        a.output.display(),
+        tex.width,
+        tex.height,
+        tex.levels.len()
+    );
+    println!(
+        "  blocks {raw} bytes, file {} bytes ({:.3} bits/texel incl. mips)",
+        bytes.len(),
+        bytes.len() as f64 * 8.0 / texels
+    );
+    println!(
+        "  level 0 mPSNR {:.2} dB (stops {} to {}), log2 RMSE {:.4}",
+        hdr::mpsnr(&rep, &dec, stops),
+        stops.0,
+        stops.1,
+        hdr::log_rmse(&rep, &dec)
+    );
+    println!(
+        "  time: base {:.6}s, encode {encode_secs:.6}s, total {:.6}s (CPU)",
+        report.base_secs,
+        t.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 fn encode(a: EncodeArgs) -> Result<()> {
+    if a.format == Format::Bc6h {
+        return encode_bc6h(&a);
+    }
     let surface = Surface::load(&a.input)?;
     let mut opts = EncodeOptions::new(a.format);
     opts.effort = a.effort;

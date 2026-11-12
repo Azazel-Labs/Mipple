@@ -503,6 +503,36 @@ source than the bc7enc_rdo point at the same λ, at about a fifth of the time. T
 color half is the BC1 encoder held to 4-color blocks (a BC3 color half never decodes in 3-color mode), the
 alpha half the BC4 encoder.
 
+## BC6H vs ISPC, texconv, Compressonator
+
+Twenty Poly Haven HDR environment maps at 1024×512 (`scripts/fetch_polyhaven.py --hdris --step 50`), unsigned
+BC6H (`BC6H_UF16`), one thread for every encoder, `python scripts/compete_bc6h.py test-images/polyhaven-hdri
+--threads 1 --efforts 0,2,5,9`. Scores are in linear light: mPSNR is multi-exposure PSNR (Munkberg et al.
+2006) over each image's exposure range, log2 RMSE is roughly the error in stops. Means per image; time is
+the total over the twenty images (mipple's encode loop, the ISPC harness's block loop, and process wall
+time for texconv and Compressonator, which includes loading and writing):
+
+| encoder | mPSNR dB | log2 RMSE | Zstd-19 bpt | time s |
+| --- | ---: | ---: | ---: | ---: |
+| mipple effort 0 | 46.713 | 0.03980 | 7.388 | 2.25 |
+| mipple effort 2 | 46.873 | 0.03901 | 7.387 | 3.79 |
+| mipple effort 5 | 47.022 | 0.03830 | 7.392 | 9.90 |
+| mipple effort 9 | 47.117 | 0.03785 | 7.400 | 241.2 |
+| ISPC veryfast | 44.857 | 0.05035 | 7.213 | 0.16 |
+| ISPC fast | 46.586 | 0.04034 | 7.370 | 1.12 |
+| ISPC basic | 46.745 | 0.03959 | 7.359 | 2.79 |
+| ISPC slow | 46.838 | 0.03916 | 7.402 | 11.8 |
+| ISPC veryslow | 46.848 | 0.03912 | 7.409 | 24.7 |
+| texconv | 44.555 | 0.05390 | 7.334 | 6.52 |
+| Compressonator q0.1 | 45.944 | 0.04552 | 7.239 | 161 |
+| Compressonator q1.0 | 45.944 | 0.04552 | 7.243 | 2985 |
+
+Effort 2 is ahead of ISPC veryslow (+0.03 dB) at a sixth of its time, and effort 5 is ahead of it by
+0.17 dB at 40% of its time. At the fast end mipple is behind: effort 0 sits between ISPC fast and basic
+(+0.13 dB over fast at twice its time, −0.03 dB from basic at 80% of its time). ISPC encodes eight blocks
+per instruction; the scalar encoder here doesn't yet. Zstd sizes are within 0.5% of each other for every
+encoder at this quality (BC6H has no RDO yet).
+
 ## Lossless field split (`--prep`)
 
 `src/prep.rs` applies a BC7Prep-style lossless transform before Zstd: blocks are split into byte streams of

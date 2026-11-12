@@ -3,9 +3,9 @@
 [![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
 
-A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC4 / BC5 / BC7**
-blocks, tuned so Zstd or Deflate shrink them further, and stores them in **KTX2** with optional Zstd
-supercompression. GPUs read the output directly; nothing new runs at load time.
+A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC3 / BC4 / BC5 / BC7**
+blocks, tuned so Zstd or Deflate shrink them further, plus **BC6H** for HDR. Output goes to **KTX2** with
+optional Zstd supercompression. GPUs read it directly; nothing new runs at load time.
 
 <img src="docs/img/rdo.webp" alt="Animation: mipple's BC7 RDO sweeps Kodak 23 block by block, re-encoding blocks to copy or share bytes with earlier ones; Zstd size falls from 7.42 to 3.35 bits per texel while PSNR goes from 47.4 to 42.5 dB" width="100%">
 
@@ -145,6 +145,9 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - BC1, BC3, BC4, BC5 and BC7 encoders (all 8 BC7 modes), with an entropy-reduced BC7 mode for RDO (mode-6
   preference, 64-level mode-6 endpoints), and wgpu compute kernels that write the CPU's exact blocks (BC3
   is CPU only for now).
+- A BC6H encoder (unsigned half floats, all 14 modes) that reads Radiance `.hdr` and is scored with mPSNR
+  and log2 RMSE in linear light; `scripts/compete_bc6h.py` grades it against ISPC, texconv and
+  Compressonator. No RDO or GPU kernel for it yet.
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.

@@ -25,11 +25,12 @@ const LEVEL_ENTRY_LEN: usize = 24;
 /// KHR_DF color model for each format.
 fn color_model(format: Format) -> u8 {
     match format {
-        Format::Bc1 => 128, // KHR_DF_MODEL_BC1A
-        Format::Bc3 => 130, // KHR_DF_MODEL_BC3
-        Format::Bc4 => 131, // KHR_DF_MODEL_BC4
-        Format::Bc5 => 132, // KHR_DF_MODEL_BC5
-        Format::Bc7 => 134, // KHR_DF_MODEL_BC7
+        Format::Bc1 => 128,  // KHR_DF_MODEL_BC1A
+        Format::Bc3 => 130,  // KHR_DF_MODEL_BC3
+        Format::Bc4 => 131,  // KHR_DF_MODEL_BC4
+        Format::Bc5 => 132,  // KHR_DF_MODEL_BC5
+        Format::Bc6h => 133, // KHR_DF_MODEL_BC6H
+        Format::Bc7 => 134,  // KHR_DF_MODEL_BC7
     }
 }
 
@@ -43,6 +44,8 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         Format::Bc3 => &[(0, 63, 15), (64, 63, 0)],
         Format::Bc4 => &[(0, 63, 0)],
         Format::Bc5 => &[(0, 63, 0), (64, 63, 1)],
+        // KHR_DF_SAMPLE_DATATYPE_FLOAT; unsigned.
+        Format::Bc6h => &[(0, 127, 0x80)],
         Format::Bc7 => &[(0, 127, 0)],
     };
     let block_size = 24 + 16 * samples.len();
@@ -68,8 +71,14 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         v.push(len);
         v.push(channel);
         v.extend_from_slice(&[0, 0, 0, 0]); // samplePosition
-        v.extend_from_slice(&0u32.to_le_bytes()); // sampleLower
-        v.extend_from_slice(&u32::MAX.to_le_bytes()); // sampleUpper
+        // sampleLower and sampleUpper: the full integer range, or 0.0 to 1.0 for float data.
+        let (lower, upper) = if channel & 0x80 != 0 {
+            (0u32, 1f32.to_bits())
+        } else {
+            (0, u32::MAX)
+        };
+        v.extend_from_slice(&lower.to_le_bytes());
+        v.extend_from_slice(&upper.to_le_bytes());
     }
     v
 }

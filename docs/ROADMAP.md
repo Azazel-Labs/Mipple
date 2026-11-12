@@ -2,7 +2,7 @@
 
 Each item should land with a benchmark delta (see `bench-results/`). Major and minor in `Cargo.toml` name the
 milestone in progress; every green push to main is released as the next patch (`vX.Y.Z`, with binaries;
-`.github/workflows/release.yml`).
+`.github/workflows/release.yml`). Ideas tried and dropped are catalogued in [DEADENDS.md](DEADENDS.md).
 
 ## v0.1 (pre-release): encoder and container
 
@@ -89,11 +89,7 @@ Open for v0.9.x:
   (`pipeline::rdo_bases`) 20%; Zstd check and KTX2 write about 7%.
   - Kept: in refinement, a mode-6 block skips other modes' first halves (about 3% less at λ 1, byte-identical on
     Kodak-24 and the Poly Haven test set).
-  - Rejected, quality: `--refine-back 0` (−16% CPU), `64` (−12%) and `--local 0` (−26%) each push λ 40 SSIM
-    behind Oodle (+0.2% to +1.0%), so refinement and the ranker picks carry real quality.
-  - Rejected, slower or no gain, all byte-identical: u16 hash-chain deltas, skipping `texels_far` when cached,
-    an equality-mask intra scan, deduplicating refinement candidates only after their error test (+4-5%: refinement
-    candidates often repeat earlier ones), and skipping runs of eight dropped blocks in the far loop (±0).
+  - Rejected (quality, or slower with no gain): see [DEADENDS.md](DEADENDS.md#bc7-rdo).
   - Measured, not pursued: whole blocks and index halves are only 0-10% repeated within the ranker's 2048-block
     reach at λ 1 on most images (30-60% at λ 4+), so a deduplicated prefilter scan pays mostly at higher λ.
   - Next: a ranker reach of 1024 (the rate model's window) instead of 2048 (halves the prefilter scan; needs a
@@ -116,7 +112,13 @@ Open for v0.9.x:
 - [x] BC3: a BC4 alpha half and a 4-color BC1 color half, both halves through the same RDO pass (each
   half's copy, re-index and refit, like BC5), alpha as transparency like BC7; −15.7% BD-rate against
   bc7enc_rdo at a fifth of its time (BENCHMARKS.md). No GPU kernel yet.
-- [ ] BC6H (HDR, relative error metric; needs float input: EXR/HDR loading).
+- [x] BC6H, unsigned (all 14 modes, Radiance `.hdr` input, scored with mPSNR and log2 RMSE): on 20 Poly
+  Haven HDRIs effort 2 beats ISPC veryslow at a sixth of its time (BENCHMARKS.md). EXR input was dropped
+  for build time (DEADENDS.md).
+  - [ ] Speed at the low end: effort 0 is between ISPC fast and basic. Next is an eight-block batch
+    encoder like BC7's (one block per lane, per-lane mode and partition), since the scalar time is
+    spread over too many small steps to halve any other way.
+  - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
 - [ ] ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.
 - [ ] ETC2 / EAC for mobile fallbacks.
 

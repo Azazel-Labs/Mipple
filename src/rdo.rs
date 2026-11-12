@@ -140,7 +140,7 @@ impl RdoParams {
     /// it searches 128 deep plus the localized search's picks instead.
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
-            Format::Bc7 => 16 * 1024,
+            Format::Bc6h | Format::Bc7 => 16 * 1024,
             Format::Bc1 | Format::Bc3 => 8 * 1024,
             Format::Bc5 => 3072,
             Format::Bc4 => 2048,
@@ -165,7 +165,7 @@ impl RdoParams {
     /// (Kodak-24 BD-rate +0.00% and +0.02% without them, for 11% and 7% less time).
     pub fn span_back_for(&self, format: Format) -> usize {
         self.span_back.unwrap_or(match format {
-            Format::Bc3 | Format::Bc5 | Format::Bc7 => 0,
+            Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 => 0,
             _ => 8,
         })
     }
@@ -201,7 +201,7 @@ impl RdoParams {
     pub fn refine_back_for(&self, format: Format) -> usize {
         self.refine_back.unwrap_or(match format {
             Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc7 => 256,
-            Format::Bc5 => 0,
+            Format::Bc5 | Format::Bc6h => 0,
         })
     }
 
@@ -906,6 +906,9 @@ fn candidates(
                 out.retain(|&(_, e)| e == UNKNOWN || e <= bound);
             }
         }
+        // No candidates: BC6H errors are not on the 8-bit scale, and the pipeline never runs this
+        // RDO for it.
+        Format::Bc6h => {}
         Format::Bc7 => {
             // Far back-references get only the endpoints re-indexed besides the whole-block copy
             // and the index copy below: the raw endpoint copy and the spans rarely win there
@@ -1782,7 +1785,7 @@ fn optimize_chunk(
         Format::Bc1 => w[3] == 0,
         Format::Bc4 => w[1..] == [0, 0, 0],
         Format::Bc5 => w[2..] == [0, 0],
-        Format::Bc3 | Format::Bc7 => false,
+        Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
     } && far_back > max_back;
     let mut far = FarEndpoints::new(format, if far_on { blocks.len() } else { 0 }, w);
     // Localized search (BC5's two channels): beyond the nearest `max_back` blocks, shape
@@ -2183,6 +2186,7 @@ fn optimize_chunk(
                 Format::Bc5 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
                 // Mode 6 (most RDO output): mode, endpoints and P0; then P1 and the indices.
                 Format::Bc7 => &[(0, 8), (8, 16)],
+                Format::Bc6h => &[(0, 16)],
             };
             let cur = best.1;
             // Each candidate changes one field, so for BC5 it keeps one half of `cur`.
@@ -2482,6 +2486,7 @@ mod tests {
             "bc3" => Format::Bc3,
             "bc4" => Format::Bc4,
             "bc5" => Format::Bc5,
+            "bc6h" => Format::Bc6h,
             _ => Format::Bc7,
         };
         let opts = crate::format::BlockOpts {

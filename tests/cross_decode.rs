@@ -12,6 +12,7 @@ fn channels(format: Format) -> &'static [usize] {
         Format::Bc1 => &[0, 1, 2],
         Format::Bc4 => &[0],
         Format::Bc5 => &[0, 1],
+        Format::Bc6h => &[],
         Format::Bc3 | Format::Bc7 => &[0, 1, 2, 3],
     }
 }
@@ -19,7 +20,7 @@ fn channels(format: Format) -> &'static [usize] {
 #[test]
 fn encoded_blocks_match_reference_decoder() {
     for (name, img) in corpus(64) {
-        for format in Format::ALL {
+        for format in Format::ALL.into_iter().filter(|&f| f != Format::Bc6h) {
             for (effort, reduce_entropy) in [(0u8, false), (1, false), (5, false), (6, false), (5, true)] {
                 let opts = BlockOpts { effort, reduce_entropy };
                 let (_, blocks) = encode_base(&img, format, opts);

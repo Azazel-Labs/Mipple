@@ -1,7 +1,7 @@
 //! Output format dispatch.
 
 use crate::surface::Block;
-use crate::{bc1, bc3, bc4, bc7};
+use crate::{bc1, bc3, bc4, bc6h, bc7};
 
 /// When to use entropy-reduced base encoding ([`BlockOpts::reduce_entropy`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,12 +86,21 @@ pub enum Format {
     Bc4,
     /// 8 bpp two channels (tangent-space normals).
     Bc5,
+    /// 8 bpp HDR RGB, unsigned half floats (BC6H_UF16: skies, lightmaps, emissive).
+    Bc6h,
     /// 8 bpp RGB/RGBA, highest quality.
     Bc7,
 }
 
 impl Format {
-    pub const ALL: [Format; 5] = [Format::Bc1, Format::Bc3, Format::Bc4, Format::Bc5, Format::Bc7];
+    pub const ALL: [Format; 6] = [
+        Format::Bc1,
+        Format::Bc3,
+        Format::Bc4,
+        Format::Bc5,
+        Format::Bc6h,
+        Format::Bc7,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -99,6 +108,7 @@ impl Format {
             Format::Bc3 => "bc3",
             Format::Bc4 => "bc4",
             Format::Bc5 => "bc5",
+            Format::Bc6h => "bc6h",
             Format::Bc7 => "bc7",
         }
     }
@@ -107,7 +117,7 @@ impl Format {
     pub fn block_bytes(self) -> usize {
         match self {
             Format::Bc1 | Format::Bc4 => 8,
-            Format::Bc3 | Format::Bc5 | Format::Bc7 => 16,
+            Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 => 16,
         }
     }
 
@@ -138,6 +148,7 @@ impl Format {
             (Format::Bc3, true) => 138,  // VK_FORMAT_BC3_SRGB_BLOCK
             (Format::Bc4, _) => 139,     // VK_FORMAT_BC4_UNORM_BLOCK
             (Format::Bc5, _) => 141,     // VK_FORMAT_BC5_UNORM_BLOCK
+            (Format::Bc6h, _) => 143,    // VK_FORMAT_BC6H_UFLOAT_BLOCK
             (Format::Bc7, false) => 145, // VK_FORMAT_BC7_UNORM_BLOCK
             (Format::Bc7, true) => 146,  // VK_FORMAT_BC7_SRGB_BLOCK
         }
@@ -152,6 +163,7 @@ impl Format {
             138 => (Format::Bc3, true),
             139 => (Format::Bc4, false),
             141 => (Format::Bc5, false),
+            143 => (Format::Bc6h, false),
             145 => (Format::Bc7, false),
             146 => (Format::Bc7, true),
             _ => return None,
@@ -168,6 +180,7 @@ impl Format {
             Format::Bc3 => [1, 1, 1, 1],
             Format::Bc4 => [1, 0, 0, 0],
             Format::Bc5 => [1, 1, 0, 0],
+            Format::Bc6h => [1, 1, 1, 0],
             Format::Bc7 => [1, 1, 1, 1],
         }
     }
@@ -175,7 +188,7 @@ impl Format {
     /// Channels to score in metrics.
     pub fn metric_channels(self, has_alpha: bool) -> Vec<usize> {
         match self {
-            Format::Bc1 => vec![0, 1, 2],
+            Format::Bc1 | Format::Bc6h => vec![0, 1, 2],
             Format::Bc4 => vec![0],
             Format::Bc5 => vec![0, 1],
             Format::Bc3 | Format::Bc7 if has_alpha => vec![0, 1, 2, 3],
@@ -196,6 +209,7 @@ impl Format {
                 out[..8].copy_from_slice(&bc4::encode_channel(&bc4::channel(px, 0), effort));
                 out[8..].copy_from_slice(&bc4::encode_channel(&bc4::channel(px, 1), effort));
             }
+            Format::Bc6h => out = bc6h::encode_ldr(px, effort),
             Format::Bc7 => out = bc7::encode(px, w, opts.searched()),
         }
         out
@@ -208,6 +222,7 @@ impl Format {
             Format::Bc3 => bc3::decode(raw, out),
             Format::Bc4 => bc4::decode_bc4(raw, out),
             Format::Bc5 => bc4::decode_bc5(raw, out),
+            Format::Bc6h => bc6h::decode_ldr(raw, out),
             Format::Bc7 => bc7::decode(raw, out),
         }
     }
@@ -225,6 +240,6 @@ impl std::str::FromStr for Format {
         Format::ALL
             .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5 or bc7)"))
+            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h or bc7)"))
     }
 }

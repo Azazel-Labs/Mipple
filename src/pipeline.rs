@@ -243,6 +243,7 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
     match format {
         Format::Bc1 => crate::bc1::encode_surface(surface, opts.effort),
         Format::Bc3 => crate::bc3::encode_surface(surface, opts.effort),
+        Format::Bc6h => crate::bc6h::encode_surface_ldr(surface, opts.effort),
         Format::Bc4 => crate::bc4::encode_surface(surface, 1, opts.effort),
         Format::Bc5 => crate::bc4::encode_surface(surface, 2, opts.effort),
         Format::Bc7 => crate::bc7::fast::encode_surface(
@@ -326,6 +327,12 @@ pub fn prepare<'a>(surface: &'a Surface, opts: &EncodeOptions) -> Vec<Cow<'a, Su
 fn rdo_params(opts: &EncodeOptions) -> RdoParams {
     RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
+        // The 8-bit RDO does not apply to BC6H.
+        lambda: if opts.format == Format::Bc6h {
+            0.0
+        } else {
+            opts.rdo.lambda
+        },
         ..opts.rdo
     }
 }
@@ -462,6 +469,51 @@ fn encode_with(
         levels,
     };
     (tex, report)
+}
+
+/// Encodes an HDR image to BC6H (unsigned half floats), with a box-filtered mip chain when
+/// `opts.mips`. Uses `opts.effort` and `opts.mips`; `opts.format` must be [`Format::Bc6h`] (RDO
+/// for BC6H is not implemented yet).
+pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
+    assert_eq!(opts.format, Format::Bc6h, "encode_hdr encodes BC6H");
+    let chain = if opts.mips {
+        surface.chain()
+    } else {
+        vec![surface.clone()]
+    };
+    let t0 = Instant::now();
+    let levels: Vec<Level> = chain
+        .iter()
+        .map(|l| Level {
+            width: l.width,
+            height: l.height,
+            data: crate::bc6h::encode_surface(l, opts.effort),
+        })
+        .collect();
+    let blocks = levels.iter().map(|l| l.data.len() / 16).sum();
+    let report = EncodeReport {
+        base_secs: t0.elapsed().as_secs_f64(),
+        rdo: RdoStats {
+            blocks,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tex = EncodedTexture {
+        format: Format::Bc6h,
+        srgb: false,
+        width: surface.width,
+        height: surface.height,
+        levels,
+    };
+    (tex, report)
+}
+
+/// Decodes one mip level of a BC6H texture to linear float RGB.
+pub fn decode_level_hdr(tex: &EncodedTexture, level: usize) -> crate::hdr::HdrSurface {
+    assert_eq!(tex.format, Format::Bc6h, "decode_level_hdr decodes BC6H");
+    let l = &tex.levels[level];
+    crate::bc6h::decode_surface(&l.data, l.width, l.height)
 }
 
 /// Decodes raw blocks back to an image. For BC5 with `normal_map`, Z is reconstructed into blue.
