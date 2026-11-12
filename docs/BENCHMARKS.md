@@ -418,8 +418,13 @@ key, not 16 (λ 20 SSIM, λ 30 SSIM and λ 40 change by 0.1% in the table, each 
 less). The second base then skipped mode 3, which survives RDO in about 1 block in 12 of those it wins there:
 no cell moved by more than 0.05%, the larger moves gains (λ 20 at RMSE −0.3% to −0.4%), for about 6.5% less
 CPU at λ 1 and 3.7% at λ 4. It then refit endpoints once, not twice, and skipped mode 5 (no cell moved by
-more than 0.01% at RMSE, SSIM gains up to 0.03%; 3.4% less at λ 1). Chained, these paired measurements
-put mipple at about Oodle's CPU time for the same size and quality (1.0-1.1×; absolute timings on this
+more than 0.01% at RMSE, SSIM gains up to 0.03%; 3.4% less at λ 1). Three cuts followed, byte-identical on Kodak-24: index-copy
+and layout-copy refits whose least-squares bound already exceeds the error bound are skipped (about 2% less at
+λ 1), the far search re-indexes only each distinct head's latest block in its range (3.5% less), and the final
+one-field refinement of a mode-6 block no longer tries other modes' first halves over its indices (about 3% less
+at λ 1; those never won on Kodak-24 or the Poly Haven test set, and one synthetic mask moved by 0.2% in size at a 0.01 dB
+better PSNR). Chained, these paired measurements
+put mipple at or slightly under Oodle's CPU time for the same size and quality (about 0.92-1.01×; absolute timings on this
 laptop drift by about 5% between sessions, so the ratio wants a fresh side-by-side run).
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at

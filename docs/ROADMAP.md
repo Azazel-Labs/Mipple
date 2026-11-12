@@ -81,6 +81,24 @@ Open for v0.9.x:
   shots (kodim07, kodim20) are still up to 5.5% behind there. Oodle's RDO output has about 3× more index-half
   repeats. 128 KiB chunks are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing
   (1.4-1.5× wall time).
+- [ ] **BC7 RDO clearly faster than Oodle** (paused 2026-11-11): quality is ahead in every cell, but CPU is
+  only about level (0.92-1.01× Oodle's at the same size and quality; mipple λ 1-1.5 against Oodle λ 30; history in
+  [BENCHMARKS.md](BENCHMARKS.md)). Target: about 25% less CPU at λ 1 with every table cell still ahead.
+  Where λ 1 CPU goes (busy time, kodim05): main RDO loop 76%, of which far search 18% (half of it mode-6
+  re-indexing), ranker prefilter scan 15%, near candidates 11%, refinement about 10%; the two extra bases
+  (`pipeline::rdo_bases`) 20%; Zstd check and KTX2 write about 7%.
+  - Kept: in refinement, a mode-6 block skips other modes' first halves (about 3% less at λ 1, byte-identical on
+    Kodak-24 and the Poly Haven test set).
+  - Rejected, quality: `--refine-back 0` (−16% CPU), `64` (−12%) and `--local 0` (−26%) each push λ 40 SSIM
+    behind Oodle (+0.2% to +1.0%), so refinement and the ranker picks carry real quality.
+  - Rejected, slower or no gain, all byte-identical: u16 hash-chain deltas, skipping `texels_far` when cached,
+    an equality-mask intra scan, deduplicating refinement candidates only after their error test (+4-5%: refinement
+    candidates often repeat earlier ones), and skipping runs of eight dropped blocks in the far loop (±0).
+  - Measured, not pursued: whole blocks and index halves are only 0-10% repeated within the ranker's 2048-block
+    reach at λ 1 on most images (30-60% at λ 4+), so a deduplicated prefilter scan pays mostly at higher λ.
+  - Next: a ranker reach of 1024 (the rate model's window) instead of 2048 (halves the prefilter scan; needs a
+    quality run); structural cuts to the far re-indexing and the second base, using the cross-domain research
+    sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
 - [ ] **Smarter entropy reduction:** pick mode/partition/p-bits by an estimated rate *given the previous blocks*
   (not a fixed mode-6 weight), so the base encoder and RDO share one objective.

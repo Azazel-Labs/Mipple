@@ -2109,13 +2109,15 @@ fn optimize_chunk(
             } else {
                 back.min(refine_back)
             };
-            // Mode 6 halves are scored without a decode (most BC7 RDO output is mode 6).
+            // Mode 6 halves are scored without a decode (most BC7 RDO output is mode 6). A mode-6
+            // block skips other modes' first halves: those hybrids (another mode's bit layout over
+            // its indices) never won on Kodak-24 or Poly Haven, and their full decode cost about 3%.
             let m6 = (bc7 && bc7::is_mode6(&cur)).then(|| (bc7::Mode6Lo::new(&cur, s, w), bc7::Mode6Hi::new(&cur)));
             let half = |c: &[u8; 16], k: usize| u64::from_le_bytes(c[k * 8..k * 8 + 8].try_into().unwrap());
             for &(a, b) in flds {
                 for d in 1..=depth {
                     let prev = &blocks[i - d];
-                    if prev[a..b] == cur[a..b] {
+                    if prev[a..b] == cur[a..b] || (m6.is_some() && a == 0 && !bc7::is_mode6(prev)) {
                         continue;
                     }
                     let mut c = cur;
