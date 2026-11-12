@@ -3,8 +3,8 @@ name: Release
 # After CI passes on a push to main, tag vX.Y.Z and publish a release with binaries. X.Y come from
 # Cargo.toml (edit it to change major/minor); Z is the next patch after the highest vX.Y.* tag, or
 # the Cargo.toml patch if that is higher. The build stamps that version into Cargo.toml (not
-# committed) so `mipple --version` matches the tag. The first release of a new major version also
-# goes to crates.io (secret CARGO_REGISTRY_TOKEN). A commit that already has a tag is skipped, and
+# committed) so `mipple --version` matches the tag. crates.io gets the latest release once a night
+# (crates.yml). A commit that already has a tag is skipped, and
 # so is one that is no longer the tip of main: the workflow token may not tag an older commit (HTTP
 # 403), and the newer commit's own release includes it.
 on:
@@ -99,8 +99,6 @@ jobs:
   publish:
     needs: [meta, build]
     runs-on: ubuntu-26.04
-    outputs:
-      released: ${{ steps.tip.outputs.go }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -122,37 +120,3 @@ jobs:
       - name: Release
         if: steps.tip.outputs.go == 'true'
         run: gh release create "v$VERSION" dist/* --target "$SHA" --title "mipple $VERSION" --generate-notes
-
-  # crates.io gets only the first release of each major version (the X of a new X.Y.Z): the
-  # GitHub releases above carry every patch. A version already there (a re-run) is skipped, since
-  # crates.io versions are permanent.
-  crates:
-    needs: [meta, publish]
-    if: needs.publish.outputs.released == 'true'
-    runs-on: ubuntu-26.04
-    env:
-      VERSION: ${{ needs.meta.outputs.version }}
-    steps:
-      - id: gate
-        run: |
-          latest=$(curl -s -A "mipple-release (github.com/${{ github.repository }})" \
-            https://crates.io/api/v1/crates/mipple | jq -r '.crate.max_version // empty')
-          go=false
-          if [ -z "$latest" ] || [ "${VERSION%%.*}" -gt "${latest%%.*}" ]; then go=true; fi
-          echo "go=$go" >> "$GITHUB_OUTPUT"
-          echo "crates.io has ${latest:-nothing}; $VERSION: publish=$go"
-      - if: steps.gate.outputs.go == 'true'
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.meta.outputs.sha }}
-      - if: steps.gate.outputs.go == 'true'
-        uses: dtolnay/rust-toolchain@stable
-      - name: Publish
-        if: steps.gate.outputs.go == 'true'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
-          perl -0pi -e 's/(name = "mipple"\r?\nversion = )"[^"]*"/$1"$ENV{VERSION}"/' Cargo.lock
-          # --allow-dirty: the stamped version is not committed.
-          cargo publish --locked --allow-dirty -p mipple

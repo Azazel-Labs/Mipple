@@ -1,0 +1,59 @@
+name: crates.io
+
+# Once a night, publish the latest GitHub release to crates.io if it is newer than the version
+# there. Every push to main that passes CI gets a GitHub release (release.yml); crates.io versions
+# are permanent, so it gets at most one of them a day, and none on a day without a release. Needs
+# the secret CARGO_REGISTRY_TOKEN. Run it by hand from the Actions tab to publish sooner.
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - id: gate
+        run: |
+          tag=$(gh release view --json tagName --jq .tagName)
+          version=${tag#v}
+          latest=$(curl -s -A "mipple-release (github.com/$GH_REPO)" \
+            https://crates.io/api/v1/crates/mipple | jq -r '.crate.max_version // empty')
+          go=false
+          if [ -z "$latest" ]; then
+            go=true
+          elif [ "$version" != "$latest" ] && \
+               [ "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n1)" = "$version" ]; then
+            go=true
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          echo "latest release $tag, crates.io has ${latest:-nothing}: publish=$go"
+      - if: steps.gate.outputs.go == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.gate.outputs.tag }}
+      - if: steps.gate.outputs.go == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        if: steps.gate.outputs.go == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          # The release build stamps its version into Cargo.toml without committing it; do the same.
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
+          perl -0pi -e 's/(name = "mipple"\r?\nversion = )"[^"]*"/$1"$ENV{VERSION}"/' Cargo.lock
+          # --allow-dirty: the stamped version is not committed.
+          cargo publish --locked --allow-dirty -p mipple
