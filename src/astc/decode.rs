@@ -122,8 +122,9 @@ pub fn lerp1(e0: i32, e1: i32, w: u32, srgb: bool) -> i32 {
         let (c0, c1) = ((e0 << 8 | 0x80) as u32, (e1 << 8 | 0x80) as u32);
         ((c0 * (64 - w) + c1 * w + 32) >> 14) as i32
     } else {
-        let v = ((e0 as u32 * (64 - w) + e1 as u32 * w) * 257 + 32) >> 6;
-        ((v * 255 + 32767) / 65535) as i32
+        // The spec's ((e * 257 interpolated) * 255 + 32767) / 65535, which is exactly this for
+        // eight-bit endpoints (checked over every input).
+        ((e0 as u32 * (64 - w) + e1 as u32 * w + 32) >> 6) as i32
     }
 }
 
@@ -230,6 +231,19 @@ mod tests {
         let mut out = [[0u8; 4]; 16];
         decode_block(&[0u8; 16], 4, 4, false, &mut out);
         assert_eq!(out[0], ERROR);
+    }
+
+    #[test]
+    fn linear_lerp_matches_the_spec() {
+        for e0 in 0..256u32 {
+            for e1 in 0..256u32 {
+                for w in 0..=64 {
+                    let v = ((e0 * (64 - w) + e1 * w) * 257 + 32) >> 6;
+                    let spec = ((v * 255 + 32767) / 65535) as i32;
+                    assert_eq!(lerp1(e0 as i32, e1 as i32, w, false), spec, "{e0} {e1} {w}");
+                }
+            }
+        }
     }
 
     #[test]

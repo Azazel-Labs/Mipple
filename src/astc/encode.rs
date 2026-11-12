@@ -45,6 +45,9 @@ struct Grid {
     /// texels of the sum of squared tap weights) and from rounding the infill.
     wnoise: Vec<f32>,
     wnoise_dual: Vec<f32>,
+    /// The least of `wnoise` and of `wnoise_dual`.
+    wnoise_min: f32,
+    wnoise_dual_min: f32,
 }
 
 /// Expected squared endpoint error per channel and texel for each color range: a uniform error
@@ -214,8 +217,10 @@ impl Footprint {
                     let wstep = 64.0 / (RANGES[bm.quant as usize] as f32 - 1.0);
                     noise * wstep * wstep / 12.0 + round
                 };
-                let wnoise = modes.iter().map(|m| wn(&m.0)).collect();
-                let wnoise_dual = dual.iter().map(|m| wn(&m.0)).collect();
+                let wnoise: Vec<f32> = modes.iter().map(|m| wn(&m.0)).collect();
+                let wnoise_dual: Vec<f32> = dual.iter().map(|m| wn(&m.0)).collect();
+                let wnoise_min = wnoise.iter().fold(f32::MAX, |a, &b| a.min(b));
+                let wnoise_dual_min = wnoise_dual.iter().fold(f32::MAX, |a, &b| a.min(b));
                 grids.push(Grid {
                     gx: gx as u8,
                     gy: gy as u8,
@@ -229,6 +234,8 @@ impl Footprint {
                     dual,
                     wnoise,
                     wnoise_dual,
+                    wnoise_min,
+                    wnoise_dual_min,
                 });
             }
         }
@@ -476,12 +483,20 @@ fn decimate_err(grid: &Grid, u: &[f32], g: &mut [f32], scale: impl Fn(usize) -> 
 /// Quantizes ideal texel weights `u` (and `u2` for a second plane) to codes of weight range `q`
 /// on `grid`, interleaved by plane.
 fn quantize(grid: &Grid, q: usize, planes: usize, u: &[f32], u2: &[f32], codes: &mut [u8]) {
-    let tb = tables();
-    let mut g = [0f32; 64];
+    let mut g = [[0f32; 64]; 2];
     for (pl, uu) in [u, u2].into_iter().take(planes).enumerate() {
-        decimate(grid, uu, &mut g);
+        decimate(grid, uu, &mut g[pl]);
+    }
+    quantize_decimated(grid, q, planes, &g, codes);
+}
+
+/// Quantizes grid weights `g` (per plane, 0..=64) to codes of weight range `q`, interleaved by
+/// plane.
+fn quantize_decimated(grid: &Grid, q: usize, planes: usize, g: &[[f32; 64]; 2], codes: &mut [u8]) {
+    let wq = &tables().wq[q];
+    for (pl, gp) in g.iter().enumerate().take(planes) {
         for j in 0..grid.rev.len() {
-            codes[planes * j + pl] = tb.wq[q][g[j].round() as usize];
+            codes[planes * j + pl] = wq[gp[j].round() as usize];
         }
     }
 }
@@ -1302,6 +1317,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 derr += sp2[bh][bw] - sp2[gy][gx];
             }
             let wnoise = if dual { &grid.wnoise_dual } else { &grid.wnoise };
+            // No mode on this grid can do better than its decimation, the texels' distance from
+            // their lines and its finest weight range's noise.
+            let floor = derr + lay.orth + span * if dual { grid.wnoise_dual_min } else { grid.wnoise_min };
+            if cands.len() == short && floor >= cands[short - 1].0 {
+                continue;
+            }
             for mi in 0..nm {
                 let (_, cq) = mode_of(lay, grid, mi, ce);
                 if cq == u8::MAX {
@@ -1319,20 +1340,22 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         }
     }
     let by_score = |a: &(f32, f32, u16, u16, u16), b: &(f32, f32, u16, u16, u16)| a.0.total_cmp(&b.0);
-    // Measured decimation errors by (layout, grid).
+    // Measured decimation errors by (layout, grid), and the decimated weights per plane.
     let mut measured: Vec<(u16, u16, f32)> = Vec::with_capacity(short);
-    let mut g = [0f32; 64];
+    let mut decimated: Vec<[[f32; 64]; 2]> = Vec::with_capacity(short);
     for c in &mut cands {
         let (li, gi) = (c.2, c.3);
         let derr = match measured.iter().find(|m| m.0 == li && m.1 == gi) {
             Some(m) => m.2,
             None => {
                 let (lay, grid) = (&layouts[li as usize], &fp.grids[gi as usize]);
-                let mut derr = decimate_err(grid, &lay.u[..n], &mut g, |i| lay.scale[i]);
+                let mut g = [[0f32; 64]; 2];
+                let mut derr = decimate_err(grid, &lay.u[..n], &mut g[0], |i| lay.scale[i]);
                 if lay.ccs < NO_CCS {
-                    derr += decimate_err(grid, &lay.u2[..n], &mut g, |_| lay.scale2);
+                    derr += decimate_err(grid, &lay.u2[..n], &mut g[1], |_| lay.scale2);
                 }
                 measured.push((li, gi, derr));
+                decimated.push(g);
                 derr
             }
         };
@@ -1356,7 +1379,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let (bm, cq) = mode_of(lay, grid, mi as usize, ce);
         let q = bm.quant as usize;
         let planes = 1 + bm.dual as usize;
-        quantize(grid, q, planes, &lay.u[..n], &lay.u2[..n], &mut codes);
+        let at = measured.iter().position(|m| m.0 == li && m.1 == gi).expect("measured");
+        quantize_decimated(grid, q, planes, &decimated[at], &mut codes);
         let before = best.err;
         let mut eps = try_candidate(&t, lay, grid, bm, cem, cq, &mut codes, &mut best);
         for _ in 0..es.refine {
