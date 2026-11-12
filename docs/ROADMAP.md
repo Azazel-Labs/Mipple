@@ -113,11 +113,13 @@ Open for v0.9.x:
   half's copy, re-index and refit, like BC5), alpha as transparency like BC7; −15.7% BD-rate against
   bc7enc_rdo at a fifth of its time (BENCHMARKS.md). No GPU kernel yet.
 - [x] BC6H, unsigned (all 14 modes, Radiance `.hdr` input, scored with mPSNR and log2 RMSE): on 20 Poly
-  Haven HDRIs effort 2 beats ISPC veryslow at a sixth of its time (BENCHMARKS.md). EXR input was dropped
+  Haven HDRIs effort 2 beats ISPC veryslow at a fifteenth of its time (BENCHMARKS.md). EXR input was dropped
   for build time (DEADENDS.md).
-  - [ ] Speed at the low end: effort 0 is between ISPC fast and basic. Next is an eight-block batch
-    encoder like BC7's (one block per lane, per-lane mode and partition), since the scalar time is
-    spread over too many small steps to halve any other way.
+  - [x] Eight-block batch encoder (one block per lane, per-lane mode and partition): 2.0× faster at
+    effort 0 and 2.6-2.8× at efforts 5 and 9, with the same quality. Effort 0 is now 0.13 dB ahead of
+    ISPC fast at 1.07× its time.
+  - [ ] Close the last 7% to ISPC fast: partition ranking and the mode estimates still run one lane at
+    a time.
   - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
 - [ ] ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.
 - [ ] ETC2 / EAC for mobile fallbacks.

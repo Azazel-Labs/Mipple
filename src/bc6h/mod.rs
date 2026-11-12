@@ -13,6 +13,8 @@
 use crate::bc7::{anchors, subset_of};
 use crate::fit::V4;
 
+mod batch;
+
 /// Half-float bits (R, G, B) of one texel.
 pub type Half3 = [u16; 3];
 /// The 16 texels of a 4x4 block in raster order.
@@ -520,349 +522,6 @@ const ONE_ORDER: [usize; 4] = [13, 12, 11, 10];
 /// Two-region modes, most precise endpoints first.
 const TWO_ORDER: [usize; 10] = [2, 3, 4, 0, 5, 6, 7, 8, 1, 9];
 
-/// For an interpolation weight 0..=64, the index of the nearest weight in a table.
-const fn nearest_weight<const N: usize>(w: [i32; N]) -> [u8; 65] {
-    let mut out = [0u8; 65];
-    let mut x = 0;
-    while x <= 64 {
-        let mut best = 0;
-        let mut j = 1;
-        while j < N {
-            if (w[j] - x).abs() < (w[best] - x).abs() {
-                best = j;
-            }
-            j += 1;
-        }
-        out[x as usize] = best as u8;
-        x += 1;
-    }
-    out
-}
-
-const NEAREST3: [u8; 65] = nearest_weight(W3);
-const NEAREST4: [u8; 65] = nearest_weight(W4);
-
-/// An encoder's view of one block: targets on the 16-bit interpolation scale (`t`) and as
-/// half bits (`h`).
-struct Target {
-    h: [[i32; 3]; 16],
-    hf: [[f32; 3]; 16],
-    t: [V4; 16],
-}
-
-impl Target {
-    fn new(px: &HdrBlock) -> Self {
-        let mut h = [[0i32; 3]; 16];
-        let mut hf = [[0f32; 3]; 16];
-        let mut t = [[0f32; 4]; 16];
-        for i in 0..16 {
-            for c in 0..3 {
-                let v = px[i][c];
-                let v = if v & 0x8000 != 0 { 0 } else { v.min(HALF_MAX) };
-                h[i][c] = i32::from(v);
-                hf[i][c] = f32::from(v);
-                t[i][c] = f32::from(v) * (64.0 / 31.0);
-            }
-        }
-        Self { h, hf, t }
-    }
-}
-
-/// The `eb`-bit value whose unquantized value is nearest `x`.
-fn quantize(x: f32, eb: u8) -> i32 {
-    if eb >= 15 {
-        return ((x.max(0.0) + 0.5) as i32).min(0xffff);
-    }
-    let max = (1 << eb) - 1;
-    let q0 = ((x * (1 << eb) as f32 / 65536.0) as i32).clamp(0, max);
-    // Between the ends, values unquantize to (q + 1/2) * 2^(16 - eb): evenly spaced, so the floor
-    // is nearest. Only 0 (to 0) and `max` (to 65535) break the pattern.
-    if q0 > 1 && q0 < max - 1 {
-        return q0;
-    }
-    let mut best = (f32::MAX, q0);
-    for q in (q0 - 1).max(0)..=(q0 + 1).min(max) {
-        let d = (unquantize(q, eb, false) as f32 - x).abs();
-        if d < best.0 {
-            best = (d, q);
-        }
-    }
-    best.1
-}
-
-/// Float endpoints, `[region][end]` on the 16-bit scale (channel 3 unused).
-type Ends = [[V4; 2]; 2];
-
-/// One encoding attempt: the block and its error.
-#[derive(Clone, Copy)]
-struct Trial {
-    err: u64,
-    block: Bc6hBlock,
-}
-
-/// Quantizes `ends` for mode `mi`, indexes every texel to its nearest palette entry and fixes the
-/// anchors. Returns the trial and the indices' interpolation weights for a refit.
-fn quantize_and_index(tg: &Target, mi: usize, partition: u8, ends: &Ends) -> Trial {
-    let m = MODES[mi];
-    let nr = m.regions();
-    let wt: &[i32] = if m.two_regions { &W3 } else { &W4 };
-    let half = wt.len() / 2;
-    let anchor = region_anchors(m, partition);
-    let mut q = [[[0i32; 3]; 2]; 2];
-    for r in 0..nr {
-        for k in 0..2 {
-            for c in 0..3 {
-                q[r][k][c] = quantize(ends[r][k][c], m.eb);
-            }
-        }
-    }
-    let lim = |c: usize| (-(1 << (m.db[c] - 1)), (1 << (m.db[c] - 1)) - 1);
-    if m.transformed {
-        for (r, k) in [(0, 1), (1, 0), (1, 1)].into_iter().take(2 * nr - 1) {
-            for c in 0..3 {
-                let (lo, hi) = lim(c);
-                q[r][k][c] = q[0][0][c] + (q[r][k][c] - q[0][0][c]).clamp(lo, hi);
-            }
-        }
-    }
-    let (idx, mut err) = index(tg, m, partition, &q);
-    let mut idx = idx;
-    for r in 0..nr {
-        let a = anchor[r];
-        if usize::from(idx[a]) < half {
-            continue;
-        }
-        // Swapping the region's ends and mirroring its indices decodes the same. In a transformed
-        // mode, swapping region 0 moves the base, so the deltas must still fit.
-        let mut sq = q;
-        sq[r].swap(0, 1);
-        let fits = !m.transformed
-            || r == 1
-            || [(0, 1), (1, 0), (1, 1)].into_iter().take(2 * nr - 1).all(|(rr, k)| {
-                (0..3).all(|c| {
-                    let (lo, hi) = lim(c);
-                    (lo..=hi).contains(&(sq[rr][k][c] - sq[0][0][c]))
-                })
-            });
-        if fits {
-            q = sq;
-            for (i, x) in idx.iter_mut().enumerate() {
-                if region_of(m, partition, i) == r {
-                    *x = (wt.len() - 1 - usize::from(*x)) as u8;
-                }
-            }
-        } else {
-            // Keep the ends; the anchor takes its best index with the top bit clear.
-            let pal = palette(m, &q[r]);
-            let old = texel_err(&tg.h[a], &pal[usize::from(idx[a])]);
-            let (j, e) = (0..half)
-                .map(|j| (j, texel_err(&tg.h[a], &pal[j])))
-                .min_by_key(|&(_, e)| e)
-                .expect("palette has entries");
-            idx[a] = j as u8;
-            err = err - old + e;
-        }
-    }
-    let mut block = Bc6hBlock {
-        mode: mi as u8,
-        partition: if m.two_regions { partition } else { 0 },
-        idx,
-        ..Default::default()
-    };
-    for (k, f) in block.fields.iter_mut().enumerate().take(2 * nr) {
-        let v = q[k / 2][k % 2];
-        for c in 0..3 {
-            *f.get_mut(c).expect("3 channels") = if k > 0 && m.transformed {
-                ((v[c] - q[0][0][c]) & ((1 << m.db[c]) - 1)) as u16
-            } else {
-                v[c] as u16
-            };
-        }
-    }
-    Trial { err, block }
-}
-
-/// A region's palette as half bits.
-fn palette(m: Mode, q: &[[i32; 3]; 2]) -> [[i32; 3]; 16] {
-    let wt: &[i32] = if m.two_regions { &W3 } else { &W4 };
-    let u = q.map(|e| e.map(|v| unquantize(v, m.eb, false)));
-    let mut pal = [[0i32; 3]; 16];
-    for (p, &w) in pal.iter_mut().zip(wt) {
-        for c in 0..3 {
-            p[c] = i32::from(finish(interp(u[0][c], u[1][c], w), false));
-        }
-    }
-    pal
-}
-
-fn texel_err(h: &[i32; 3], p: &[i32; 3]) -> u64 {
-    (0..3)
-        .map(|c| {
-            let d = i64::from(h[c] - p[c]);
-            (d * d) as u64
-        })
-        .sum()
-}
-
-/// Nearest palette entry per texel, and the total error. The palette is a line in half-bit space
-/// (up to rounding), so each texel is projected on it and the nearest weight and its neighbors
-/// are checked exactly.
-fn index(tg: &Target, m: Mode, partition: u8, q: &[[[i32; 3]; 2]; 2]) -> ([u8; 16], u64) {
-    let (n, near, wt): (usize, _, &[i32]) = if m.two_regions {
-        (8, &NEAREST3, &W3)
-    } else {
-        (16, &NEAREST4, &W4)
-    };
-    let mut pals = [[[0i32; 3]; 16]; 2];
-    let mut line = [([0f32; 3], [0f32; 3], 0f32); 2];
-    for r in 0..m.regions() {
-        pals[r] = palette(m, &q[r]);
-        let p0 = pals[r][0].map(|v| v as f32);
-        let d: [f32; 3] = std::array::from_fn(|c| pals[r][n - 1][c] as f32 - p0[c]);
-        let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-        line[r] = (p0, d, if dd > 0.0 { 64.0 / dd } else { 0.0 });
-    }
-    let mut idx = [0u8; 16];
-    let mut total = 0;
-    for i in 0..16 {
-        let r = region_of(m, partition, i);
-        let (p0, d, s) = line[r];
-        let x = &tg.hf[i];
-        let t = ((x[0] - p0[0]) * d[0] + (x[1] - p0[1]) * d[1] + (x[2] - p0[2]) * d[2]) * s;
-        let j0 = usize::from(near[((t.max(0.0) + 0.5) as usize).min(64)]);
-        let pal = &pals[r];
-        let mut best = (texel_err(&tg.h[i], &pal[j0]), j0);
-        // Palette rounding moves entries off the line by under a step, so only the neighbor on
-        // the projection's side can be nearer.
-        let j1 = if t > wt[j0] as f32 { j0 + 1 } else { j0.wrapping_sub(1) };
-        if j1 < n {
-            best = best.min((texel_err(&tg.h[i], &pal[j1]), j1));
-        }
-        idx[i] = best.1 as u8;
-        total += best.0;
-    }
-    (idx, total)
-}
-
-/// Least-squares ends for the block's indices, or `None` where a region's indices are all equal.
-fn refit(tg: &Target, b: &Bc6hBlock) -> Ends {
-    let m = MODES[usize::from(b.mode)];
-    let wt: &[i32] = if m.two_regions { &W3 } else { &W4 };
-    let mut ends = [[[0f32; 4]; 2]; 2];
-    for (r, er) in ends.iter_mut().enumerate().take(m.regions()) {
-        let (mut aa, mut ab, mut bb) = (0f32, 0f32, 0f32);
-        let (mut ax, mut bx, mut sum) = ([0f32; 3], [0f32; 3], [0f32; 3]);
-        let mut n = 0f32;
-        for i in 0..16 {
-            if region_of(m, b.partition, i) != r {
-                continue;
-            }
-            let t = wt[usize::from(b.idx[i])] as f32 / 64.0;
-            let s = 1.0 - t;
-            aa += s * s;
-            ab += s * t;
-            bb += t * t;
-            for c in 0..3 {
-                ax[c] += s * tg.t[i][c];
-                bx[c] += t * tg.t[i][c];
-                sum[c] += tg.t[i][c];
-            }
-            n += 1.0;
-        }
-        let det = aa * bb - ab * ab;
-        for c in 0..3 {
-            let (e0, e1) = if det.abs() > 1e-6 {
-                ((ax[c] * bb - bx[c] * ab) / det, (bx[c] * aa - ax[c] * ab) / det)
-            } else {
-                let mean = sum[c] / n.max(1.0);
-                (mean, mean)
-            };
-            er[0][c] = e0.clamp(0.0, 65535.0);
-            er[1][c] = e1.clamp(0.0, 65535.0);
-        }
-    }
-    ends
-}
-
-/// The ends of a point set's projection on its principal axis, on the 16-bit scale.
-fn line_ends(pts: &[V4]) -> [V4; 2] {
-    let (mean, cov) = mean_cov3(pts);
-    line_ends_from(pts, &mean, &axis3(&cov))
-}
-
-/// Mean (RGB) and covariance (rr, rg, rb, gg, gb, bb) of a point set.
-fn mean_cov3(pts: &[V4]) -> (V4, [f32; 6]) {
-    let n = pts.len().max(1) as f32;
-    let mut m = [0f32; 4];
-    for p in pts {
-        m[0] += p[0];
-        m[1] += p[1];
-        m[2] += p[2];
-    }
-    m = m.map(|v| v / n);
-    let mut c = [0f32; 6];
-    for p in pts {
-        let (r, g, b) = (p[0] - m[0], p[1] - m[1], p[2] - m[2]);
-        c[0] += r * r;
-        c[1] += r * g;
-        c[2] += r * b;
-        c[3] += g * g;
-        c[4] += g * b;
-        c[5] += b * b;
-    }
-    (m, c.map(|v| v / n))
-}
-
-/// Principal axis of a covariance from [`mean_cov3`] by power iteration, as a unit vector (the
-/// gray diagonal for a flat set).
-fn axis3(c: &[f32; 6]) -> V4 {
-    let rows = [[c[0], c[1], c[2]], [c[1], c[3], c[4]], [c[2], c[4], c[5]]];
-    // Start from the row with the largest diagonal entry: never orthogonal to the dominant
-    // eigenvector unless that entry is zero.
-    let mut v = if c[0] >= c[3] && c[0] >= c[5] {
-        rows[0]
-    } else if c[3] >= c[5] {
-        rows[1]
-    } else {
-        rows[2]
-    };
-    for _ in 0..6 {
-        let w = [
-            rows[0][0] * v[0] + rows[0][1] * v[1] + rows[0][2] * v[2],
-            rows[1][0] * v[0] + rows[1][1] * v[1] + rows[1][2] * v[2],
-            rows[2][0] * v[0] + rows[2][1] * v[1] + rows[2][2] * v[2],
-        ];
-        // Rescale (by any positive amount) so the iteration can't overflow.
-        let mx = w[0].abs().max(w[1].abs()).max(w[2].abs());
-        if mx < 1e-20 {
-            break;
-        }
-        v = w.map(|x| x / mx);
-    }
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len < 1e-12 {
-        let g = 1.0 / 3f32.sqrt();
-        return [g, g, g, 0.0];
-    }
-    [v[0] / len, v[1] / len, v[2] / len, 0.0]
-}
-
-/// The ends of `pts`' projection on the line through `mean` along `axis`.
-fn line_ends_from(pts: &[V4], mean: &V4, axis: &V4) -> [V4; 2] {
-    let (mut lo, mut hi) = (0f32, 0f32);
-    for p in pts {
-        let t: f32 = (0..3).map(|c| (p[c] - mean[c]) * axis[c]).sum();
-        lo = lo.min(t);
-        hi = hi.max(t);
-    }
-    let mut e = [[0f32; 4]; 2];
-    for c in 0..3 {
-        e[0][c] = (mean[c] + axis[c] * lo).clamp(0.0, 65535.0);
-        e[1][c] = (mean[c] + axis[c] * hi).clamp(0.0, 65535.0);
-    }
-    e
-}
-
 /// Per-nibble moment tables of a block's texels (centered on the block mean): `tab[k][m]` sums
 /// r, g, b, rr, rg, rb, gg, gb, bb over texels `4k + j` with bit `j` of `m` set; and the totals.
 fn moment_tables(c: &[[f32; 3]; 16]) -> ([[[f32; 9]; 16]; 4], [f32; 9]) {
@@ -924,8 +583,8 @@ fn region_estimates(s: &[[f32; 32]; 9], n: &[f32; 32], axis: &[f32; 3], out: &mu
 
 /// The two-region partitions by estimated error, the `k` best first and sorted, with the
 /// estimates (on the 16-bit scale).
-fn rank_partitions(tg: &Target, mean: &V4, axis: &V4, k: usize) -> ([u8; 32], [f32; 32]) {
-    let c: [[f32; 3]; 16] = std::array::from_fn(|i| std::array::from_fn(|ch| tg.t[i][ch] - mean[ch]));
+fn rank_partitions(t: &[V4; 16], mean: &V4, axis: &V4, k: usize) -> ([u8; 32], [f32; 32]) {
+    let c: [[f32; 3]; 16] = std::array::from_fn(|i| std::array::from_fn(|ch| t[i][ch] - mean[ch]));
     let (tab, tot) = moment_tables(&c);
     let ax = [axis[0], axis[1], axis[2]];
     let mut s1 = [[0f32; 32]; 9];
@@ -959,135 +618,9 @@ fn rank_partitions(tg: &Target, mean: &V4, axis: &V4, k: usize) -> ([u8; 32], [f
     (est.map(|e| e.1), est.map(|e| e.0))
 }
 
-/// Estimated squared error (16-bit scale) of storing `ends` in mode `mi`: each end quantized to the
-/// mode's precision (`q`), deltas clamped to their bits, and the displacement `d0`, `d1` of a region's
-/// ends spread over its `cnt` texels as interpolation does, `cnt * (d0^2 + d0.d1 + d1^2) / 3`.
-fn mode_estimate(mi: usize, ends: &Ends, q: [[[i32; 3]; 2]; 2], cnt: [f32; 2]) -> f32 {
-    let m = MODES[mi];
-    let nr = m.regions();
-    let mut q = q;
-    if m.transformed {
-        for (r, k) in [(0, 1), (1, 0), (1, 1)].into_iter().take(2 * nr - 1) {
-            for c in 0..3 {
-                let h = 1 << (m.db[c] - 1);
-                q[r][k][c] = q[0][0][c] + (q[r][k][c] - q[0][0][c]).clamp(-h, h - 1);
-            }
-        }
-    }
-    let mut e = 0.0;
-    for r in 0..nr {
-        let d = |k: usize, c: usize| unquantize(q[r][k][c], m.eb, false) as f32 - ends[r][k][c];
-        let mut s = 0.0;
-        for c in 0..3 {
-            let (a, b) = (d(0, c), d(1, c));
-            s += a * a + a * b + b * b;
-        }
-        e += cnt[r] * s / 3.0;
-    }
-    e
-}
-
-/// Up to `n` modes from `order` for `ends`, least estimated error first ([`mode_estimate`]; ties
-/// to the earlier, more precise, mode).
-fn pick_modes<const N: usize>(order: &[usize; N], ends: &Ends, cnt: [f32; 2], n: usize) -> ([usize; N], usize) {
-    let nr = if cnt[1] > 0.0 { 2 } else { 1 };
-    // Quantized ends per endpoint precision, shared by the modes with that precision.
-    let mut cache = [[[[0i32; 3]; 2]; 2]; 17];
-    let mut have = 0u32;
-    let mut est = [(0f32, 0usize); N];
-    for (i, &mi) in order.iter().enumerate() {
-        let eb = MODES[mi].eb;
-        if have & (1 << eb) == 0 {
-            have |= 1 << eb;
-            for r in 0..nr {
-                for k in 0..2 {
-                    for c in 0..3 {
-                        cache[usize::from(eb)][r][k][c] = quantize(ends[r][k][c], eb);
-                    }
-                }
-            }
-        }
-        est[i] = (mode_estimate(mi, ends, cache[usize::from(eb)], cnt), i);
-    }
-    let k = n.clamp(1, N);
-    if k == 1 {
-        let b = (1..N).fold(0, |b, i| if est[i].0 < est[b].0 { i } else { b });
-        est.swap(0, b);
-    } else {
-        est.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    }
-    (est.map(|e| order[e.1]), k)
-}
-
-/// Tries mode `mi` from `ends`, refitting `refits` times; keeps the best into `best`.
-fn try_mode(tg: &Target, mi: usize, partition: u8, ends: &Ends, refits: usize, best: &mut Trial) {
-    let mut t = quantize_and_index(tg, mi, partition, ends);
-    for _ in 0..refits {
-        if t.err < best.err {
-            *best = t;
-        }
-        if t.err == 0 {
-            return;
-        }
-        let e = refit(tg, &t.block);
-        let n = quantize_and_index(tg, mi, partition, &e);
-        if n.err >= t.err {
-            break;
-        }
-        t = n;
-    }
-    if t.err < best.err {
-        *best = t;
-    }
-}
-
 /// Encodes one block of half floats (negative values and NaN as 0) at effort 0..=9.
 pub fn encode_block(px: &HdrBlock, effort: u8) -> [u8; 16] {
-    pack(&encode_unpacked(px, effort).block)
-}
-
-fn encode_unpacked(px: &HdrBlock, effort: u8) -> Trial {
-    let s = search(effort);
-    let tg = Target::new(px);
-    let mut best = Trial {
-        err: u64::MAX,
-        block: Bc6hBlock::default(),
-    };
-    // One region: modes 11..14, from the line through all 16 texels.
-    let (mean, cov) = mean_cov3(&tg.t);
-    let axis = axis3(&cov);
-    let one = line_ends_from(&tg.t, &mean, &axis);
-    let ends = [one, one];
-    let (modes, k) = pick_modes(&ONE_ORDER, &ends, [16.0, 0.0], s.modes1);
-    for &mi in &modes[..k] {
-        try_mode(&tg, mi, 0, &ends, s.refits, &mut best);
-    }
-    if best.err == 0 {
-        return best;
-    }
-    // Two regions: the partitions estimated to fit best, each with the most precise modes that
-    // hold its ends.
-    let (parts, est) = rank_partitions(&tg, &mean, &axis, s.partitions);
-    // The estimate is on the 16-bit scale; errors are in half bits.
-    let scale = (31.0f32 / 64.0) * (31.0 / 64.0);
-    if s.skip > 0.0 && best.err as f32 <= s.skip * est[0] * scale {
-        return best;
-    }
-    for &p in &parts[..s.partitions.min(32)] {
-        let mut pts = [[[0f32; 4]; 16]; 2];
-        let mut n = [0usize; 2];
-        for i in 0..16 {
-            let r = subset_of(2, p, i);
-            pts[r][n[r]] = tg.t[i];
-            n[r] += 1;
-        }
-        let ends = [line_ends(&pts[0][..n[0]]), line_ends(&pts[1][..n[1]])];
-        let (modes, k) = pick_modes(&TWO_ORDER, &ends, [n[0] as f32, n[1] as f32], s.modes2);
-        for &mi in &modes[..k] {
-            try_mode(&tg, mi, p, &ends, s.refits, &mut best);
-        }
-    }
-    best
+    batch::encode_batch(std::slice::from_ref(px), effort)[0]
 }
 
 /// Encodes an 8-bit block read as values in [0, 1] (what [`crate::format::Format::encode_block`]
@@ -1098,11 +631,23 @@ pub fn encode_ldr(px: &crate::surface::Block, effort: u8) -> [u8; 16] {
 
 /// Encodes every block of an HDR surface, in parallel, raster order.
 pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
+    encode_blocks(
+        surface.block_count(),
+        |i| surface.read_block(i % surface.blocks_x(), i / surface.blocks_x()),
+        effort,
+    )
+}
+
+/// Encodes blocks `0..n` (from `block`) eight at a time, in parallel, raster order.
+fn encode_blocks(n: usize, block: impl Fn(u32) -> HdrBlock + Sync, effort: u8) -> Vec<u8> {
     use rayon::prelude::*;
-    let bx = surface.blocks_x();
-    (0..surface.block_count() as u32)
+    (0..n.div_ceil(crate::simd::LANES))
         .into_par_iter()
-        .flat_map_iter(|i| encode_block(&surface.read_block(i % bx, i / bx), effort))
+        .flat_map_iter(|g| {
+            let lo = g * crate::simd::LANES;
+            let blocks: Vec<HdrBlock> = (lo..n.min(lo + crate::simd::LANES)).map(|i| block(i as u32)).collect();
+            batch::encode_batch(&blocks, effort).into_iter().flatten()
+        })
         .collect()
 }
 
@@ -1113,12 +658,12 @@ pub fn decode_surface(data: &[u8], width: u32, height: u32) -> crate::hdr::HdrSu
 
 /// Encodes every block of an 8-bit surface (as [`encode_ldr`]), in parallel, raster order.
 pub fn encode_surface_ldr(surface: &crate::surface::Surface, effort: u8) -> Vec<u8> {
-    use rayon::prelude::*;
     let bx = surface.blocks_x();
-    (0..surface.block_count() as u32)
-        .into_par_iter()
-        .flat_map_iter(|i| encode_ldr(&surface.read_block(i % bx, i / bx), effort))
-        .collect()
+    encode_blocks(
+        surface.block_count(),
+        |i| ldr_block(&surface.read_block(i % bx, i / bx)),
+        effort,
+    )
 }
 
 #[cfg(test)]
@@ -1232,6 +777,61 @@ mod tests {
             hi += mse(&px, 9);
         }
         assert!(hi <= lo, "effort 9 {hi} vs effort 1 {lo}");
+    }
+
+    /// Eight different blocks: smooth, flat, edged and noisy, dark to bright.
+    fn mixed_blocks(seed: u64) -> [HdrBlock; crate::simd::LANES] {
+        let mut seed = seed;
+        std::array::from_fn(|l| {
+            let base = [0, 1, 2].map(|_| (rng(&mut seed) % 4000) as f32 / 100.0 + 0.01);
+            let kind = l % 4;
+            let noise: [[f32; 3]; 16] =
+                std::array::from_fn(|_| [0, 1, 2].map(|_| (rng(&mut seed) % 1000) as f32 / 300.0));
+            block_from(|i, c| {
+                let (x, y) = ((i % 4) as f32, (i / 4) as f32);
+                base[c]
+                    * match kind {
+                        0 => 1.0 + 0.1 * x + 0.05 * y,
+                        1 => 1.0,
+                        2 => {
+                            if x + y > 3.0 {
+                                6.0
+                            } else {
+                                0.5
+                            }
+                        }
+                        _ => 1.0 + noise[i][c],
+                    }
+            })
+        })
+    }
+
+    #[test]
+    fn batch_lanes_are_independent() {
+        for seed in [3u64, 99, 12345] {
+            let px = mixed_blocks(seed);
+            for effort in [0, 2, 5] {
+                let all = batch::encode_batch(&px, effort);
+                for (l, b) in px.iter().enumerate() {
+                    assert_eq!(all[l], encode_block(b, effort), "seed {seed} effort {effort} lane {l}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_backends_agree() {
+        for seed in [5u64, 77, 4242] {
+            let px = mixed_blocks(seed);
+            for effort in [0, 3, 9] {
+                let generic = batch::encode8_generic(&px, effort);
+                assert_eq!(
+                    batch::encode_batch(&px, effort),
+                    generic.to_vec(),
+                    "seed {seed} effort {effort}"
+                );
+            }
+        }
     }
 
     #[test]
