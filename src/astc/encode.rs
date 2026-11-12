@@ -608,37 +608,76 @@ fn sym_endpoints(sym: &Symbolic, p: usize) -> ([i32; 4], [i32; 4]) {
 }
 
 /// Coordinate descent on a finished block: steps each weight and endpoint code to its neighbor
-/// levels while the decoded error falls. Returns the new error.
+/// levels while the decoded error falls (the lower neighbor first). Returns the new error.
 fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usize) -> u32 {
     let tb = tables();
     let q = sym.mode.quant as usize;
     let cq = sym.color_quant as usize;
     let wu = &WEIGHT_UNQUANT[q];
+    let cu = &COLOR_UNQUANT[cq];
     let planes = 1 + sym.mode.dual as usize;
     let ccs = if sym.mode.dual { sym.ccs as usize } else { NO_CCS };
     let kk = grid.rev.len() * planes;
     let n = t.n;
     let ch = t.ch;
+    let parts = lay.count as usize;
     let mut g = [0u8; 64];
     for j in 0..kk {
         g[j] = wu[sym.weights[j] as usize];
     }
-    let mut w = [[0u8; MAX_TEXELS]; 2];
-    for (pl, wp) in w.iter_mut().enumerate().take(planes) {
-        infill(grid, &g, planes, pl, wp);
+    // Each texel's infill sum (16 times its weight, plus the rounding 8), so a grid point's step
+    // moves its texels' sums by its tap weight times the step.
+    let mut sums = [[0u16; MAX_TEXELS]; 2];
+    for (pl, sp) in sums.iter_mut().enumerate().take(planes) {
+        for (o, tap) in sp.iter_mut().zip(&grid.taps[..n]) {
+            let mut v = 8u32;
+            for k in 0..4 {
+                v += tap.w[k] as u32 * g[planes * tap.idx[k] as usize + pl] as u32;
+            }
+            *o = v as u16;
+        }
     }
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    for (p, e) in eps.iter_mut().enumerate().take(lay.count as usize) {
+    for (p, e) in eps.iter_mut().enumerate().take(parts) {
         *e = sym_endpoints(sym, p);
     }
-    // The plane that drives channel `c`.
+    // The texels of each partition: `order[at[p]..at[p + 1]]`.
+    let mut order = [0u8; MAX_TEXELS];
+    let mut at = [0usize; 4];
+    if parts == 1 {
+        for (i, o) in order[..n].iter_mut().enumerate() {
+            *o = i as u8;
+        }
+    } else {
+        for i in 0..n {
+            at[lay.labels[i] as usize + 1] += 1;
+        }
+        for p in 0..parts {
+            at[p + 1] += at[p];
+        }
+        let mut fill = at;
+        for i in 0..n {
+            let p = lay.labels[i] as usize;
+            order[fill[p]] = i as u8;
+            fill[p] += 1;
+        }
+    }
+    at[parts] = n;
+    // The plane that drives channel `c`, and the channels each plane drives.
     let plane_of = |c: usize| (c == ccs) as usize;
+    let mut chans = [[0usize; 4]; 2];
+    let mut nch = [0usize; 2];
+    for c in 0..ch {
+        let pl = plane_of(c);
+        chans[pl][nch[pl]] = c;
+        nch[pl] += 1;
+    }
     // Per channel and texel: every weight and endpoint step changes only some channels.
     let mut errs = [[0u32; MAX_TEXELS]; 4];
     for c in 0..ch {
         for i in 0..n {
             let e = eps[lay.labels[i] as usize];
-            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], w[plane_of(c)][i]);
+            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], (sums[plane_of(c)][i] >> 4) as u8);
         }
     }
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
@@ -647,72 +686,85 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
         for j in 0..kk {
             let (gp, pl) = (j / planes, j % planes);
             let old = sym.weights[j];
-            for dir in 0..2 {
-                let nc = tb.wnb[q][dir][old as usize];
-                if nc == old {
-                    continue;
+            let nb = [tb.wnb[q][0][old as usize], tb.wnb[q][1][old as usize]];
+            let d = nb.map(|c| wu[c as usize] as i32 - g[j] as i32);
+            let mut delta = [0i64; 2];
+            for &(i, tw) in &grid.rev[gp] {
+                let i = i as usize;
+                let si = sums[pl][i] as i32;
+                let nw = d.map(|d| ((si + tw as i32 * d) >> 4) as u8);
+                let e = eps[lay.labels[i] as usize];
+                for &c in &chans[pl][..nch[pl]] {
+                    let cur = errs[c][i] as i64;
+                    delta[0] += t.channel_error(i, c, e.0[c], e.1[c], nw[0]) as i64 - cur;
+                    delta[1] += t.channel_error(i, c, e.0[c], e.1[c], nw[1]) as i64 - cur;
                 }
-                g[j] = wu[nc as usize];
-                let mut delta = 0i64;
-                for &(i, _) in &grid.rev[gp] {
-                    let i = i as usize;
-                    let nw = tap_weight(&grid.taps[i], &g, planes, pl);
-                    let e = eps[lay.labels[i] as usize];
-                    for c in (0..ch).filter(|&c| plane_of(c) == pl) {
-                        delta += t.channel_error(i, c, e.0[c], e.1[c], nw) as i64 - errs[c][i] as i64;
-                    }
-                }
-                if delta < 0 {
-                    sym.weights[j] = nc;
-                    for &(i, _) in &grid.rev[gp] {
-                        let i = i as usize;
-                        w[pl][i] = tap_weight(&grid.taps[i], &g, planes, pl);
-                        let e = eps[lay.labels[i] as usize];
-                        for c in (0..ch).filter(|&c| plane_of(c) == pl) {
-                            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], w[pl][i]);
-                        }
-                    }
-                    improved = true;
-                    break;
-                }
-                g[j] = wu[old as usize];
             }
+            let Some(dir) = (0..2).find(|&dir| nb[dir] != old && delta[dir] < 0) else {
+                continue;
+            };
+            sym.weights[j] = nb[dir];
+            g[j] = wu[nb[dir] as usize];
+            for &(i, tw) in &grid.rev[gp] {
+                let i = i as usize;
+                sums[pl][i] = (sums[pl][i] as i32 + tw as i32 * d[dir]) as u16;
+                let nw = (sums[pl][i] >> 4) as u8;
+                let e = eps[lay.labels[i] as usize];
+                for &c in &chans[pl][..nch[pl]] {
+                    errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], nw);
+                }
+            }
+            improved = true;
         }
-        for p in 0..lay.count as usize {
+        for p in 0..parts {
+            let texels = &order[at[p]..at[p + 1]];
             for v in 0..2 * nv {
                 let c = v / 2;
-                let at = 2 * nv * p + v;
-                let old = sym.colors[at];
-                let wc = &w[plane_of(c)];
-                let cur: u32 = (0..n)
-                    .filter(|&i| lay.labels[i] as usize == p)
-                    .map(|i| errs[c][i])
-                    .sum();
+                let pos = 2 * nv * p + v;
+                let old = sym.colors[pos];
+                let sp = &sums[plane_of(c)];
+                let ec = &errs[c];
+                let cur: u32 = texels.iter().map(|&i| ec[i as usize]).sum();
+                // The endpoints after each step, unless it leaves the second endpoint's sum below
+                // the first's (which would swap them).
+                let mut cand = [None; 2];
                 for dir in 0..2 {
                     let nc = tb.cnb[cq][dir][old as usize];
                     if nc == old {
                         continue;
                     }
-                    sym.colors[at] = nc;
-                    let e = sym_endpoints(sym, p);
-                    if e.1[0] + e.1[1] + e.1[2] < e.0[0] + e.0[1] + e.0[2] {
-                        sym.colors[at] = old;
-                        continue;
+                    let mut e = eps[p];
+                    if v % 2 == 0 {
+                        e.0[c] = cu[nc as usize] as i32;
+                    } else {
+                        e.1[c] = cu[nc as usize] as i32;
                     }
-                    let err: u32 = (0..n)
-                        .filter(|&i| lay.labels[i] as usize == p)
-                        .map(|i| t.channel_error(i, c, e.0[c], e.1[c], wc[i]))
-                        .sum();
-                    if err < cur {
-                        eps[p] = e;
-                        for i in (0..n).filter(|&i| lay.labels[i] as usize == p) {
-                            errs[c][i] = t.channel_error(i, c, e.0[c], e.1[c], wc[i]);
-                        }
-                        improved = true;
-                        break;
+                    if e.1[0] + e.1[1] + e.1[2] >= e.0[0] + e.0[1] + e.0[2] {
+                        cand[dir] = Some((nc, e));
                     }
-                    sym.colors[at] = old;
                 }
+                let (lo, hi) = (
+                    cand[0].map_or((0, 0), |x| (x.1.0[c], x.1.1[c])),
+                    cand[1].map_or((0, 0), |x| (x.1.0[c], x.1.1[c])),
+                );
+                let mut err = [0u32; 2];
+                for &i in texels {
+                    let (i, w) = (i as usize, (sp[i as usize] >> 4) as u8);
+                    err[0] += t.channel_error(i, c, lo.0, lo.1, w);
+                    err[1] += t.channel_error(i, c, hi.0, hi.1, w);
+                }
+                let Some(dir) = (0..2).find(|&dir| cand[dir].is_some() && err[dir] < cur) else {
+                    continue;
+                };
+                let (nc, e) = cand[dir].unwrap();
+                sym.colors[pos] = nc;
+                eps[p] = e;
+                let (e0, e1) = (e.0[c], e.1[c]);
+                for &i in texels {
+                    let i = i as usize;
+                    errs[c][i] = t.channel_error(i, c, e0, e1, (sums[plane_of(c)][i] >> 4) as u8);
+                }
+                improved = true;
             }
         }
         if !improved {
