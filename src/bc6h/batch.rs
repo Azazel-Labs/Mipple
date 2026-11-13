@@ -61,6 +61,31 @@ fn abs<V: SimdF32>(x: V) -> V {
     x.simd_max(V::splat(0.0) - x)
 }
 
+/// Eight blocks' texels, `[texel * 3 + channel][lane]`: half bits as `f32` (each at most
+/// [`HALF_MAX`]; negative values and NaN already 0). Lanes are innermost so each vector loads
+/// directly.
+pub(super) type Texels = [[f32; LANES]; 48];
+
+/// Lane `l` of `x` from a block of half floats (negative values and NaN as 0).
+#[inline(always)]
+pub(super) fn set_lane(x: &mut Texels, l: usize, px: &HdrBlock) {
+    for i in 0..16 {
+        for c in 0..3 {
+            let v = px[i][c];
+            x[i * 3 + c][l] = f32::from(if v & 0x8000 != 0 { 0 } else { v.min(HALF_MAX) });
+        }
+    }
+}
+
+/// Lanes `k..` of `x` repeat lane `k - 1`.
+#[inline(always)]
+pub(super) fn pad_lanes(x: &mut Texels, k: usize) {
+    for row in x.iter_mut() {
+        let v = row[k - 1];
+        row[k..].fill(v);
+    }
+}
+
 /// The eight blocks' texels as half bits (`h`) and on the 16-bit interpolation scale (`t`).
 struct Target<V> {
     h: [[V; 3]; 16],
@@ -68,17 +93,12 @@ struct Target<V> {
 }
 
 #[inline(always)]
-fn target<V: SimdF32>(px: &[HdrBlock; LANES]) -> Target<V> {
+fn target<V: SimdF32>(x: &Texels) -> Target<V> {
     let mut h = [[zero::<V>(); 3]; 16];
     let mut t = [[zero::<V>(); 3]; 16];
     for i in 0..16 {
         for c in 0..3 {
-            let mut a = [0f32; LANES];
-            for l in 0..LANES {
-                let v = px[l][i][c];
-                a[l] = f32::from(if v & 0x8000 != 0 { 0 } else { v.min(HALF_MAX) });
-            }
-            h[i][c] = V::from_array(a);
+            h[i][c] = V::from_slice(&x[i * 3 + c]);
             t[i][c] = h[i][c] * V::splat(64.0 / 31.0);
         }
     }
@@ -102,8 +122,70 @@ struct Params<V: SimdF32> {
     transformed: Mask<V>,
 }
 
+/// [`Params`] for one mode, as scalars.
+#[derive(Clone, Copy)]
+struct ModeConsts {
+    scale: f32,
+    inv: f32,
+    max: f32,
+    is16: bool,
+    lo: [f32; 3],
+    hi: [f32; 3],
+    transformed: bool,
+}
+
+const MODE_CONSTS: [ModeConsts; 14] = {
+    let mut t = [ModeConsts {
+        scale: 0.0,
+        inv: 0.0,
+        max: 0.0,
+        is16: false,
+        lo: [0.0; 3],
+        hi: [0.0; 3],
+        transformed: false,
+    }; 14];
+    let mut i = 0;
+    while i < 14 {
+        let m = MODES[i];
+        let s = (1u32 << (16 - m.eb)) as f32;
+        t[i].scale = s;
+        t[i].inv = 1.0 / s;
+        t[i].max = ((1u32 << m.eb) - 1) as f32;
+        t[i].is16 = m.eb >= 16;
+        let mut c = 0;
+        while c < 3 {
+            let h = (1i32 << (m.db[c] - 1)) as f32;
+            t[i].lo[c] = -h;
+            t[i].hi[c] = h - 1.0;
+            c += 1;
+        }
+        t[i].transformed = m.transformed;
+        i += 1;
+    }
+    t
+};
+
+/// [`Params`] with mode `mi` in every lane.
+#[inline(always)]
+fn params1<V: SimdF32>(mi: usize) -> Params<V> {
+    let m = MODE_CONSTS[mi];
+    let mask = |b: bool| V::mask_from_bools([b; LANES]);
+    Params {
+        scale: V::splat(m.scale),
+        inv: V::splat(m.inv),
+        max: V::splat(m.max),
+        is16: mask(m.is16),
+        lo: [V::splat(m.lo[0]), V::splat(m.lo[1]), V::splat(m.lo[2])],
+        hi: [V::splat(m.hi[0]), V::splat(m.hi[1]), V::splat(m.hi[2])],
+        transformed: mask(m.transformed),
+    }
+}
+
 #[inline(always)]
 fn params<V: SimdF32>(modes: &[usize; LANES]) -> Params<V> {
+    if modes.iter().all(|&m| m == modes[0]) {
+        return params1(modes[0]);
+    }
     let mut scale = [0f32; LANES];
     let mut inv = [0f32; LANES];
     let mut max = [0f32; LANES];
@@ -112,16 +194,14 @@ fn params<V: SimdF32>(modes: &[usize; LANES]) -> Params<V> {
     let mut hi = [[0f32; LANES]; 3];
     let mut tr = [false; LANES];
     for l in 0..LANES {
-        let m = MODES[modes[l]];
-        let s = (1u32 << (16 - m.eb)) as f32;
-        scale[l] = s;
-        inv[l] = 1.0 / s;
-        max[l] = ((1u32 << m.eb) - 1) as f32;
-        is16[l] = m.eb >= 16;
+        let m = &MODE_CONSTS[modes[l]];
+        scale[l] = m.scale;
+        inv[l] = m.inv;
+        max[l] = m.max;
+        is16[l] = m.is16;
         for c in 0..3 {
-            let h = (1i32 << (m.db[c] - 1)) as f32;
-            lo[c][l] = -h;
-            hi[c][l] = h - 1.0;
+            lo[c][l] = m.lo[c];
+            hi[c][l] = m.hi[c];
         }
         tr[l] = m.transformed;
     }
@@ -168,18 +248,35 @@ fn quantize<V: SimdF32>(x: V, p: &Params<V>) -> V {
     V::select(p.is16, r16, q)
 }
 
-/// The palette entry with weight `w` (of 64) between unquantized ends, as half bits.
+/// A palette line's interpolation constants per channel: `b = 64 u0 + 32` and `d = u1 - u0` for
+/// unquantized ends `u0` and `u1`.
+type Line<V> = ([V; 3], [V; 3]);
+
 #[inline(always)]
-fn entry<V: SimdF32>(u0: V, u1: V, w: V) -> V {
-    let v = ((u0 * (V::splat(64.0) - w) + u1 * w + V::splat(32.0)) * V::splat(1.0 / 64.0)).floor();
+fn line<V: SimdF32>(u0: &[V; 3], u1: &[V; 3]) -> Line<V> {
+    let mut b = [zero::<V>(); 3];
+    let mut d = [zero::<V>(); 3];
+    for c in 0..3 {
+        b[c] = u0[c].mul_add(V::splat(64.0), V::splat(32.0));
+        d[c] = u1[c] - u0[c];
+    }
+    (b, d)
+}
+
+/// The palette entry with weight `w` (of 64), as half bits: `(u0 (64 - w) + u1 w + 32) / 64`
+/// floored, then scaled by 31/64 and floored. Every intermediate is an integer below 2^24, so
+/// `d w + b` is exact.
+#[inline(always)]
+fn entry<V: SimdF32>(b: V, d: V, w: V) -> V {
+    let v = (d.mul_add(w, b) * V::splat(1.0 / 64.0)).floor();
     (v * V::splat(31.0 / 64.0)).floor()
 }
 
 #[inline(always)]
-fn sq_err<V: SimdF32>(x: &[V; 3], u: &[[V; 3]; 2], w: V) -> V {
+fn sq_err<V: SimdF32>(x: &[V; 3], l: &Line<V>, w: V) -> V {
     let mut e = zero::<V>();
     for c in 0..3 {
-        let d = x[c] - entry(u[0][c], u[1][c], w);
+        let d = x[c] - entry(l.0[c], l.1[c], w);
         e += d * d;
     }
     e
@@ -329,40 +426,42 @@ fn axis3<V: SimdF32>(c: &[V; 6]) -> [V; 3] {
 fn index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, q: &Ends<V>) -> ([Int<V>; 16], V) {
     let (n, wt) = if rg.two { (8, &W3_16) } else { (16, &W4_16) };
     let nr = if rg.two { 2 } else { 1 };
-    let mut u = [[[zero::<V>(); 3]; 2]; 2];
+    let mut ln = [([zero::<V>(); 3], [zero::<V>(); 3]); 2];
     let mut p0 = [[zero::<V>(); 3]; 2];
     let mut d = [[zero::<V>(); 3]; 2];
     let mut s = [zero::<V>(); 2];
     let fin = V::splat(31.0 / 64.0);
     for r in 0..nr {
         let mut dd = zero::<V>();
+        let mut u = [[zero::<V>(); 3]; 2];
         for c in 0..3 {
-            u[r][0][c] = unquantize(q[r][0][c], p);
-            u[r][1][c] = unquantize(q[r][1][c], p);
-            p0[r][c] = (u[r][0][c] * fin).floor();
-            d[r][c] = (u[r][1][c] * fin).floor() - p0[r][c];
+            u[0][c] = unquantize(q[r][0][c], p);
+            u[1][c] = unquantize(q[r][1][c], p);
+            p0[r][c] = (u[0][c] * fin).floor();
+            d[r][c] = (u[1][c] * fin).floor() - p0[r][c];
             dd += d[r][c] * d[r][c];
         }
+        ln[r] = line(&u[0], &u[1]);
         s[r] = V::select(zero::<V>().simd_lt(dd), V::splat(64.0) / dd, zero());
     }
     let step = V::splat((n - 1) as f32 / 64.0);
     let mut idx = [Int::<V>::splat(0); 16];
     let mut total = zero::<V>();
     for i in 0..16 {
-        let (uu, pp, dv, sv) = if rg.two {
+        let (lv, pp, dv, sv) = if rg.two {
             let m = rg.reg1[i];
-            let mut uu = u[0];
+            let mut lv = ln[0];
             let mut pp = p0[0];
             let mut dv = d[0];
             for c in 0..3 {
-                uu[0][c] = V::select(m, u[1][0][c], u[0][0][c]);
-                uu[1][c] = V::select(m, u[1][1][c], u[0][1][c]);
+                lv.0[c] = V::select(m, ln[1].0[c], ln[0].0[c]);
+                lv.1[c] = V::select(m, ln[1].1[c], ln[0].1[c]);
                 pp[c] = V::select(m, p0[1][c], p0[0][c]);
                 dv[c] = V::select(m, d[1][c], d[0][c]);
             }
-            (uu, pp, dv, V::select(m, s[1], s[0]))
+            (lv, pp, dv, V::select(m, s[1], s[0]))
         } else {
-            (u[0], p0[0], d[0], s[0])
+            (ln[0], p0[0], d[0], s[0])
         };
         let x = &tg.h[i];
         let t = ((x[0] - pp[0]) * dv[0] + (x[1] - pp[1]) * dv[1] + (x[2] - pp[2]) * dv[2]) * sv;
@@ -376,8 +475,8 @@ fn index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, q: &Ends<V>
         let valid = V::splat(-0.5).simd_lt(j1) & j1.simd_lt(V::splat(n as f32 - 0.5));
         let j1i = j1.simd_clamp(zero(), V::splat(15.0)).to_int_trunc();
         let w1 = Int::<V>::lookup16(wt, j1i).to_float();
-        let e0 = sq_err(x, &uu, w0);
-        let e1 = V::select(valid, sq_err(x, &uu, w1), V::splat(f32::MAX));
+        let e0 = sq_err(x, &lv, w0);
+        let e1 = V::select(valid, sq_err(x, &lv, w1), V::splat(f32::MAX));
         let take1 = e1.simd_lt(e0);
         idx[i] = Int::<V>::select(take1, j1i, j0i);
         total += e0.simd_min(e1);
@@ -493,9 +592,9 @@ fn in_range<V: SimdF32>(d: V, lo: V, hi: V) -> Mask<V> {
     not::<V>(d.simd_lt(lo) | hi.simd_lt(d))
 }
 
-/// Quantizes `ends` for each lane's mode, indexes every texel and fixes the anchors.
+/// Quantizes `ends` for each lane's mode, with the deltas from the first end clamped to their bits.
 #[inline(always)]
-fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, ends: &Ends<V>) -> Trial<V> {
+fn quantize_ends<V: SimdF32>(rg: &Regions<V>, p: &Params<V>, ends: &Ends<V>) -> Ends<V> {
     let nr = if rg.two { 2 } else { 1 };
     let mut q = [[[zero::<V>(); 3]; 2]; 2];
     for r in 0..nr {
@@ -505,7 +604,6 @@ fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>
             }
         }
     }
-    // Deltas from the first end, clamped to their bits.
     for (r, k) in [(0, 1), (1, 0), (1, 1)].into_iter().take(2 * nr - 1) {
         for c in 0..3 {
             let b = q[0][0][c];
@@ -513,6 +611,13 @@ fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>
             q[r][k][c] = V::select(p.transformed, v, q[r][k][c]);
         }
     }
+    q
+}
+
+/// Quantizes each lane's mode, indexes every texel and fixes the anchors.
+#[inline(always)]
+fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, ends: &Ends<V>) -> Trial<V> {
+    let mut q = quantize_ends(rg, p, ends);
     let (mut idx, mut err) = index(tg, rg, p, &q);
     let n = if rg.two { 8 } else { 16 };
     let top = Int::<V>::splat(n / 2 - 1);
@@ -544,6 +649,7 @@ fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>
                 u[k][c] = unquantize(q[0][k][c], p);
             }
         }
+        let u = line(&u[0], &u[1]);
         let wt = if rg.two { &W3_16 } else { &W4_16 };
         let old = sq_err(&tg.h[0], &u, Int::<V>::lookup16(wt, idx[0]).to_float());
         let mut be = V::splat(f32::MAX);
@@ -589,6 +695,46 @@ fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>
     Trial { err, q, idx }
 }
 
+/// Quantizes `ends` for each lane's mode and measures them with the indices `idx` kept (whose
+/// anchors are already in range: they come from a [`quantize_and_index`] trial).
+#[inline(always)]
+fn requantize<V: SimdF32>(
+    tg: &Target<V>,
+    rg: &Regions<V>,
+    p: &Params<V>,
+    ends: &Ends<V>,
+    idx: &[Int<V>; 16],
+) -> Trial<V> {
+    let nr = if rg.two { 2 } else { 1 };
+    let q = quantize_ends(rg, p, ends);
+    let wt = if rg.two { &W3_16 } else { &W4_16 };
+    let mut ln = [([zero::<V>(); 3], [zero::<V>(); 3]); 2];
+    for r in 0..nr {
+        let mut u = [[zero::<V>(); 3]; 2];
+        for c in 0..3 {
+            u[0][c] = unquantize(q[r][0][c], p);
+            u[1][c] = unquantize(q[r][1][c], p);
+        }
+        ln[r] = line(&u[0], &u[1]);
+    }
+    let mut err = zero::<V>();
+    for i in 0..16 {
+        let lv = if rg.two {
+            let m = rg.reg1[i];
+            let mut lv = ln[0];
+            for c in 0..3 {
+                lv.0[c] = V::select(m, ln[1].0[c], ln[0].0[c]);
+                lv.1[c] = V::select(m, ln[1].1[c], ln[0].1[c]);
+            }
+            lv
+        } else {
+            ln[0]
+        };
+        err += sq_err(&tg.h[i], &lv, Int::<V>::lookup16(wt, idx[i]).to_float());
+    }
+    Trial { err, q, idx: *idx }
+}
+
 /// The best trial so far per lane, with its mode and partition.
 struct Best<V: SimdF32> {
     t: Trial<V>,
@@ -603,7 +749,8 @@ fn merge<V: SimdF32>(best: &mut Best<V>, t: &Trial<V>, m: Mask<V>, mode: V, part
     best.part = V::select(m, part, best.part);
 }
 
-/// Tries each lane's mode from `ends`, refitting up to `refits` times, where `active`.
+/// Tries each lane's mode from `ends`, refitting up to `refits` times, where `active`; with
+/// `reindex` off a refit keeps the indices instead of choosing them again.
 #[allow(
     clippy::too_many_arguments,
     reason = "the kernel state is passed by reference, not bundled"
@@ -615,6 +762,7 @@ fn try_mode<V: SimdF32>(
     p: &Params<V>,
     ends: &Ends<V>,
     refits: usize,
+    reindex: bool,
     active: Mask<V>,
     mode: V,
     best: &mut Best<V>,
@@ -628,7 +776,11 @@ fn try_mode<V: SimdF32>(
             return;
         }
         let e = refit(tg, rg, &t.idx);
-        let n = quantize_and_index(tg, rg, p, &e);
+        let n = if reindex {
+            quantize_and_index(tg, rg, p, &e)
+        } else {
+            requantize(tg, rg, p, &e, &t.idx)
+        };
         going = going & n.err.simd_lt(t.err);
         t = select_trial(going, &n, &t);
     }
@@ -679,7 +831,7 @@ fn pick_modes<V: SimdF32, const N: usize>(
     let mut est = [zero::<V>(); N];
     for i in 0..N {
         let mi = order[i];
-        let p = params::<V>(&[mi; LANES]);
+        let p = params1::<V>(mi);
         let eb = usize::from(MODES[mi].eb);
         if have & (1 << eb) == 0 {
             have |= 1 << eb;
@@ -849,7 +1001,7 @@ fn rank_partitions<V: SimdF32>(tg: &Target<V>, mean: &[V; 3], axis: &[V; 3], k: 
 
 /// Encodes eight blocks with search settings `s`.
 #[inline(always)]
-fn encode8<V: SimdF32>(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
+fn encode8<V: SimdF32>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
     let tg = target::<V>(px);
     let mut best = Best {
         t: Trial {
@@ -868,7 +1020,17 @@ fn encode8<V: SimdF32>(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
     let modes = pick_modes(&ONE_ORDER, &ends, &[V::splat(16.0), zero()], k1);
     for m in &modes[..k1] {
         let p = params::<V>(m);
-        try_mode(&tg, &rg, &p, &ends, s.refits, all::<V>(), mode_vec::<V>(m), &mut best);
+        try_mode(
+            &tg,
+            &rg,
+            &p,
+            &ends,
+            s.refits,
+            s.reindex,
+            all::<V>(),
+            mode_vec::<V>(m),
+            &mut best,
+        );
     }
     let mut active = zero::<V>().simd_lt(best.t.err);
     if s.partitions > 0 && V::mask_any(active) {
@@ -901,7 +1063,17 @@ fn encode8<V: SimdF32>(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
             let modes = pick_modes(&TWO_ORDER, &ends, &[n0, n1], k2);
             for m in &modes[..k2] {
                 let p = params::<V>(m);
-                try_mode(&tg, &rg, &p, &ends, s.refits, active, mode_vec::<V>(m), &mut best);
+                try_mode(
+                    &tg,
+                    &rg,
+                    &p,
+                    &ends,
+                    s.refits,
+                    s.reindex,
+                    active,
+                    mode_vec::<V>(m),
+                    &mut best,
+                );
             }
         }
     }
@@ -964,7 +1136,7 @@ fn finish_blocks<V: SimdF32>(best: &Best<V>) -> [[u8; 16]; LANES] {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn encode8_avx2(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
+fn encode8_avx2(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
     encode8::<crate::simd::avx2::F>(px, s)
 }
 
@@ -977,19 +1149,30 @@ pub fn encode_batch(blocks: &[HdrBlock], effort: u8) -> Vec<[u8; 16]> {
 /// block.
 pub(super) fn encode_lanes(blocks: &[HdrBlock], s: Search) -> [[u8; 16]; LANES] {
     debug_assert!(!blocks.is_empty() && blocks.len() <= LANES);
-    let last = blocks[blocks.len() - 1];
-    let mut lanes = [last; LANES];
-    lanes[..blocks.len()].copy_from_slice(blocks);
+    let mut x = [[0f32; LANES]; 48];
+    for (l, b) in blocks.iter().enumerate() {
+        set_lane(&mut x, l, b);
+    }
+    pad_lanes(&mut x, blocks.len());
+    encode_texels(&x, s)
+}
+
+/// Encodes the eight blocks of `x` with search settings `s`.
+pub(super) fn encode_texels(x: &Texels, s: Search) -> [[u8; 16]; LANES] {
     match crate::simd::level() {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
-        Level::Avx2 => unsafe { encode8_avx2(&lanes, s) },
-        _ => encode8::<f32x8>(&lanes, s),
+        Level::Avx2 => unsafe { encode8_avx2(x, s) },
+        _ => encode8::<f32x8>(x, s),
     }
 }
 
 /// Encodes eight blocks with the portable backend (tests compare it with AVX2).
 #[cfg(test)]
 pub(super) fn encode8_generic(px: &[HdrBlock; LANES], effort: u8) -> [[u8; 16]; LANES] {
-    encode8::<f32x8>(px, super::search(effort))
+    let mut x = [[0f32; LANES]; 48];
+    for (l, b) in px.iter().enumerate() {
+        set_lane(&mut x, l, b);
+    }
+    encode8::<f32x8>(&x, super::search(effort))
 }

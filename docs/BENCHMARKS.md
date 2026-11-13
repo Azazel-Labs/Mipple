@@ -507,32 +507,42 @@ color half never decodes in 3-color mode), the alpha half the BC4 encoder.
 ## BC6H vs ISPC, texconv, Compressonator
 
 Twenty Poly Haven HDR environment maps at 1024×512 (`scripts/fetch_polyhaven.py --hdris --step 50`), unsigned
-BC6H (`BC6H_UF16`), one thread for every encoder, `python scripts/compete_bc6h.py test-images/polyhaven-hdri
---threads 1 --efforts 0,2,5,9`. Scores are in linear light: mPSNR is multi-exposure PSNR (Munkberg et al.
-2006) over each image's exposure range, log2 RMSE is roughly the error in stops. Means per image; time is
-the total over the twenty images (mipple's encode loop, the ISPC harness's block loop, and process wall
-time for texconv and Compressonator, which includes loading and writing):
+BC6H (`BC6H_UF16`), one thread for every encoder, pinned to one P-core, `python scripts/compete_bc6h.py
+test-images/polyhaven-hdri --threads 1 --cpu 14 --runs 3 --efforts 0,1,2,5,9`. Scores are in linear light:
+mPSNR is multi-exposure PSNR (Munkberg et al. 2006) over each image's exposure range, log2 RMSE is roughly
+the error in stops. Means per image; time is the total over the twenty images (best of three per image for
+mipple's encode loop and the ISPC harness's block loop; process wall time for texconv and Compressonator,
+which includes loading and writing):
 
 | encoder | mPSNR dB | log2 RMSE | Zstd-19 bpt | time s |
 | --- | ---: | ---: | ---: | ---: |
-| mipple effort 0 | 46.713 | 0.03980 | 7.388 | 0.98 |
-| mipple effort 2 | 46.873 | 0.03901 | 7.387 | 1.39 |
-| mipple effort 5 | 47.022 | 0.03830 | 7.392 | 3.62 |
-| mipple effort 9 | 47.117 | 0.03785 | 7.400 | 83.9 |
-| ISPC veryfast | 44.857 | 0.05035 | 7.213 | 0.16 |
-| ISPC fast | 46.586 | 0.04034 | 7.370 | 1.12 |
-| ISPC basic | 46.745 | 0.03959 | 7.359 | 2.79 |
-| ISPC slow | 46.838 | 0.03916 | 7.402 | 11.8 |
-| ISPC veryslow | 46.848 | 0.03912 | 7.409 | 24.7 |
-| texconv | 44.555 | 0.05390 | 7.334 | 6.52 |
+| mipple effort 0 | 44.951 | 0.04983 | 7.215 | 0.120 |
+| mipple effort 1 | 46.713 | 0.03980 | 7.388 | 0.475 |
+| mipple effort 2 | 46.873 | 0.03901 | 7.387 | 0.784 |
+| mipple effort 5 | 47.022 | 0.03830 | 7.392 | 2.14 |
+| mipple effort 9 | 47.117 | 0.03785 | 7.400 | 64.1 |
+| ISPC veryfast | 44.857 | 0.05035 | 7.213 | 0.127 |
+| ISPC fast | 46.586 | 0.04034 | 7.370 | 0.897 |
+| ISPC basic | 46.745 | 0.03959 | 7.359 | 2.21 |
+| ISPC slow | 46.838 | 0.03916 | 7.402 | 9.26 |
+| ISPC veryslow | 46.848 | 0.03912 | 7.409 | 19.7 |
+| texconv | 44.555 | 0.05390 | 7.334 | 5.27 |
 | Compressonator q0.1 | 45.944 | 0.04552 | 7.239 | 161 |
 | Compressonator q1.0 | 45.944 | 0.04552 | 7.243 | 2985 |
 
-mipple encodes eight blocks at a time, one per SIMD lane, as ISPC does. Effort 0 is 0.13 dB ahead of ISPC
-fast and 13% faster. Effort 2 is ahead of ISPC basic at half of basic's time, and ahead of ISPC veryslow
-(+0.03 dB) at an eighteenth of veryslow's time. Effort 5 is 0.17 dB ahead of every competitor setting in
-3.6 s. Only ISPC veryfast is faster, at 1.9 dB lower quality. Zstd sizes are within 0.5% of each other
-for every encoder at this quality (BC6H has no RDO yet).
+(Compressonator's rows are from an earlier, unpinned run with the same images; it is far off the pace either
+way.)
+
+mipple encodes eight blocks at a time, one per SIMD lane, as ISPC does. Every ISPC profile has a mipple
+effort that is both better and faster:
+
+- Effort 0 (one region, the refit keeps the indices) is 0.09 dB ahead of ISPC veryfast, and 6% faster.
+- Effort 1 is 0.13 dB ahead of ISPC fast in 53% of its time.
+- Effort 2 is 0.13 dB ahead of ISPC basic in 35% of its time, and ahead of ISPC veryslow (+0.03 dB) in 4% of
+  its time.
+- Effort 5 is 0.17 dB ahead of every competitor setting, in 2.1 s.
+
+Zstd sizes are within 0.5% of each other for every encoder at matching quality (BC6H has no RDO yet).
 
 ## ETC2 and EAC vs Compressonator
 

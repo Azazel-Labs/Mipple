@@ -229,7 +229,7 @@ struct Run {
 }
 
 /// [`LAYOUT`] as runs, per mode: the runs and their count.
-static RUNS: [([Run; 40], usize); 14] = {
+const RUNS: [([Run; 40], usize); 14] = {
     let mut out = [(
         [Run {
             field: 0,
@@ -262,6 +262,9 @@ static RUNS: [([Run; 40], usize); 14] = {
     }
     out
 };
+
+/// [`RUNS`] in one place for runtime indexing (a `const` would be copied per use).
+static RUNS_STATIC: [([Run; 40], usize); 14] = RUNS;
 
 /// A BC6H block with its fields unpacked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -304,7 +307,7 @@ pub fn unpack(raw: &[u8]) -> Option<Bc6hBlock> {
         ..Default::default()
     };
     let mut pos = u32::from(m.mode_bits);
-    let (runs, n) = &RUNS[mi];
+    let (runs, n) = &RUNS_STATIC[mi];
     for r in &runs[..*n] {
         let f = usize::from(r.field);
         b.fields[f / 3][f % 3] |= (((v >> pos) as u16) & ((1 << r.len) - 1)) << r.bit;
@@ -329,11 +332,31 @@ pub fn unpack(raw: &[u8]) -> Option<Bc6hBlock> {
 
 /// Packs a block. Anchor indices must have their top bit clear, and fields must fit their widths.
 pub fn pack(b: &Bc6hBlock) -> [u8; 16] {
-    let mi = usize::from(b.mode);
-    let m = MODES[mi];
+    // One copy per mode, so each mode's header runs unroll into straight-line code.
+    match b.mode {
+        0 => pack_mode::<0>(b),
+        1 => pack_mode::<1>(b),
+        2 => pack_mode::<2>(b),
+        3 => pack_mode::<3>(b),
+        4 => pack_mode::<4>(b),
+        5 => pack_mode::<5>(b),
+        6 => pack_mode::<6>(b),
+        7 => pack_mode::<7>(b),
+        8 => pack_mode::<8>(b),
+        9 => pack_mode::<9>(b),
+        10 => pack_mode::<10>(b),
+        11 => pack_mode::<11>(b),
+        12 => pack_mode::<12>(b),
+        _ => pack_mode::<13>(b),
+    }
+}
+
+#[inline(always)]
+fn pack_mode<const MI: usize>(b: &Bc6hBlock) -> [u8; 16] {
+    let m = MODES[MI];
     let mut v = u128::from(m.value);
     let mut pos = u32::from(m.mode_bits);
-    let (runs, n) = &RUNS[mi];
+    let (runs, n) = &RUNS[MI];
     for r in &runs[..*n] {
         let f = usize::from(r.field);
         v |= u128::from((b.fields[f / 3][f % 3] >> r.bit) & ((1 << r.len) - 1)) << pos;
@@ -346,14 +369,18 @@ pub fn pack(b: &Bc6hBlock) -> [u8; 16] {
     } else {
         4
     };
-    let anchor = region_anchors(m, b.partition);
+    // The indices fit in 64 bits (63 or 46), built apart and placed with one shift.
+    let a1 = region_anchors(m, b.partition)[1];
+    let mut bits = 0u64;
+    let mut at = 0;
     for (i, &x) in b.idx.iter().enumerate() {
-        let n = if anchor.contains(&i) { ib - 1 } else { ib };
+        let n = if i == 0 || i == a1 { ib - 1 } else { ib };
         debug_assert!(u32::from(x) < 1 << n, "index {x} of texel {i} needs more than {n} bits");
-        v |= u128::from(x) << pos;
-        pos += n;
+        bits |= u64::from(x) << at;
+        at += n;
     }
-    debug_assert_eq!(pos, 128);
+    v |= u128::from(bits) << pos;
+    debug_assert_eq!(pos + at, 128);
     v.to_le_bytes()
 }
 
@@ -500,6 +527,8 @@ struct Search {
     modes2: usize,
     /// Least-squares refits after the first indexing.
     refits: usize,
+    /// Whether a refit chooses the indices again (otherwise it only moves the endpoints).
+    reindex: bool,
     /// Two-region modes are skipped when the one-region error is at most this multiple of the best
     /// partition's estimated error (0: never skipped).
     skip: f32,
@@ -508,11 +537,14 @@ struct Search {
 fn search(effort: u8) -> Search {
     let e = usize::from(effort.min(crate::format::MAX_EFFORT));
     Search {
-        partitions: [1, 1, 2, 2, 3, 4, 6, 8, 12, 32][e],
+        // Effort 0 is one region only (no partition search).
+        partitions: [0, 1, 2, 2, 3, 4, 6, 8, 12, 32][e],
         modes1: [1, 1, 1, 2, 2, 2, 2, 3, 4, 4][e],
         modes2: [1, 1, 1, 1, 2, 2, 3, 3, 4, 10][e],
         refits: [1, 1, 1, 2, 2, 2, 2, 3, 3, 4][e],
-        skip: [1.0, 0.7, 0.5, 0.35, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0][e],
+        skip: [1.0, 1.0, 0.5, 0.35, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0][e],
+        // Effort 0 keeps its indices through the refit.
+        reindex: e > 0,
     }
 }
 
@@ -534,25 +566,82 @@ pub fn encode_ldr(px: &crate::surface::Block, effort: u8) -> [u8; 16] {
 
 /// Encodes every block of an HDR surface, in parallel, raster order.
 pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
-    // Converted once up front (vectorized), then gathered per block as `read_block` would.
-    let half = surface.to_uf16();
-    let (w, h, bw) = (surface.width, surface.height, surface.blocks_x());
+    // Each block's texels are converted as its lanes are filled (F16C where the CPU has it).
+    let px = &surface.pixels;
+    let (w, h, bw) = (
+        surface.width as usize,
+        surface.height as usize,
+        surface.blocks_x() as usize,
+    );
+    #[cfg(target_arch = "x86_64")]
+    let f16c = crate::hdr::f16c();
     encode_blocks(
         surface.block_count(),
-        |i| {
-            let (bx, by) = (i % bw, i / bw);
-            std::array::from_fn(|t| {
-                let x = (bx * 4 + (t % 4) as u32).min(w - 1);
-                let y = (by * 4 + (t / 4) as u32).min(h - 1);
-                half[(y * w + x) as usize]
-            })
+        |i, l, x| {
+            let (x0, y0) = (i as usize % bw * 4, i as usize / bw * 4);
+            if x0 + 4 <= w && y0 + 4 <= h {
+                let rows: [&[[f32; 3]]; 4] = std::array::from_fn(|ty| &px[(y0 + ty) * w + x0..][..4]);
+                #[cfg(target_arch = "x86_64")]
+                if f16c {
+                    // SAFETY: the CPU reports F16C and AVX2.
+                    unsafe { fill_f16c(&rows, l, x) };
+                    return;
+                }
+                for (ty, row) in rows.iter().enumerate() {
+                    for (tx, p) in row.iter().enumerate() {
+                        for c in 0..3 {
+                            x[(ty * 4 + tx) * 3 + c][l] = f32::from(f32_to_uf16(p[c]));
+                        }
+                    }
+                }
+            } else {
+                // An edge block: texels past the image repeat its last row and column.
+                for t in 0..16 {
+                    let p = px[(y0 + t / 4).min(h - 1) * w + (x0 + t % 4).min(w - 1)];
+                    for c in 0..3 {
+                        x[t * 3 + c][l] = f32::from(f32_to_uf16(p[c]));
+                    }
+                }
+            }
         },
         effort,
     )
 }
 
-/// Encodes blocks `0..n` (from `block`) eight at a time, in parallel, raster order.
-fn encode_blocks(n: usize, block: impl Fn(u32) -> HdrBlock + Sync, effort: u8) -> Vec<u8> {
+/// Lane `l` of `x` from four rows of four texels, each channel as [`f32_to_uf16`]: clamping to
+/// [0, 65504] first (`max` returns its second operand, 0, for NaN) leaves finite, non-negative
+/// values, which the round-to-nearest-even conversion maps as `f32_to_half` does.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn fill_f16c(rows: &[&[[f32; 3]]; 4], l: usize, x: &mut batch::Texels) {
+    use std::arch::x86_64::*;
+    let (zero, top) = (_mm256_setzero_ps(), _mm256_set1_ps(65504.0));
+    for (ty, row) in rows.iter().enumerate() {
+        let s = row.as_flattened();
+        assert!(s.len() >= 12);
+        let mut v = [0f32; 16];
+        // SAFETY: `s` holds 12 floats, read as 8 and the last 8 (overlapping); `v` holds 16.
+        unsafe {
+            for (k, off) in [(0, 0), (8, 4)] {
+                let a = _mm256_loadu_ps(s.as_ptr().add(off));
+                let a = _mm256_min_ps(_mm256_max_ps(a, zero), top);
+                let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(a);
+                _mm256_storeu_ps(v.as_mut_ptr().add(k), _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(h)));
+            }
+        }
+        // v[0..8] are floats 0..8; v[8..16] are floats 4..12.
+        for k in 0..8 {
+            x[ty * 12 + k][l] = v[k];
+        }
+        for k in 8..12 {
+            x[ty * 12 + k][l] = v[k + 4];
+        }
+    }
+}
+
+/// Encodes blocks `0..n` eight at a time, in parallel, raster order: `fill(i, l, x)` puts block
+/// `i` in lane `l` of `x`.
+fn encode_blocks(n: usize, fill: impl Fn(u32, usize, &mut batch::Texels) + Sync, effort: u8) -> Vec<u8> {
     use rayon::prelude::*;
     const L: usize = crate::simd::LANES;
     let s = search(effort);
@@ -562,11 +651,12 @@ fn encode_blocks(n: usize, block: impl Fn(u32) -> HdrBlock + Sync, effort: u8) -
         .with_min_len(16)
         .for_each(|(g, dst)| {
             let k = dst.len() / 16;
-            let mut blocks = [[[0u16; 3]; 16]; L];
-            for (j, b) in blocks.iter_mut().take(k).enumerate() {
-                *b = block((g * L + j) as u32);
+            let mut x = [[0f32; L]; 48];
+            for l in 0..k {
+                fill((g * L + l) as u32, l, &mut x);
             }
-            let enc = batch::encode_lanes(&blocks[..k], s);
+            batch::pad_lanes(&mut x, k);
+            let enc = batch::encode_texels(&x, s);
             dst.copy_from_slice(enc[..k].as_flattened());
         });
     out
@@ -582,7 +672,7 @@ pub fn encode_surface_ldr(surface: &crate::surface::Surface, effort: u8) -> Vec<
     let bx = surface.blocks_x();
     encode_blocks(
         surface.block_count(),
-        |i| ldr_block(&surface.read_block(i % bx, i / bx)),
+        |i, l, x| batch::set_lane(x, l, &ldr_block(&surface.read_block(i % bx, i / bx))),
         effort,
     )
 }
@@ -752,6 +842,52 @@ mod tests {
                     "seed {seed} effort {effort}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn surface_conversion_matches_read_block() {
+        // NaN, negatives, -0, past HALF_MAX, rounding ties and denormals, plus random bits, in a
+        // 37x11 image (interior and edge blocks).
+        let special = [
+            f32::NAN,
+            -1.0,
+            -0.0,
+            0.0,
+            65504.0,
+            65519.0,
+            65520.0,
+            1e9,
+            f32::INFINITY,
+            1.0 + 1.0 / 2048.0,
+            3e-6,
+            6e-8,
+        ];
+        let mut r = 0x9e37_79b9u32;
+        let (w, h) = (37u32, 11u32);
+        let pixels = (0..w * h)
+            .map(|i| {
+                std::array::from_fn(|c| {
+                    r ^= r << 13;
+                    r ^= r >> 17;
+                    r ^= r << 5;
+                    match r % 4 {
+                        0 => special[(i as usize * 3 + c) % special.len()],
+                        1 => f32::from_bits(r),
+                        _ => (r >> 8) as f32 / 1024.0,
+                    }
+                })
+            })
+            .collect();
+        let s = crate::hdr::HdrSurface {
+            width: w,
+            height: h,
+            pixels,
+        };
+        let got = encode_surface(&s, 1);
+        for i in 0..s.block_count() as u32 {
+            let b = s.read_block(i % s.blocks_x(), i / s.blocks_x());
+            assert_eq!(got[i as usize * 16..][..16], encode_block(&b, 1), "block {i}");
         }
     }
 

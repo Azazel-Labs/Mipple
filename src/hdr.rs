@@ -191,7 +191,7 @@ impl HdrSurface {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn f16c() -> bool {
+pub(crate) fn f16c() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| {
         crate::simd::level() != crate::simd::Level::Generic && std::arch::is_x86_feature_detected!("f16c")

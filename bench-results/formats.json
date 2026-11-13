@@ -1,10 +1,10 @@
 {
   "_about": "Per-image means from the docs/BENCHMARKS.md tables for the formats beyond BC1/BC4/BC5/BC7 (BC3, BC6H, ETC2, ASTC), read by scripts/readme_charts.py. Each table's command, corpus and scoring are in that section of BENCHMARKS.md; update both together. quality is PSNR in dB (mPSNR for BC6H), bpt is bits per texel after Zstd-19 (an optional fourth value in an rd point: after Deflate-9), secs is the total over the corpus.",
   "speed": [
-    {"panel": "BC6H", "use": "HDR, 20 Poly Haven maps, 1 thread", "metric": "mPSNR dB", "section": "BC6H vs ISPC, texconv, Compressonator", "quiet": ["ISPC basic", "ISPC slow"],
-     "mipple": [["effort 0", 46.713, 0.98], ["effort 2", 46.873, 1.39], ["effort 5", 47.022, 3.62], ["effort 9", 47.117, 83.9]],
-     "others": [["ISPC veryfast", 44.857, 0.16], ["ISPC fast", 46.586, 1.12], ["ISPC basic", 46.745, 2.79], ["ISPC slow", 46.838, 11.8],
-                ["ISPC veryslow", 46.848, 24.7], ["texconv", 44.555, 6.52], ["Compressonator", 45.944, 161]]},
+    {"panel": "BC6H", "use": "HDR, 20 Poly Haven maps, 1 P-core", "metric": "mPSNR dB", "section": "BC6H vs ISPC, texconv, Compressonator", "quiet": ["ISPC basic", "ISPC slow"],
+     "mipple": [["effort 0", 44.951, 0.120], ["effort 1", 46.713, 0.475], ["effort 2", 46.873, 0.784], ["effort 5", 47.022, 2.14], ["effort 9", 47.117, 64.1]],
+     "others": [["ISPC veryfast", 44.857, 0.127], ["ISPC fast", 46.586, 0.897], ["ISPC basic", 46.745, 2.21], ["ISPC slow", 46.838, 9.26],
+                ["ISPC veryslow", 46.848, 19.7], ["texconv", 44.555, 5.27], ["Compressonator", 45.944, 161]]},
     {"panel": "ETC2 RGB", "use": "Kodak 24, 1 thread", "metric": "PSNR dB", "section": "ETC2 and EAC vs Compressonator",
      "mipple": [["effort 0", 37.074, 4.4], ["effort 1", 37.640, 18.2], ["effort 3", 37.697, 31.2], ["effort 5", 37.728, 43.1],
                 ["effort 9", 37.776, 131]],

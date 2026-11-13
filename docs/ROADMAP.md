@@ -121,12 +121,17 @@ Open for v0.9.x:
   half's copy, re-index and refit, like BC5), alpha as transparency like BC7; −15.7% BD-rate against
   bc7enc_rdo at a fifth of its time (BENCHMARKS.md). No GPU kernel yet.
 - [x] BC6H, unsigned (all 14 modes, Radiance `.hdr` input, scored with mPSNR and log2 RMSE): on 20 Poly
-  Haven HDRIs effort 2 beats ISPC veryslow at a fifteenth of its time (BENCHMARKS.md). EXR input was dropped
+  Haven HDRIs every ISPC profile has a mipple effort that is better and faster; effort 2 beats ISPC veryslow
+  in 4% of its time (BENCHMARKS.md). EXR input was dropped
   for build time (DEADENDS.md).
   - [x] Eight-block batch encoder (one block per lane, per-lane mode and partition): 2.0× faster at
     effort 0 and 2.6-2.8× at efforts 5 and 9, with the same quality.
-  - [x] Partition ranking across lanes (byte-identical output): effort 0 is 0.13 dB ahead of ISPC fast
+  - [x] Partition ranking across lanes (byte-identical output): effort 0 (now 1) is 0.13 dB ahead of ISPC fast
     and 13% faster. The mode estimates still run one lane at a time.
+  - [x] A one-region effort 0 (the refit keeps the indices), half-float conversion with F16C straight from
+    the f32 rows, one FMA per palette entry, and a per-mode packer. Pinned to one P-core, effort 0 is
+    0.09 dB ahead of ISPC veryfast and 6% faster, effort 1 0.13 dB ahead of ISPC fast in 53% of its time,
+    effort 2 ahead of ISPC basic in 35% of its time; efforts 1-9 encode the same blocks as before.
   - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
 - [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
   (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo. On Kodak, one

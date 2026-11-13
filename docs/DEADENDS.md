@@ -132,6 +132,17 @@ mipple effort 0 scores 45.18 dB in 0.385 s. (The 20-image results are in BENCHMA
   spread over a dozen small functions (indexing, partition ranking, mode estimates, PCA, refit,
   packing), and no single one is worth 2×. ISPC runs 8 blocks per instruction, so matching it
   needs a batch encoder across blocks, as BC7 has.
+- **Insetting the line-fit endpoints at the one-region effort 0.** Pulling both ends in by a
+  fraction of the fitted extent (all 20 HDRIs, mPSNR): with no refit, 1/64 gains 0.007 dB and
+  1/32 / 1/16 lose 0.20 / 1.12 dB; with the refit, 1/32 loses 0.08 dB. The refit already moves the
+  ends where they should be.
+- **Skipping the effort 0 refit when the first trial's error is small.** Lanes are eight blocks,
+  and time falls only when all eight skip: a threshold that saves 21% loses 0.10 dB, the same as
+  no refit at all. It would need lanes compacted across groups to pay. Keeping the indices
+  through the refit (re-quantizing the refitted ends only) costs 0.02 dB and skips the whole second
+  indexing instead.
+- **Indexing by projection only (no check of the neighbouring index).** At effort 0 it loses
+  0.016 dB on the first indexing, 0.03 dB on the refit and 0.06 dB on both.
 - **EXR input through the `image` crate's `exr` feature.** It raised iteration builds from 2-4
   minutes to about 22. Radiance `.hdr` covers the test corpus. EXR could return through a
   separate helper crate or binary.

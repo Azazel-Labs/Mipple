@@ -13,17 +13,21 @@ Encoders (each skipped if not found):
                as it does not load .hdr)
 
 Time: mipple's own base-encode time, the harness's block loop, and process wall time for texconv and
-Compressonator (which includes loading and writing). --threads N limits every encoder to N threads.
+Compressonator (which includes loading and writing). --threads N limits every encoder to N threads; --cpu N
+pins this script and every encoder to one logical CPU (on a hybrid CPU, pick a performance core), and --runs N
+keeps the best of N timings per image for mipple and the ISPC harness.
 
 Usage: python scripts/compete_bc6h.py test-images/polyhaven-hdri --out bench-results/bc6h
 """
 
 import argparse
+import ctypes
 import csv
 import io
 import os
 import re
 import subprocess
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -53,7 +57,18 @@ def main():
     ap.add_argument("--cmp-quality", default="0.1,1.0")
     ap.add_argument("--threads", type=int, default=os.cpu_count())
     ap.add_argument("--limit", type=int, default=0, help="first N images only")
+    ap.add_argument("--runs", type=int, default=1, help="best of N timings per image (mipple and ISPC)")
+    ap.add_argument("--cpu", type=int, default=None, help="pin this script and the encoders to this logical CPU")
     a = ap.parse_args()
+    if a.cpu is not None:
+        # Child processes inherit the affinity.
+        if sys.platform == "win32":
+            k = ctypes.windll.kernel32
+            k.GetCurrentProcess.restype = ctypes.c_void_p
+            if not k.SetProcessAffinityMask(ctypes.c_void_p(k.GetCurrentProcess()), ctypes.c_size_t(1 << a.cpu)):
+                raise SystemExit(f"could not pin to CPU {a.cpu}")
+        else:
+            os.sched_setaffinity(0, {a.cpu})
 
     imgs = sorted(a.images.glob("*.hdr"))
     if a.limit:
@@ -81,12 +96,18 @@ def main():
         for label, kind, param in encoders:
             out = tmp / f"{img.stem}__{label.replace(' ', '_')}.dds"
             if kind == "mipple":
-                so, wall = run([str(a.mipple), "encode", str(img), "-o", str(out), "-f", "bc6h", "-e", param,
-                                "--no-mips"], env)
-                secs = float(re.search(r"time: base ([\d.]+)s", so).group(1))
+                secs = wall = float("inf")
+                for _ in range(a.runs):
+                    so, w = run([str(a.mipple), "encode", str(img), "-o", str(out), "-f", "bc6h", "-e", param,
+                                 "--no-mips"], env)
+                    secs = min(secs, float(re.search(r"time: base ([\d.]+)s", so).group(1)))
+                    wall = min(wall, w)
             elif kind == "ispc":
-                so, wall = run([str(a.harness), f"ispc_bc6h:{param}", str(img), str(out), str(a.threads)])
-                secs = float(re.search(r"secs=([\d.]+)", so).group(1))
+                secs = wall = float("inf")
+                for _ in range(a.runs):
+                    so, w = run([str(a.harness), f"ispc_bc6h:{param}", str(img), str(out), str(a.threads)])
+                    secs = min(secs, float(re.search(r"secs=([\d.]+)", so).group(1)))
+                    wall = min(wall, w)
             elif kind == "texconv":
                 d = tmp / "texconv"
                 d.mkdir(exist_ok=True)
