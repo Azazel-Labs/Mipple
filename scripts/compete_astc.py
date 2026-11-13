@@ -49,7 +49,9 @@ def main():
     imgs = sorted(p for p in a.images.iterdir() if p.suffix.lower() in (".png", ".jpg", ".tga"))
     if a.limit:
         imgs = imgs[: a.limit]
-    a.out.mkdir(parents=True, exist_ok=True)
+    # Encodes go in work/ (gitignored); only the table is printed.
+    work = a.out / "work"
+    work.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, RAYON_NUM_THREADS=str(a.threads))
 
     def score(src, enc):
@@ -59,7 +61,7 @@ def main():
     def grade(name, encode, secs_of):
         secs = psnr = ssim = zst = tex = 0.0
         for img in imgs:
-            enc = a.out / f"{img.stem}_{name.replace(' ', '_')}.astc"
+            enc = work / f"{img.stem}_{name.replace(' ', '_')}.astc"
             secs += min(secs_of(run(encode(img, enc), env)) for _ in range(a.runs))
             p, q, z, n = score(img, enc)
             psnr += p

@@ -2,15 +2,19 @@
 *.ktx2
 *.decoded.png
 # Downloaded third-party corpora are fetched by scripts, never committed.
-/test-images/kodak/
-/test-images/oodle/
-/test-images/polyhaven/
-/test-images/polyhaven-test/
+# Only the small synthetic set is committed; every other corpus under test-images/ is local.
+/test-images/*
+!/test-images/synthetic/
+# Benchmark encodes (each script writes them under work/) and local-only results.
 /bench-results/**/work/
+/bench-results/oodle/
 # Local `mipple bench` outputs (the VS Code bench tasks); published numbers live in docs/BENCHMARKS.md.
 /bench-results/kodak.*
 /bench-results/synthetic.*
 __pycache__/
+# Local research notes and reports, never committed.
+/research_notes/
+/reports/
 # Third-party encoders built locally for head-to-head benchmarks, never committed.
 /third_party/
 # The browser demo's wasm-pack output (web/README.md).

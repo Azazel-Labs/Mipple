@@ -59,7 +59,7 @@ def main():
     if a.limit:
         imgs = imgs[: a.limit]
     a.out.mkdir(parents=True, exist_ok=True)
-    tmp = a.out / "dds"
+    tmp = a.out / "work"
     tmp.mkdir(exist_ok=True)
     env = dict(os.environ, RAYON_NUM_THREADS=str(a.threads))
 
