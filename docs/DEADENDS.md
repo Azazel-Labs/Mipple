@@ -89,6 +89,12 @@ CPU times come from paired runs on the same core.
 - **Gating refinement per block.** Refinement's wins are spread thin: no single feature predicts them (the
   best candidate's bits, best J over the starting J, runner-up over best, J itself). The most selective cut,
   runner-up over best above 1.3, skips only 17% of blocks while dropping 3% of refinement's gain.
+- **Larger near-flat mode-6 gates on the BC7 RDO bases.** The plain effort-8 base keeps mode 6 when a
+  block's mode-6 error is at most 384 and the entropy-reduced base when its score is at most 512 (both
+  gains, see `bc7::rdo_alt_cfg`). Higher gates trade RMSE for SSIM vs Oodle on Kodak-24 rather than gain:
+  the plain gate at 512 (with the reduced one at 512) moves λ 20 / 30 at RMSE from −1.7% / −2.3% to −1.6% /
+  −2.2% while SSIM gains 0.1-0.2, at 768 to −1.3% / −1.5%, and at 4096 alone λ 30 at RMSE goes to +0.2%. The
+  reduced gate at 1024 or 2048 moves λ 40 at RMSE −3.2% to −3.1% for about 2% less time.
 - **A deduplicated prefilter scan at low λ.** Whole blocks and index halves are only 0-10%
   repeated within the ranker's 2048-block reach at λ 1 (30-60% at λ 4+), so deduplication pays
   only at higher λ.
