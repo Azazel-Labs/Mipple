@@ -102,6 +102,12 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
 - **A smaller shortlist, or half of polish, at effort 0.** Measuring two decimations per
   candidate instead of four, or polishing only weights or only endpoints, each loses 0.1-0.3 dB
   at 6x6 and 8x8.
+- **Reworking the estimate shortlist's data structure.** Its insert line shows as about 12% of
+  samples at 6x6, but the cost is branch misses across the whole estimate loop (about 150
+  estimates and 70 inserts per block, close to a coin flip each). Collecting every estimate in a
+  buffer and trimming it once at the end was slower. A branchless insert of packed (score bits,
+  index) keys by min/max came out within 3% (kept, since it is no slower). The lever is fewer
+  estimates, not a faster insert.
 - **Scalar micro-optimization to reach ISPC fast's speed.** After the cheap early-outs, the time
   is spread over polish (about 21%), layouts, candidate encoding, decimation and spectra, and no
   single stage is worth 2×. As with BC6H, matching ISPC needs work across blocks or across

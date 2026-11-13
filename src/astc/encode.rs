@@ -216,10 +216,10 @@ static CNOISE: std::sync::LazyLock<[f32; 21]> = std::sync::LazyLock::new(|| {
     })
 });
 
-/// A partition pattern: its seed and each texel's partition.
+/// A partition pattern: its seed and each texel's partition (as lanes: -1 past the texels).
 struct Pattern {
     seed: u16,
-    labels: Vec<u8>,
+    lab: Box<[i16; MAX_TEXELS]>,
 }
 
 /// The weight grids and partition patterns of one footprint, built once per surface.
@@ -430,10 +430,11 @@ impl Footprint {
                 if next as u32 != count || !seen.insert(canon) {
                     continue;
                 }
-                out.push(Pattern {
-                    seed: seed as u16,
-                    labels,
-                });
+                let mut lab = Box::new([-1i16; MAX_TEXELS]);
+                for (o, &l) in lab.iter_mut().zip(&labels) {
+                    *o = l as i16;
+                }
+                out.push(Pattern { seed: seed as u16, lab });
             }
             out
         });
@@ -442,7 +443,7 @@ impl Footprint {
             let pats: &Vec<Pattern> = &patterns[pi];
             let mut m = vec![0u64; pats.len() * nw * (pi + 1)];
             for (j, pat) in pats.iter().enumerate() {
-                for (i, &l) in pat.labels.iter().enumerate() {
+                for (i, &l) in pat.lab[..n].iter().enumerate() {
                     if (l as usize) <= pi {
                         m[(j * (pi + 1) + l as usize) * nw + i / 64] |= 1 << (i % 64);
                     }
@@ -1037,14 +1038,14 @@ struct Layout {
 }
 
 impl Layout {
-    /// The layout of partitions 0..`count` by `labels` (whose moments are `ms`), with channel
-    /// `ccs` on a second plane; `axis0`, when given, is partition 0's dominant axis (of its scatter
-    /// without channel `ccs`), already computed.
+    /// The layout of partitions 0..`count` by labels `lab` (as lanes: -1 past the texels; whose
+    /// moments are `ms`), with channel `ccs` on a second plane; `axis0`, when given, is partition
+    /// 0's dominant axis (of its scatter without channel `ccs`), already computed.
     fn new(
         t: &Texels,
         count: u8,
         seed: u16,
-        labels: &[u8],
+        lab: &[i16; MAX_TEXELS],
         ccs: usize,
         ms: &[Moments; 3],
         axis0: Option<[f32; 4]>,
@@ -1054,7 +1055,7 @@ impl Layout {
             count,
             seed,
             labels: [0; MAX_TEXELS],
-            lab16: [-1; MAX_TEXELS],
+            lab16: *lab,
             ccs,
             u: [0.0; MAX_TEXELS],
             scale: [0.0; MAX_TEXELS],
@@ -1062,10 +1063,10 @@ impl Layout {
             scale2: 0.0,
             orth: 0.0,
         };
-        l.labels[..n].copy_from_slice(&labels[..n]);
-        for (o, &x) in l.lab16.iter_mut().zip(&labels[..n]) {
-            *o = x as i16;
+        for (o, &x) in l.labels[..n].iter_mut().zip(lab) {
+            *o = x as u8;
         }
+        let labels = l.labels;
         let mut axes = [[0f32; 4]; 3];
         let mut means = [[0f32; 4]; 3];
         for p in 0..count as usize {
@@ -1093,15 +1094,32 @@ impl Layout {
             axes[p] = axis;
             means[p] = mean;
         }
-        let mut lo = [f32::MAX; 3];
-        let mut hi = [f32::MIN; 3];
+        let mut u = [0f32; MAX_TEXELS];
         for i in 0..n {
             let p = labels[i] as usize;
             let (m, a, q) = (&means[p], &axes[p], &t.f[i]);
-            let d = (q[0] - m[0]) * a[0] + (q[1] - m[1]) * a[1] + (q[2] - m[2]) * a[2] + (q[3] - m[3]) * a[3];
-            l.u[i] = d;
-            lo[p] = lo[p].min(d);
-            hi[p] = hi[p].max(d);
+            u[i] = (q[0] - m[0]) * a[0] + (q[1] - m[1]) * a[1] + (q[2] - m[2]) * a[2] + (q[3] - m[3]) * a[3];
+        }
+        // Each partition's extent along its axis, a pass per partition (so in registers).
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        if count == 1 {
+            (lo[0], hi[0]) = u[..n]
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), &d| (lo.min(d), hi.max(d)));
+        } else {
+            for p in 0..count as usize {
+                (lo[p], hi[p]) = u[..n]
+                    .iter()
+                    .zip(&labels)
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), (&d, &lb)| {
+                        if lb as usize == p {
+                            (lo.min(d), hi.max(d))
+                        } else {
+                            (lo, hi)
+                        }
+                    });
+            }
         }
         let mut sc = [0f32; 3];
         let mut inv = [0f32; 3];
@@ -1111,8 +1129,8 @@ impl Layout {
             inv[p] = 64.0 / len;
         }
         for i in 0..n {
-            let p = labels[i] as usize;
-            l.u[i] = (l.u[i] - lo[p]) * inv[p];
+            let p = l.labels[i] as usize;
+            l.u[i] = (u[i] - lo[p]) * inv[p];
             l.scale[i] = sc[p];
         }
         if ccs < NO_CCS {
@@ -1139,22 +1157,36 @@ struct Moments {
 }
 
 impl Moments {
-    /// The moments of partitions 0..`count` of the texels by `labels`, in one pass.
-    fn of(t: &Texels, labels: &[u8], count: u8) -> [Moments; 3] {
+    /// The moments of partitions 0..`count` of the texels by labels `lab` (as lanes: -1 past the
+    /// texels), eight texels at a time.
+    fn of(t: &Texels, lab: &[i16; MAX_TEXELS], count: u8) -> [Moments; 3] {
         let mut m = [Moments::default(); 3];
-        for i in 0..t.n {
-            let p = &t.px[i];
-            let mm = &mut m[labels[i] as usize];
-            mm.n += 1;
+        let nl = t.n.next_multiple_of(8);
+        let ones = I16x8::splat(1);
+        for (p, mm) in m.iter_mut().enumerate().take(count as usize) {
+            let pm = I16x8::splat(p as i16);
+            let mut n = I32x4::zero();
+            let mut s = [I32x4::zero(); 4];
+            let mut ss = [[I32x4::zero(); 4]; 4];
+            for k in (0..nl).step_by(8) {
+                let msk = I16x8::load(&lab[k..]).eq(pm);
+                n = n.add(msk.sq_pairs());
+                let x: [I16x8; 4] = std::array::from_fn(|c| I16x8::load(&t.xl[c][k..]).and(msk));
+                for a in 0..4 {
+                    s[a] = s[a].add(x[a].madd(ones));
+                    for b in a..4 {
+                        ss[a][b] = ss[a][b].add(x[a].madd(x[b]));
+                    }
+                }
+            }
+            mm.n = n.sum() as u32;
             for a in 0..4 {
-                let x = p[a] as u32;
-                mm.s[a] += x;
+                mm.s[a] = s[a].sum() as u32;
                 for b in a..4 {
-                    mm.ss[a][b] += x * p[b] as u32;
+                    mm.ss[a][b] = ss[a][b].sum() as u32;
                 }
             }
         }
-        debug_assert!(m[count as usize..].iter().all(|x| x.n == 0));
         m
     }
 
@@ -1338,23 +1370,40 @@ fn kmeans(t: &Texels, k: usize, axis: &[f32; 4], mean: &[f32; 4]) -> [[u64; 3]; 
             .unwrap();
         centers[2] = t.f[far];
     }
+    // The channel sums are integers (exact as floats too), so group 0's is the rest of the total.
+    let mut all = [0u32; 4];
+    for p in &t.px[..t.n] {
+        for c in 0..4 {
+            all[c] += p[c] as u32;
+        }
+    }
     let mut labels = [0u8; MAX_TEXELS];
     for _ in 0..4 {
-        let mut sum = [[0f32; 4]; 3];
-        let mut cnt = [0f32; 3];
+        let mut sum = [[0u32; 4]; 3];
+        let mut cnt = [0u32; 3];
         for i in 0..t.n {
-            let j = (0..k)
-                .min_by(|&a, &b| dist(&t.f[i], &centers[a]).total_cmp(&dist(&t.f[i], &centers[b])))
-                .unwrap();
+            // The nearest center, the first on a tie.
+            let f = &t.f[i];
+            let (d0, d1) = (dist(f, &centers[0]), dist(f, &centers[1]));
+            let mut j = (d1 < d0) as usize;
+            if k == 3 && dist(f, &centers[2]) < d0.min(d1) {
+                j = 2;
+            }
             labels[i] = j as u8;
-            cnt[j] += 1.0;
+            let (m1, m2) = ((j == 1) as u32, (j == 2) as u32);
+            cnt[1] += m1;
+            cnt[2] += m2;
             for c in 0..4 {
-                sum[j][c] += t.f[i][c];
+                let x = t.px[i][c] as u32;
+                sum[1][c] += m1 * x;
+                sum[2][c] += m2 * x;
             }
         }
+        cnt[0] = t.n as u32 - cnt[1] - cnt[2];
+        sum[0] = std::array::from_fn(|c| all[c] - sum[1][c] - sum[2][c]);
         for j in 0..k {
-            if cnt[j] > 0.0 {
-                centers[j] = sum[j].map(|x| x / cnt[j]);
+            if cnt[j] > 0 {
+                centers[j] = sum[j].map(|x| x as f32 / cnt[j] as f32);
             }
         }
     }
@@ -1584,11 +1633,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let ce = alpha as usize;
     let es = effort_settings(effort);
     // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
-    let ms1 = Moments::of(&t, &[0; MAX_TEXELS], 1);
+    let lab1: [i16; MAX_TEXELS] = std::array::from_fn(|i| if i < n { 0 } else { -1 });
+    let ms1 = Moments::of(&t, &lab1, 1);
     let (mean1, cov) = ms1[0].mean_cov();
     let axis1 = dominant(&cov);
     let mut layouts = Vec::with_capacity(1 + es.dual + es.patterns.iter().sum::<usize>());
-    layouts.push(Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS, &ms1, Some(axis1)));
+    layouts.push(Layout::new(&t, 1, 0, &lab1, NO_CCS, &ms1, Some(axis1)));
     // The texels' mean squared distance from their line, per channel.
     let off_line = layouts[0].orth / (n * t.ch) as f32;
     if es.dual > 0 {
@@ -1610,7 +1660,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             .collect();
         off.sort_by(|a, b| a.0.total_cmp(&b.0));
         for &(_, c, v) in off.iter().take(es.dual) {
-            layouts.push(Layout::new(&t, 1, 0, &[0; MAX_TEXELS], c, &ms1, Some(v)));
+            layouts.push(Layout::new(&t, 1, 0, &lab1, c, &ms1, Some(v)));
         }
     }
     for (pi, &want) in es.patterns.iter().enumerate() {
@@ -1621,16 +1671,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         }
         let km = kmeans(&t, k, &axis1, &mean1);
         for i in rank_patterns(fp, k, &km, n as u32, want) {
-            let ms = Moments::of(&t, &pats[i].labels, k as u8);
-            layouts.push(Layout::new(
-                &t,
-                k as u8,
-                pats[i].seed,
-                &pats[i].labels,
-                NO_CCS,
-                &ms,
-                None,
-            ));
+            let ms = Moments::of(&t, &pats[i].lab, k as u8);
+            layouts.push(Layout::new(&t, k as u8, pats[i].seed, &pats[i].lab, NO_CCS, &ms, None));
         }
     }
     // Score every (partitioning, grid, weight range): the error of the ideal weights decimated to
@@ -1638,10 +1680,21 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     // and the texels' distance from their lines. The decimation error is first estimated from the
     // ideal weights' spectrum (what the grid's frequencies cannot hold), then measured for the
     // shortlist.
-    // The `short` best so far, by estimate: (score, score less the decimation error, layout,
-    // grid, mode).
+    // The `short` best so far, by estimate, ascending: each the score's ordered bits above its
+    // layout, grid and index into the grid's estimates (so equal scores go to the first in that
+    // order, whatever order they are scored in), unused ones `empty`.
     let short = es.candidates * SHORTLIST;
-    let mut cands: Vec<(f32, f32, u16, u16, u16)> = Vec::with_capacity(short + 1);
+    // Floats' bits, flipped to order as unsigned integers as the floats do.
+    let ord = |x: f32| {
+        let b = x.to_bits();
+        b ^ (((b as i32 >> 31) as u32) | 0x8000_0000)
+    };
+    let unord = |b: u32| f32::from_bits(b ^ (!((b as i32 >> 31) as u32) | 0x8000_0000));
+    let empty = (ord(f32::MAX) as u64) << 32 | u32::MAX as u64;
+    let mut top = vec![empty; short];
+    assert!(layouts.len() < 256 && fp.grids.len() < 256);
+    // Each layout's span (below) and estimate kind.
+    let mut spans = Vec::with_capacity(layouts.len());
     let per_texel = n as f32 * t.ch as f32;
     let mut v = [0f32; MAX_TEXELS];
     for (li, lay) in layouts.iter().enumerate() {
@@ -1660,43 +1713,48 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         // Squared color per unit of weight squared, over the block.
         let span = lay.scale[..n].iter().sum::<f32>() + if dual { n as f32 * lay.scale2 } else { 0.0 };
         let kind = est_kind(lay.count, dual, ce);
-        let mut thr = if cands.len() == short {
-            cands[short - 1].0
-        } else {
-            f32::MAX
-        };
-        for (gi, grid) in fp.grids.iter().enumerate() {
+        spans.push((span, kind));
+        // The last score's bits: no estimate above it goes in.
+        let mut thr = (top[short - 1] >> 32) as u32;
+        // The finest grids first: they usually score best, so the bound tightens soonest.
+        for (gi, grid) in fp.grids.iter().enumerate().rev() {
             let (gx, gy) = (grid.gx as usize, grid.gy as usize);
             let mut derr = sp[bh][bw] - sp[gy][gx];
             if let Some(sp2) = &sp2 {
                 derr += sp2[bh][bw] - sp2[gy][gx];
             }
-            for e in &grid.est[kind] {
+            for (ei, e) in grid.est[kind].iter().enumerate() {
                 // No later mode has less weight noise or less endpoint noise than this bound.
-                if derr + (span * e.wnoise + per_texel * e.cnoise_after + lay.orth) >= thr {
+                if ord(derr + (span * e.wnoise + per_texel * e.cnoise_after + lay.orth)) > thr {
                     break;
                 }
                 let rest = span * e.wnoise + per_texel * e.cnoise + lay.orth;
                 let score = derr + rest;
-                if score >= thr {
+                let mut x = (ord(score) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64;
+                if x >= top[short - 1] {
                     continue;
                 }
-                // Insert after any equal scores; when full, the last (above `score`) drops out.
-                if cands.len() == short {
-                    cands.pop();
+                // The last drops out.
+                for k in &mut top {
+                    let lo = x.min(*k);
+                    x = x.max(*k);
+                    *k = lo;
                 }
-                cands.push((score, rest, li as u16, gi as u16, e.mi));
-                let mut at = cands.len() - 1;
-                while at > 0 && cands[at - 1].0 > score {
-                    cands.swap(at, at - 1);
-                    at -= 1;
-                }
-                if cands.len() == short {
-                    thr = cands[short - 1].0;
-                }
+                thr = (top[short - 1] >> 32) as u32;
             }
         }
     }
+    let mut cands: Vec<(f32, f32, u16, u16, u16)> = top
+        .iter()
+        .take_while(|&&k| k != empty)
+        .map(|&k| {
+            let (li, gi, ei) = ((k >> 24) as u8 as usize, (k >> 16) as u8 as usize, k as u16 as usize);
+            let ((span, kind), lay) = (spans[li], &layouts[li]);
+            let e = &fp.grids[gi].est[kind][ei];
+            let rest = span * e.wnoise + per_texel * e.cnoise + lay.orth;
+            (unord((k >> 32) as u32), rest, li as u16, gi as u16, e.mi)
+        })
+        .collect();
     let by_score = |a: &(f32, f32, u16, u16, u16), b: &(f32, f32, u16, u16, u16)| a.0.total_cmp(&b.0);
     // Measured decimation errors by (layout, grid), and the decimated weights per plane.
     let mut measured: Vec<(u16, u16, f32)> = Vec::with_capacity(short);
