@@ -431,8 +431,12 @@ texture-only cook (fresh imports, shaders already in the DDC) minus a cook with 
 (four texture-only cooks at 90.6-101.9 against 46.6-53.6 with a full DDC) and 2-3 s of wall time. mipple at λ 1 and
 1.5, which bracket Oodle's λ 30 RMSE, used 55-64 CPU-seconds encoding the 24 images one after another with all
 threads (13-14 s wall), 76-98 encoding all 24 at once with one thread each (5.7-6.9 s wall), and 33 s on one pinned
-P-core. CPU-seconds on this hybrid, hyperthreaded CPU depend heavily on load, but on every basis mipple's BC7 RDO
-costs more than Oodle's: about 1.2-2× its CPU for smaller files at the same quality.
+P-core. CPU-seconds on this hybrid, hyperthreaded CPU depend heavily on load, so both were then measured on one
+pinned P-core (core 16; UE widens its own affinity at start, so its processes were re-pinned every 100 ms). The
+texture-only cooks took 51.5-55.4 CPU-seconds against 31.8-33.9 with a full DDC, which puts Oodle's share at about
+20-22 CPU-seconds (three pairs). mipple encoding the 24 images at λ 1 (`encode`, one process per image, KTX2
+output) took 34.2-34.6. On the same core, mipple's BC7 RDO costs about 1.6× Oodle's CPU for smaller files at the
+same quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
 sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on

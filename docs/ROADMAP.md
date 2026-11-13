@@ -90,12 +90,18 @@ Open for v0.9.x:
   repeats. 128 KiB chunks are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing
   (1.4-1.5× wall time).
 - [ ] **BC7 RDO clearly faster than Oodle** (reopened 2026-11-13): quality is ahead in every cell, but CPU is
-  behind. A fresh side-by-side run puts Oodle's share of a UE cook at about 47 CPU-seconds for Kodak-24 at λ 30
-  and mipple's λ 1-1.5 at 55-98, depending on threading (about 1.2-2×; details in
-  [BENCHMARKS.md](BENCHMARKS.md)). Target: about half the CPU at λ 1 with every table cell still ahead.
+  behind. On one pinned P-core, Oodle's share of a UE cook is about 20-22 CPU-seconds for Kodak-24 at λ 30 and
+  mipple's λ 1 is 34.2-34.6 (about 1.6×; all-thread runs put Oodle at 47 and mipple at 55-98; details in
+  [BENCHMARKS.md](BENCHMARKS.md)). Target: under Oodle's CPU at λ 1 with every table cell still ahead, then
+  about half.
   Where λ 1 CPU goes (busy time, kodim05): main RDO loop 76%, of which far search 18% (half of it mode-6
   re-indexing), ranker prefilter scan 15%, near candidates 11%, refinement about 10%; the two extra bases
-  (`pipeline::rdo_bases`) 20%; Zstd check and KTX2 write about 7%.
+  (`pipeline::rdo_bases`) 20%; Zstd check and KTX2 write about 7%. Switching each stage off instead (8 Kodak
+  images, λ 1, one pinned core, best of three, 9.31 s of RDO) gives a different picture: refinement 29% (its
+  files 0.85% larger without it), the deferred decision 22% (+0.87%), the far search 19% (+3.0%), near depth
+  32 rather than 8 8% (+0.1%); without the ranker's picks RDO is 51% slower, since they tighten every later
+  bound. Refinement's time is spread thin: per block about 400 tries, 216 scored (mode-6 halves by table
+  lookups; the 4% of blocks that aren't mode 6 decode), 14 rate estimates and 0.06 wins.
   - Kept: in refinement, a mode-6 block skips other modes' first halves (about 3% less at λ 1, byte-identical on
     Kodak-24 and the Poly Haven test set).
   - Rejected (quality, or slower with no gain): see [DEADENDS.md](DEADENDS.md#bc7-rdo).
