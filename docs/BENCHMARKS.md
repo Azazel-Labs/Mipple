@@ -487,21 +487,22 @@ RMSE, −2.6% to −4.8% on SSIM.
 Twelve RGBA images: Kodak 1, 3, 5, 13, 18 and 23, each with alpha from the next Kodak image's luma (detailed
 alpha) and with a smooth radial alpha that reaches 0 in the corners. mipple effort 5 with `--alpha data` (so all
 four channels are scored against the source) against bc7enc_rdo `-3` (rgbcx L18 color, BC4 alpha at radius 5)
-with `-zc8192`, all threads, top level only. PSNR is over RGBA, bits/texel after Zstd-19, and time is the total
-wall time over the twelve images, process start included:
+with `-zc8192`, all threads, top level only. PSNR is over RGBA, bits/texel after Zstd-19 and Deflate-9, and time
+is the total wall time over the twelve images, process start included:
 
-| λ | mipple PSNR | mipple bpt | mipple s | bc7enc_rdo PSNR | bc7enc_rdo bpt | bc7enc_rdo s |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0 | 36.672 | 5.883 | 2.4 | 36.685 | 5.856 | 4.8 |
-| 0.5 | 36.530 | 4.852 | 6.7 | 36.404 | 5.104 | 35.3 |
-| 1 | 36.334 | 4.472 | 6.9 | 35.944 | 4.784 | 35.3 |
-| 2 | 35.910 | 4.011 | 6.7 | 34.970 | 4.404 | 32.9 |
-| 4 | 35.070 | 3.425 | 6.6 | 33.234 | 3.983 | 30.5 |
+| λ | mipple PSNR | mipple Zstd bpt | mipple Deflate bpt | mipple s | bc7enc_rdo PSNR | bc7enc_rdo Zstd bpt | bc7enc_rdo Deflate bpt | bc7enc_rdo s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 36.674 | 6.032 | 6.282 | 2.4 | 36.687 | 5.994 | 6.258 | 4.8 |
+| 0.5 | 36.517 | 4.846 | 5.059 | 6.7 | 36.397 | 5.134 | 5.283 | 35.3 |
+| 1 | 36.320 | 4.465 | 4.668 | 6.9 | 35.948 | 4.808 | 4.950 | 35.3 |
+| 2 | 35.893 | 3.999 | 4.200 | 6.7 | 34.980 | 4.422 | 4.563 | 32.9 |
+| 4 | 35.043 | 3.417 | 3.620 | 6.6 | 33.251 | 4.016 | 4.154 | 30.5 |
 
-BD-rate of the mean curves: −15.7% (Zstd-19). Every mipple RDO point is both smaller and closer to the
-source than the bc7enc_rdo point at the same λ, at about a fifth of the time. The base encoders are even: the
-color half is the BC1 encoder held to 4-color blocks (a BC3 color half never decodes in 3-color mode), the
-alpha half the BC4 encoder.
+BD-rate of the mean curves: −16.0% after Zstd-19, −14.4% after Deflate-9. Every mipple RDO point is both smaller
+and closer to the source than the bc7enc_rdo point at the same λ, at about a fifth of the time. (The times are
+from an earlier run of the same commands on an earlier build of these twelve images; sizes and PSNR are from the
+current images.) The base encoders are even: the color half is the BC1 encoder held to 4-color blocks (a BC3
+color half never decodes in 3-color mode), the alpha half the BC4 encoder.
 
 ## BC6H vs ISPC, texconv, Compressonator
 
@@ -570,25 +571,25 @@ alpha), `--alpha data`, one thread, RGBA PSNR:
 Here Compressonator's files are 10% smaller at λ = 0: mipple's alpha blocks are closer (radial alpha comes
 out exact, against 50 dB) but pick their table and multiplier per block, which Zstd finds less repetitive.
 
-RDO (effort 5, all threads, same images and scoring):
+RDO (effort 5, all threads, same images and scoring; bits/texel after Zstd-19 and Deflate-9):
 
-| λ | ETC2 RGB PSNR | ETC2 RGB bpt | ETC2 RGBA PSNR | ETC2 RGBA bpt |
-| --- | ---: | ---: | ---: | ---: |
-| 0 | 37.728 | 3.073 | 37.903 | 5.909 |
-| 0.25 | 37.718 | 2.989 | 37.821 | 5.238 |
-| 0.5 | 37.675 | 2.882 | 37.713 | 4.948 |
-| 1 | 37.545 | 2.703 | 37.478 | 4.600 |
-| 2 | 37.225 | 2.479 | 36.988 | 4.188 |
-| 4 | 36.497 | 2.174 | 36.053 | 3.693 |
-| Compressonator | 36.700 | 3.013 | 36.793 | 5.339 |
+| λ | ETC2 RGB PSNR | ETC2 RGB Zstd bpt | ETC2 RGB Deflate bpt | ETC2 RGBA PSNR | ETC2 RGBA Zstd bpt | ETC2 RGBA Deflate bpt |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 37.728 | 3.073 | 3.164 | 37.903 | 5.909 | 6.123 |
+| 0.25 | 37.718 | 2.989 | 3.080 | 37.821 | 5.238 | 5.422 |
+| 0.5 | 37.675 | 2.882 | 2.972 | 37.713 | 4.948 | 5.126 |
+| 1 | 37.545 | 2.703 | 2.792 | 37.478 | 4.600 | 4.782 |
+| 2 | 37.225 | 2.479 | 2.569 | 36.988 | 4.188 | 4.370 |
+| 4 | 36.497 | 2.174 | 2.266 | 36.053 | 3.693 | 3.870 |
+| Compressonator | 36.700 | 3.013 | 3.111 | 36.793 | 5.339 | 5.610 |
 
-At Compressonator's PSNR, mipple's files are about 25% smaller for ETC2 RGB and 23% smaller for ETC2 RGBA
-(interpolating between λ 2 and 4); at λ 0.5 ETC2 RGB is 4% smaller and 1 dB closer. The RDO candidates per
-8-byte half are whole-block and whole-half copies, another block's colors with the selectors re-chosen,
-another block's selectors with the base colors and tables refit (individual and differential blocks), and for
-EAC another block's base, multiplier and table re-indexed or its indices refit. The RDO pass takes about 1.7 s
-per Kodak image on all threads (a machine shared with other builds), several times BC1's: ETC candidates are
-scored by a full decode.
+At Compressonator's PSNR, mipple's files are about 25% smaller for ETC2 RGB and 23% smaller for ETC2 RGBA after
+Zstd, 25% and 24% after Deflate (interpolating between λ 2 and 4); at λ 0.5 ETC2 RGB is 4% smaller and 1 dB
+closer. The RDO candidates per 8-byte half are whole-block and whole-half copies, another block's colors with
+the selectors re-chosen, another block's selectors with the base colors and tables refit (individual and
+differential blocks), and for EAC another block's base, multiplier and table re-indexed or its indices refit.
+The RDO pass takes about 1.7 s per Kodak image on all threads (a machine shared with other builds), several
+times BC1's: ETC candidates are scored by a full decode.
 
 EAC R11 and RG11 have no competitor on disk (Compressonator has no EAC-only formats). On Kodak, one thread,
 R11 from the red channel and RG11 from red and green, PSNR over those channels:

@@ -288,6 +288,9 @@ def extra_bits(fdata):
         if r["kind"] == "curve":
             v = -bd_rate([(p[2], p[1]) for p in r["other"]], [(p[2], p[1]) for p in m])
             tip = f'BD-rate on {r["corpus"]} (PSNR), Zstd-19'
+            if all(len(p) > 3 for p in m + r["other"]):
+                dv = -bd_rate([(p[3], p[1]) for p in r["other"]], [(p[3], p[1]) for p in m])
+                tip += f"; Deflate-9 {-dv:.1f}%"
         else:
             q, b = r["other"][0][1], r["other"][0][2]
             at = size_at(m, q)

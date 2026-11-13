@@ -59,8 +59,8 @@
 <text class="ink num" x="421.2" y="212.5" font-size="12"><tspan font-weight="600">4.9%</tspan><tspan class="mute">  4.0 to 5.7</tspan></text>
 <text class="ink" x="24" y="257.0" font-size="15" font-weight="600">BC3</text>
 <text class="ink2" x="318" y="256.0" font-size="13" text-anchor="end">bc7enc_rdo</text>
-<rect class="f1" x="330.0" y="245.0" width="233.6" height="14" rx="3"><title>bc7enc_rdo: 15.7% fewer bits (BD-rate on 12 RGBA Kodak images (PSNR), Zstd-19)</title></rect>
-<text class="ink num" x="569.6" y="256.5" font-size="12"><tspan font-weight="600">15.7%</tspan><tspan class="mute"></tspan></text>
+<rect class="f1" x="330.0" y="245.0" width="238.8" height="14" rx="3"><title>bc7enc_rdo: 16.0% fewer bits (BD-rate on 12 RGBA Kodak images (PSNR), Zstd-19; Deflate-9 -14.4%)</title></rect>
+<text class="ink num" x="574.8" y="256.5" font-size="12"><tspan font-weight="600">16.0%</tspan><tspan class="mute"></tspan></text>
 <text class="ink" x="24" y="301.0" font-size="15" font-weight="600">BC4</text>
 <text class="ink2" x="318" y="300.0" font-size="13" text-anchor="end">bc7enc_rdo</text>
 <rect class="f1" x="330.0" y="289.0" width="298.9" height="14" rx="3"><title>bc7enc_rdo: 20.0% fewer bits (BD-rate on Kodak (PSNR), Zstd-19; Deflate-9 18.4%)</title></rect>
@@ -102,11 +102,11 @@
 <text class="ink num" x="382.3" y="612.5" font-size="12"><tspan font-weight="600">1.4%</tspan><tspan class="mute">  0.3 to 3.1</tspan></text>
 <text class="ink" x="24" y="657.0" font-size="15" font-weight="600">ETC2 RGB</text>
 <text class="ink2" x="318" y="656.0" font-size="13" text-anchor="end">Compressonator</text>
-<rect class="f3" x="330.0" y="645.0" width="375.1" height="14" rx="3"><title>Compressonator: 25.2% fewer bits (Kodak 24, at Compressonator’s 36.70 dB (interpolated between λ points), Zstd-19)</title></rect>
+<rect class="f3" x="330.0" y="645.0" width="375.1" height="14" rx="3"><title>Compressonator: 25.2% fewer bits (Kodak 24, at Compressonator’s 36.70 dB (interpolated between λ points), Zstd-19; Deflate-9 -24.6%)</title></rect>
 <text class="ink num" x="711.1" y="656.5" font-size="12"><tspan font-weight="600">25.2%</tspan><tspan class="mute"></tspan></text>
 <text class="ink" x="24" y="701.0" font-size="15" font-weight="600">ETC2 RGBA</text>
 <text class="ink2" x="318" y="700.0" font-size="13" text-anchor="end">Compressonator</text>
-<rect class="f3" x="330.0" y="689.0" width="351.8" height="14" rx="3"><title>Compressonator: 23.6% fewer bits (12 RGBA Kodak images, at Compressonator’s 36.79 dB (interpolated between λ points), Zstd-19)</title></rect>
+<rect class="f3" x="330.0" y="689.0" width="351.8" height="14" rx="3"><title>Compressonator: 23.6% fewer bits (12 RGBA Kodak images, at Compressonator’s 36.79 dB (interpolated between λ points), Zstd-19; Deflate-9 -24.1%)</title></rect>
 <text class="ink num" x="687.8" y="700.5" font-size="12"><tspan font-weight="600">23.6%</tspan><tspan class="mute"></tspan></text>
 <text class="ink" x="24" y="745.0" font-size="15" font-weight="600">ASTC 4x4</text>
 <text class="ink2" x="318" y="744.0" font-size="13" text-anchor="end">ISPC fast</text>

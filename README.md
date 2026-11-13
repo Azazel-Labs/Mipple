@@ -55,9 +55,9 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | BC7 | bc7enc_rdo (-e) | **−30.5%** | **−28.6%** | 17.1-28.5 | 38.1-44.4 |
 | BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−1.5%** to **−0.6%** (λ 10-40) | n/a | n/a | n/a |
 | BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.1%** to **−0.3%** (λ 10-40) | n/a | n/a | n/a |
-| BC3 | bc7enc_rdo | **−15.7%** | n/a | n/a | n/a |
-| ETC2 RGB | Compressonator | **−25.2%** | n/a | n/a | n/a |
-| ETC2 RGBA | Compressonator | **−23.6%** | n/a | n/a | n/a |
+| BC3 | bc7enc_rdo | **−16.0%** | **−14.4%** | n/a | n/a |
+| ETC2 RGB | Compressonator | **−25.2%** | **−24.6%** | n/a | n/a |
+| ETC2 RGBA | Compressonator | **−23.6%** | **−24.1%** | n/a | n/a |
 | ASTC 4x4 | ISPC fast | **−17.3%** | **−16.4%** | n/a | n/a |
 | ASTC 6x6 | ISPC fast | **−10.6%** | **−10.1%** | n/a | n/a |
 | ASTC 8x8 | ISPC fast | **−27.9%** | **−27.2%** | n/a | n/a |
