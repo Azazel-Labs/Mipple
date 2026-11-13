@@ -11,6 +11,8 @@ use super::lanes::{F32x4, I16x8, I32x4};
 use super::{BlockMode, COLOR_UNQUANT, RANGES, Symbolic, WEIGHT_RANGES, WEIGHT_UNQUANT, block_mode, color_range};
 use crate::surface::{Rgba, Surface};
 
+pub mod rdo;
+
 /// The largest footprint (12x12) in texels.
 pub const MAX_TEXELS: usize = 144;
 
@@ -814,6 +816,18 @@ fn sym_endpoints(sym: &Symbolic, p: usize) -> ([i32; 4], [i32; 4]) {
 /// four channels at the step down and the step up; for an endpoint step, eight texels of the
 /// partition in one channel.
 fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usize) -> u32 {
+    polish_parts::<true, true>(t, lay, grid, sym, passes)
+}
+
+/// [`polish`] stepping only the weights (`W`), only the endpoints (`E`), or both. Labels and the
+/// partition count are all it reads of `lay`.
+fn polish_parts<const W: bool, const E: bool>(
+    t: &Texels,
+    lay: &Layout,
+    grid: &Grid,
+    sym: &mut Symbolic,
+    passes: usize,
+) -> u32 {
     let tb = tables();
     let q = sym.mode.quant as usize;
     let cq = sym.color_quant as usize;
@@ -912,7 +926,7 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
     for _ in 0..passes {
         let mut improved = false;
-        for j in 0..kk {
+        for j in 0..if W { kk } else { 0 } {
             let (gp, pl) = (j / planes, j % planes);
             let old = sym.weights[j];
             let nb = [tb.wnb[q][0][old as usize], tb.wnb[q][1][old as usize]];
@@ -947,7 +961,7 @@ fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usi
             }
             improved = true;
         }
-        for p in 0..parts {
+        for p in 0..if E { parts } else { 0 } {
             for v in 0..2 * nv {
                 let c = v / 2;
                 let pl = plane_of(c);

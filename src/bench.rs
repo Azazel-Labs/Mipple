@@ -218,9 +218,8 @@ pub fn run(cfg: &BenchConfig, mut progress: impl FnMut(&BenchRow)) -> Result<Vec
     Ok(rows)
 }
 
-/// Runs the benchmark over in-memory images (`cfg.inputs` is ignored). ASTC has no RDO, so it gets
-/// rows for λ = 0 only; it is encoded for sRGB decoding unless the image is a normal map, as
-/// `mipple encode` does.
+/// Runs the benchmark over in-memory images (`cfg.inputs` is ignored). ASTC is encoded for sRGB
+/// decoding unless the image is a normal map, as `mipple encode` does.
 pub fn run_images(
     images: &[BenchImage],
     cfg: &BenchConfig,
@@ -239,11 +238,9 @@ pub fn run_images(
             // The decode mode ASTC encodes for (other formats ignore it).
             let srgb = format.default_srgb() && !normal;
             for &lambda in &cfg.lambdas {
-                if format.is_astc() && lambda > 0.0 {
-                    continue;
-                }
                 let reduce = cfg.entropy.resolve(lambda);
-                let rdo_on = lambda > 0.0;
+                // ASTC's RDO pass starts from its plain encode.
+                let rdo_on = lambda > 0.0 && !format.is_astc();
                 let key = reduce as usize * 2 + rdo_on as usize;
                 let slot = &mut bases[key];
                 if slot.is_none() {
@@ -267,16 +264,21 @@ pub fn run_images(
                     ..cfg.rdo
                 };
                 let t1 = Instant::now();
-                let stats = if params.enabled() {
-                    rdo::optimize_with_alt(format, &src, &mut blocks, alts, &w, &params)
+                let (stats, data) = if params.enabled() && format.is_astc() {
+                    let mut data = flatten(format, &blocks);
+                    let stats = crate::astc::encode::rdo::optimize(format, surface, srgb, &mut data, &params);
+                    (stats, data)
+                } else if params.enabled() {
+                    let stats = rdo::optimize_with_alt(format, &src, &mut blocks, alts, &w, &params);
+                    (stats, flatten(format, &blocks))
                 } else {
-                    RdoStats {
+                    let stats = RdoStats {
                         blocks: blocks.len(),
                         ..Default::default()
-                    }
+                    };
+                    (stats, flatten(format, &blocks))
                 };
                 let rdo_secs = t1.elapsed().as_secs_f64();
-                let data = flatten(format, &blocks);
                 let zstd_bytes = zstd::bulk::compress(&data, cfg.zstd_level)?.len();
                 let deflate_bytes = deflate_len(&data, cfg.deflate_level)?;
                 let dec = decode_blocks(format, &data, surface.width, surface.height, srgb, normal);

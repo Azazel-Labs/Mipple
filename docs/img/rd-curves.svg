@@ -7,6 +7,7 @@
   .s0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; }
   .s1 { stroke: #eb6834; } .f1 { fill: #eb6834; }
   .s2 { stroke: #1baf7a; } .f2 { fill: #1baf7a; }
+  .s3 { stroke: #8a5cd6; } .f3 { fill: #8a5cd6; }
   .good { fill: #006300; } .wh { stroke: #52514e; }
   @media (prefers-color-scheme: dark) {
     .bg { fill: #1a1a19; } .ink { fill: #f0efec; } .ink2 { fill: #c3c2b7; }
@@ -14,6 +15,7 @@
     .s0 { stroke: #3987e5; } .f0 { fill: #3987e5; }
     .s1 { stroke: #d95926; } .f1 { fill: #d95926; }
     .s2 { stroke: #199e70; } .f2 { fill: #199e70; }
+    .s3 { stroke: #9d78ea; } .f3 { fill: #9d78ea; }
     .good { fill: #0ca30c; } .wh { stroke: #c3c2b7; }
   }
   text { font-family: system-ui, -apple-system, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }

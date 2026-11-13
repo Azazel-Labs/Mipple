@@ -103,7 +103,8 @@ least-squares refits of (base, multiplier) to the chosen entries; 11-bit blocks 
 **ASTC LDR** (`astc/encode.rs`, 4x4, 6x6 and 8x8): the only formats whose blocks are not 4x4 texels, so they
 bypass the 4x4 `Block` path entirely: `pipeline` hands each mip level to `astc::encode::encode_surface` (one
 block row per rayon task) and decodes with `astc::decode_rgba`, and `Format::encode_block`/`decode_block`,
-`encode_base` and the RDO pass panic for ASTC rather than run on the wrong footprint. Each block is fitted
+`encode_base` and the 4x4 RDO pass panic for ASTC rather than run on the wrong footprint (ASTC has its own
+pass, below). Each block is fitted
 with a line in color space, the texels' positions on it become ideal weights, and those are decimated to
 every weight grid the footprint allows by exact least squares (the infill taken as separable). Every (grid,
 weight range, partitioning) candidate is ranked by an estimate of weight and endpoint quantization noise from
@@ -112,8 +113,8 @@ re-derived from the quantized endpoints and a coordinate-descent polish over the
 three-partition patterns (the ones closest to a k-means clustering) and dual-plane layouts are tried when
 the block is far enough from one line. ASTC decodes differently in sRGB and linear mode, so the encoder is
 told which (`BlockOpts::srgb`, on by default for color as with BC7). Output goes to KTX2 (vkFormat 157/158,
-165/166, 171/172, DFD color model ASTC) or, one level only, a `.astc` file; DDS refuses it. No RDO and no
-GPU kernel yet.
+165/166, 171/172, DFD color model ASTC) or, one level only, a `.astc` file; DDS refuses it. No GPU kernel
+yet.
 
 **BC4/BC5** (`bc4/batch.rs`): eight blocks per SIMD batch, one per lane, read straight from the surface (eight
 blocks of a block row are four 32-texel loads per row and a 4×4 transpose; no intermediate blocks), written as
@@ -226,6 +227,19 @@ threads, merged by lowest score with ties to the nearest candidate, gives identi
 hybrid 155H: the per-block join waits for the slowest core, and the split loses dedup and pruning, +19% CPU.) After RDO, each chunk is compressed with real Zstd at the output
 level; if it is not smaller than the base encoding, the chunk reverts. RDO therefore never increases the
 shipped size, and every block respects the error cap.
+
+**ASTC (`astc/encode/rdo.rs`).** ASTC blocks cover 4x4, 6x6 or 8x8 texels, so the pass reads each block's
+texels from the surface instead of 4x4 `Block`s, with the same `J` (SSE over all four channels, `/ 16`, so a λ
+means the same SSE per bit at every footprint), `LzModel`, error cap, 16 KiB chunks (1024 blocks) and Zstd
+check. The base is the plain encode at the requested effort. A block's mode, partitioning and endpoints sit in
+its low bits and its weights in its high bits, so the candidates are: an earlier block copied whole (the last
+`max_back`, 256); and, from the last `REFIT_BACK` (256) blocks with at most three partitions and CEM 8 or 12,
+the earlier block's head with weights re-chosen for this block, and its weights (with mode, partitioning and
+second-plane channel) with endpoints refitted by least squares, each polished once with the other half held.
+Heads and weight sets already tried are skipped. Before building either, a lower bound on its error must
+beat the best `J`'s distortion: for a re-weight, each texel's distance to its partition's segment (a decoded
+texel is within 0.5 per channel of a point on it); for a refit, the unclamped least-squares residual with the
+weights held. Both bounds are exact, so they change no output; they make the pass 1.3-2.0× faster.
 
 ## Regression check (`src/check.rs`)
 

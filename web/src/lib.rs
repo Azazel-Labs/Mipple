@@ -115,7 +115,7 @@ pub struct Settings {
     entropy: EntropyMode,
     /// `-e`, 0 (fastest) to 9 (best).
     pub effort: u8,
-    /// `-l`, RDO lambda; 0 disables RDO. ASTC has no RDO and ignores it.
+    /// `-l`, RDO lambda; 0 disables RDO (BC6H, which the browser does not encode, has none).
     pub lambda: f32,
     /// `--smooth-scale`: distortion multiplier for flat blocks.
     pub smooth_scale: f32,
@@ -233,12 +233,7 @@ impl Settings {
         o.srgb = !self.normal && self.format.default_srgb();
         o.mips = self.mips;
         o.rdo = RdoParams {
-            // `mipple encode` refuses λ > 0 for ASTC, which has no RDO.
-            lambda: if self.format.is_astc() {
-                0.0
-            } else {
-                self.lambda.max(0.0)
-            },
+            lambda: self.lambda.max(0.0),
             smooth_scale: self.smooth_scale,
             smooth_std: self.smooth_std,
             max_rms_ratio: self.max_rms_ratio,

@@ -32,6 +32,8 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 
 <img src="docs/img/oodle.svg" alt="Bits per texel vs Oodle Texture 2.9.16 on Kodak, per Oodle lambda" width="100%">
 
+<img src="docs/img/formats.svg" alt="Quality vs single-thread encode time for BC6H, ETC2 and ASTC: mipple vs ISPC, texconv and Compressonator" width="100%">
+
 <img src="docs/img/rd-curves.svg" alt="Rate-distortion curves per format: mipple vs bc7enc_rdo" width="100%">
 
 <img src="docs/img/speed.svg" alt="Encode time per lambda setting: mipple vs bc7enc_rdo" width="100%">
@@ -53,6 +55,12 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | BC7 | bc7enc_rdo (-e) | **−30.5%** | **−28.6%** | 17.1-28.5 | 38.1-44.4 |
 | BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−1.5%** to **−0.6%** (λ 10-40) | n/a | n/a | n/a |
 | BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.1%** to **−0.3%** (λ 10-40) | n/a | n/a | n/a |
+| BC3 | bc7enc_rdo | **−15.7%** | n/a | n/a | n/a |
+| ETC2 RGB | Compressonator | **−25.2%** | n/a | n/a | n/a |
+| ETC2 RGBA | Compressonator | **−23.6%** | n/a | n/a | n/a |
+| ASTC 4x4 | ISPC fast | **−17.3%** | **−16.4%** | n/a | n/a |
+| ASTC 6x6 | ISPC fast | **−10.6%** | **−10.1%** | n/a | n/a |
+| ASTC 8x8 | ISPC fast | **−27.9%** | **−27.2%** | n/a | n/a |
 
 Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads `bench-results/compete-kodak24-rdo/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites this block and `docs/img/*.svg`).
 
@@ -115,7 +123,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 | Command | What it does |
 | --- | --- |
-| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`, λ 0 only) |
+| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`) |
 | `decode IN.ktx2\|IN.dds\|IN.astc -o OUT.png [--level N] [--normal] [--astc-linear]` | Decode one mip level (a `.astc` file records no sRGB flag: it decodes as sRGB unless `--astc-linear`) |
 | `info IN.ktx2\|IN.astc` | Header, per-level offsets and sizes, key/value data |
 | `compare A B [--normal]` | PSNR (RGB, per channel, luma), SSIM, normal angular error |
@@ -156,7 +164,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint) encoders and
   a decoder for every 2D footprint, to KTX2 or `.astc`, encoded for sRGB or linear decoding;
   `scripts/compete_astc.py` grades them against Intel ISPC, whose fast profile effort 0 beats in PSNR at all
-  three footprints on the 24 Kodak images. CPU only, no RDO yet.
+  three footprints on the 24 Kodak images. CPU only; its RDO pass reads the surface itself (blocks are
+  not 4x4).
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.

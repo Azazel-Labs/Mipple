@@ -627,7 +627,31 @@ slower), and their times are not comparable with these:
 Effort 0 leads ISPC fast in PSNR, SSIM, size and time at every footprint: 0.63 / 0.01 / 0.18 dB ahead, 4.9%
 / 2.5% / 1.2% smaller after Zstd, and 14% / 2% / 3% faster at 4x4 / 6x6 / 8x8. The 6x6 lead is thin in both
 quality and time: other pinned runs had effort 0 up to 7% slower than ISPC there, so call it parity. Effort 2 leads further in quality (0.96 /
-0.31 / 0.44 dB) at 2.4-2.5× ISPC's time. There is no RDO pass for ASTC yet, so λ > 0 is refused.
+0.31 / 0.44 dB) at 2.4-2.5× ISPC's time.
+
+RDO at effort 0 on the same images, one thread pinned to the same P-core, `mipple bench test-images/kodak -f
+astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4 -e 0` with `RAYON_NUM_THREADS=1`. Each cell is PSNR dB / SSIM /
+Zstd-19 bpt; the RDO pass's time is its total over the 24 images:
+
+| λ | 4x4 | 6x6 | 8x8 |
+| --- | --- | --- | --- |
+| 0 | 44.414 / 0.99741 / 6.926 | 37.576 / 0.98380 / 3.248 | 33.833 / 0.95966 / 1.859 |
+| 0.5 | 42.995 / 0.99361 / 5.042 (84 s) | 37.557 / 0.98281 / 2.864 (80 s) | 33.894 / 0.95981 / 1.715 (50 s) |
+| 1 | 41.536 / 0.98697 / 4.214 (84 s) | 37.368 / 0.98028 / 2.594 (57 s) | 33.860 / 0.95870 / 1.610 (49 s) |
+| 2 | 39.765 / 0.97663 / 3.535 (69 s) | 36.919 / 0.97356 / 2.220 (50 s) | 33.760 / 0.95548 / 1.448 (49 s) |
+| 4 | 37.604 / 0.95982 / 2.936 (70 s) | 36.197 / 0.96387 / 1.907 (47 s) | 33.561 / 0.94975 / 1.285 (49 s) |
+| ISPC fast | 43.789 / 0.99677 / 7.286 | 37.563 / 0.98365 / 3.332 | 33.650 / 0.95837 / 1.881 |
+
+At ISPC fast's PSNR (interpolated along each λ curve in log rate), mipple's files are 17.3% / 10.6% / 27.9%
+smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 16.4% / 10.1% / 27.2% smaller after Deflate-9 (ISPC fast: 7.431 /
+3.368 / 1.896 bpt; mipple λ 0: 7.117 / 3.299 / 1.877; λ 1: 4.398 / 2.647 / 1.632). The 6x6 figure is the
+least certain: the curve is nearly flat between λ 0 and 0.5, right where ISPC's PSNR falls, so a 0.001 dB
+change in either moves it by a few tenths of a percent. At 8x8, light RDO raises PSNR (0.06 dB at λ 0.5): a polished re-weight or refit of an earlier block is
+sometimes closer to the source than effort 0's own encode of the block. The candidates are whole copies of the previous 256 blocks, an earlier
+block's head (mode, partition, endpoints) with the weights re-chosen, and an earlier block's weights with the
+endpoints refitted, each polished once; exact error lower bounds skip most of them without changing the
+output. The pass runs on whole surfaces (blocks are not 4x4) and costs 2-3.5 s per Kodak image on one thread,
+40-65× the effort-0 encode; it parallelizes across 16 KiB chunks like the other formats' passes.
 
 ## Lossless field split (`--prep`)
 

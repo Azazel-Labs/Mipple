@@ -178,7 +178,7 @@ struct EncodeArgs {
     /// Encoder effort, 0 (fastest) to 9 (best); 5 is balanced.
     #[arg(short, long, default_value_t = mipple::format::DEFAULT_EFFORT, value_parser = clap::value_parser!(u8).range(0..=9))]
     effort: u8,
-    /// RDO lambda; 0 disables RDO. Try 0.5 – 4. (BC6H and ASTC have no RDO yet.)
+    /// RDO lambda; 0 disables RDO. Try 0.5 – 4. (BC6H has no RDO yet.)
     #[arg(short, long, default_value_t = 0.0)]
     lambda: f32,
     /// Treat the input as linear data (default for BC4/BC5; for BC6H, 8-bit input as linear 0-1
@@ -697,9 +697,6 @@ fn encode(a: EncodeArgs) -> Result<()> {
             a.format
         );
     }
-    if a.format.is_astc() && a.lambda > 0.0 {
-        bail!("ASTC has no RDO yet: encode {} with --lambda 0 (the default)", a.format);
-    }
     if is_astc_file && !a.no_mips {
         eprintln!("note: an .astc file holds one level; encoding the top level only (--no-mips)");
     }
@@ -738,8 +735,15 @@ fn encode(a: EncodeArgs) -> Result<()> {
     let encode_secs = t.elapsed().as_secs_f64();
     let zstd = (a.zstd > 0).then_some(a.zstd);
     let sc_params = if a.format.is_astc() {
-        // No RDO, so no λ, entropy reduction or window.
-        format!("--format {} --effort {} --zstd {}", a.format, a.effort, a.zstd)
+        // No entropy reduction.
+        format!(
+            "--format {} --effort {} --lambda {} --window {} --zstd {}",
+            a.format,
+            a.effort,
+            a.lambda,
+            opts.rdo.window_for(a.format),
+            a.zstd
+        )
     } else {
         format!(
             "--format {} --effort {} --lambda {} --entropy {} --window {} --zstd {}",
@@ -858,9 +862,6 @@ fn run_bench(a: BenchArgs) -> Result<()> {
     let mut lambdas = a.lambdas.clone();
     if !lambdas.contains(&0.0) {
         lambdas.insert(0, 0.0);
-    }
-    if a.formats.iter().any(|f| f.is_astc()) && lambdas.iter().any(|&l| l > 0.0) {
-        println!("note: ASTC has no RDO yet; its rows are λ = 0 only");
     }
     let cfg = BenchConfig {
         inputs,

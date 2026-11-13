@@ -6,8 +6,8 @@ milestone in progress; every green push to main is released as the next patch (`
 
 ## Next up
 
-1. ~~ASTC LDR (4x4, 6x6, 8x8) output.~~ Done (v1.0 below); next for it: the RDO pass (blocks are not 4x4,
-   so λ > 0 is refused), a GPU kernel, a clear lead over ISPC at 6x6 (0.01 dB ahead at about its time), more footprints.
+1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
+   a clear lead over ISPC at 6x6 (0.01 dB ahead at about its time), more footprints, a faster RDO pass.
 2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
    signed EAC, a SIMD batch encoder.
@@ -133,8 +133,11 @@ Open for v0.9.x:
   thread on one P-core, effort 0 leads ISPC fast in PSNR, SSIM, Zstd size and time at 4x4 / 6x6 / 8x8
   (0.63 / 0.01 / 0.18 dB ahead at 0.86× / 0.98× / 0.97× its time); effort 2 is 0.96 / 0.31 / 0.44 dB ahead
   at about 2.5× its time (BENCHMARKS.md). astcenc was not available to grade.
-  - [ ] RDO for ASTC (blocks are not 4x4, so the RDO pass does not apply and λ > 0 is refused), a GPU
-    kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
+  - [x] RDO for ASTC: its own pass over the surface (blocks are not 4x4) with whole-block copies, earlier
+    heads re-weighted and earlier weights refitted. On Kodak at λ 1, Zstd size falls 39% / 20% / 13% at
+    4x4 / 6x6 / 8x8, costing 2.9 and 0.21 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.03 dB higher;
+    BENCHMARKS.md).
+  - [ ] A GPU kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
   eighth of its time and effort 1 0.94 dB ahead in half; with RDO, files are about 25% smaller at

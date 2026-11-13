@@ -37,7 +37,7 @@ pub struct EncodeOptions {
     /// An alpha-test cutoff (0-1) whose coverage every mip keeps (cutouts drawn with alpha test or
     /// alpha to coverage); `None` averages alpha plainly.
     pub alpha_cutoff: Option<f32>,
-    /// RDO settings (`lambda == 0` disables RDO). BC6H and ASTC have no RDO yet and ignore λ.
+    /// RDO settings (`lambda == 0` disables RDO). BC6H has no RDO yet and ignores λ.
     pub rdo: RdoParams,
     /// Where base encoding runs: [`GpuMode::Auto`] (default) uses the GPU where its encoder is the
     /// faster one ([`crate::gpu::Gpu::preferred`]). Formats without a GPU encoder, builds without
@@ -193,7 +193,7 @@ pub fn base_block_opts(format: Format, bo: BlockOpts, rdo: bool) -> BlockOpts {
 ///
 /// # Panics
 ///
-/// When `rdo` is set for ASTC, which has no RDO.
+/// When `rdo` is set for ASTC, whose RDO pass starts from its plain encode.
 pub fn rdo_bases(
     surface: &Surface,
     src: &[Block],
@@ -201,7 +201,10 @@ pub fn rdo_bases(
     bo: BlockOpts,
     rdo: bool,
 ) -> (Vec<[u8; 16]>, Vec<Vec<[u8; 16]>>) {
-    assert!(!(rdo && format.is_astc()), "{format} has no RDO");
+    assert!(
+        !(rdo && format.is_astc()),
+        "{format}'s RDO starts from its plain encode"
+    );
     let bo = base_block_opts(format, bo, rdo);
     // BC7 RDO: the plain search at RDO_BASE_EFFORT or more, as the base or (entropy-reduced
     // base) the second base. Its cost is small next to RDO's, and RDO keeps much of the
@@ -356,9 +359,8 @@ pub fn prepare<'a>(surface: &'a Surface, opts: &EncodeOptions) -> Vec<Cow<'a, Su
 fn rdo_params(opts: &EncodeOptions) -> RdoParams {
     RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
-        // The 8-bit RDO does not apply to BC6H, and works on 4x4 blocks, which ASTC's are not
-        // (an ASTC RDO pass is on the roadmap).
-        lambda: if opts.format == Format::Bc6h || opts.format.is_astc() {
+        // The 8-bit RDO does not apply to BC6H.
+        lambda: if opts.format == Format::Bc6h {
             0.0
         } else {
             opts.rdo.lambda
@@ -445,6 +447,22 @@ fn encode_with(
                     ..Default::default()
                 },
             );
+            levels.push(Level {
+                width: level.width,
+                height: level.height,
+                data,
+            });
+            continue;
+        }
+        if opts.format.is_astc() {
+            // ASTC's footprints are not 4x4 source blocks: its RDO pass reads the surface itself.
+            let bo = opts.block_opts();
+            let mut data = encode_surface_raw(level, opts.format, bo);
+            let t1 = Instant::now();
+            let stats = crate::astc::encode::rdo::optimize(opts.format, level, bo.srgb, &mut data, &rdo_params);
+            report.base_secs += (t1 - t0).as_secs_f64();
+            report.rdo_secs += t1.elapsed().as_secs_f64();
+            report.rdo = RdoStats::merge(report.rdo, stats);
             levels.push(Level {
                 width: level.width,
                 height: level.height,

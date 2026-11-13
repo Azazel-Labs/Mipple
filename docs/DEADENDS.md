@@ -120,6 +120,13 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   code: one candidate encoded instead of two, which a better candidate ranking (decimation error
   weighted 1.5×) made affordable, and the dual-plane layouts gated by how far the texels sit from
   one line. Going well past ISPC's speed likely needs work across blocks in SIMD, as for BC6H.
+- **A second polish pass on ASTC RDO candidates.** Polishing a re-weighted or refitted candidate's
+  re-chosen half twice instead of once is even on Kodak 24 (BD-rate within 0.25% at every footprint)
+  for up to 7% more RDO time; not polishing at all costs 0.5-1.4%. One pass stays.
+- **Looking further back than 256 blocks for ASTC re-weights and refits.** 512 instead of 256 is
+  another 0.3% / 0.5% / 0.7% smaller at equal PSNR at 4x4 / 6x6 / 8x8 for 1.8× the RDO time (one thread,
+  one P-core, with the error lower bounds on). 256 against 32 was worth 4.8-6.6% for 2.4×, so the curve
+  has flattened; 256 also matches the whole-copy window.
 
 ## ETC2 / EAC
 

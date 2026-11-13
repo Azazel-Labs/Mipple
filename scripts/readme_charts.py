@@ -47,6 +47,7 @@ STYLE = """
   .s0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; }
   .s1 { stroke: #eb6834; } .f1 { fill: #eb6834; }
   .s2 { stroke: #1baf7a; } .f2 { fill: #1baf7a; }
+  .s3 { stroke: #8a5cd6; } .f3 { fill: #8a5cd6; }
   .good { fill: #006300; } .wh { stroke: #52514e; }
   @media (prefers-color-scheme: dark) {
     .bg { fill: #1a1a19; } .ink { fill: #f0efec; } .ink2 { fill: #c3c2b7; }
@@ -54,6 +55,7 @@ STYLE = """
     .s0 { stroke: #3987e5; } .f0 { fill: #3987e5; }
     .s1 { stroke: #d95926; } .f1 { fill: #d95926; }
     .s2 { stroke: #199e70; } .f2 { fill: #199e70; }
+    .s3 { stroke: #9d78ea; } .f3 { fill: #9d78ea; }
     .good { fill: #0ca30c; } .wh { stroke: #c3c2b7; }
   }
   text { font-family: FONT; }
@@ -253,7 +255,61 @@ def load_oodle(path):
     return out
 
 
-def bits_rows(comps, oodle):
+def load_formats(path):
+    """The BC3, BC6H, ETC2 and ASTC tables of docs/BENCHMARKS.md (bench-results/formats.json)."""
+    if not path.exists():
+        return {"speed": [], "rd": []}
+    import json
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def size_at(curve, q, col=2):
+    """mipple's bits/texel at quality q, interpolated in log-rate between consecutive λ points that bracket
+    it (the smallest, if PSNR is not monotonic in λ: light RDO can raise it)."""
+    sizes = []
+    for a, b in zip(curve, curve[1:]):
+        if min(a[1], b[1]) <= q <= max(a[1], b[1]) and a[1] != b[1]:
+            t = (q - a[1]) / (b[1] - a[1])
+            sizes.append(math.exp(math.log(a[col]) + t * (math.log(b[col]) - math.log(a[col]))))
+    return min(sizes, default=None)
+
+
+# Competitors of the formats.json rows, after bc7enc_rdo (slot 1) and Oodle (slot 2).
+OTHER_SLOT = {"bc7enc_rdo": 1, "Compressonator": 3, "ISPC fast": 3}
+
+
+def extra_bits(fdata):
+    """% fewer bits than the competitor for formats.json's RD rows: BD-rate against a curve, or the size
+    at a single competitor point's PSNR."""
+    rows = []
+    for r in fdata["rd"]:
+        m = r["mipple"]
+        dv = None
+        if r["kind"] == "curve":
+            v = -bd_rate([(p[2], p[1]) for p in r["other"]], [(p[2], p[1]) for p in m])
+            tip = f'BD-rate on {r["corpus"]} (PSNR), Zstd-19'
+        else:
+            q, b = r["other"][0][1], r["other"][0][2]
+            at = size_at(m, q)
+            if at is None:
+                continue
+            v = (1 - at / b) * 100
+            tip = f'{r["corpus"]}, at {r["who"]}’s {q:.2f} dB (interpolated between λ points), Zstd-19'
+            if all(len(p) > 3 for p in m + r["other"]):
+                dat = size_at(m, q, 3)
+                if dat is not None:
+                    dv = (1 - dat / r["other"][0][3]) * 100
+                    tip += f"; Deflate-9 {-dv:.1f}%"
+        rows.append({"fmt": r["fmt"], "who": r["who"], "k": OTHER_SLOT.get(r["who"], 1), "v": v, "dv": dv,
+                     "lo": None, "hi": None, "tip": tip})
+    return rows
+
+
+# Group order in the bits chart.
+ORDER = ["BC1", "BC3", "BC4", "BC5", "BC7", "ETC2 RGB", "ETC2 RGBA", "ASTC 4x4", "ASTC 6x6", "ASTC 8x8"]
+
+
+def bits_rows(comps, oodle, extra=()):
     """One row per competitor: % fewer bits than it at equal quality (positive = mipple smaller)."""
     rows = []
     for fmt in FORMATS:
@@ -269,12 +325,16 @@ def bits_rows(comps, oodle):
                                  "lo": min(sv), "hi": max(sv),
                                  "tip": f"Kodak ({o['n']} images), mean over Oodle λ "
                                         + ", ".join(f"{p[0]:g}" for p in o["pts"]) + f" at Oodle's {key}, both Zstd-19"})
-    return rows
+    for r in rows:
+        r["fmt"] = r["fmt"].upper()
+    rows += extra
+    rank = {f: i for i, f in enumerate(ORDER)}
+    return sorted(rows, key=lambda r: rank.get(r["fmt"], len(ORDER)))  # stable: keeps each format's row order
 
 
 def bits_chart(rows, nimg):
     W, top, rh = 960, 128, 32
-    groups = [f for f in FORMATS if any(r["fmt"] == f for r in rows)]
+    groups = list(dict.fromkeys(r["fmt"] for r in rows))
     H = top + len(rows) * rh + (len(groups) - 1) * 12 + 50
     LX, LW = 330, 470
     lo = min(0.0, min((r["lo"] if r["lo"] is not None else r["v"]) for r in rows))
@@ -285,9 +345,13 @@ def bits_chart(rows, nimg):
     body = ['<text class="ink" x="24" y="38" font-size="20" font-weight="600">Fewer bits than each competitor, at equal quality</text>',
             '<text class="ink2" x="24" y="60" font-size="13">Bars right of zero: mipple\'s files are that much smaller at the same error. '
             'Both encoders\' output compressed with Zstd-19.</text>',
-            f'<text class="ink2" x="24" y="78" font-size="13">bc7enc_rdo: BD-rate over each λ sweep, Kodak ({nimg} images, PSNR). '
-            'Oodle Texture 2.9.16: Unreal Engine 5.8 cook of the same images, mean over Oodle λ 10-40.</text>']
-    legend(24, 102, {MIPPLE: 1, "o": 2}, body, {MIPPLE: "vs bc7enc_rdo", "o": "vs Oodle Texture (whisker: range over λ)"})
+            f'<text class="ink2" x="24" y="78" font-size="13">bc7enc_rdo: BD-rate over each λ sweep (PSNR), Kodak ({nimg} images; BC3: 12 RGBA). '
+            'Oodle Texture 2.9.16: Unreal 5.8 cook, mean over λ 10-40.</text>']
+    slots = {MIPPLE: 1, "o": 2}
+    names = {MIPPLE: "vs bc7enc_rdo", "o": "vs Oodle Texture (whisker: range over λ)"}
+    if any(r["k"] == 3 for r in rows):
+        slots["c"], names["c"] = 3, "vs an encoder without RDO, at its PSNR"
+    legend(24, 102, slots, body, names)
     yb_all = top + len(rows) * rh + (len(groups) - 1) * 12
     for t in xt:
         body.append(f'<line class="grid" x1="{sx(t):.1f}" x2="{sx(t):.1f}" y1="{top - 6}" y2="{yb_all}" stroke-width="1"/>')
@@ -298,7 +362,7 @@ def bits_chart(rows, nimg):
         if prev is not None and r["fmt"] != prev:
             y += 12
         if r["fmt"] != prev:
-            body.append(f'<text class="ink" x="24" y="{y + rh / 2 + 5:.1f}" font-size="15" font-weight="600">{r["fmt"].upper()}</text>')
+            body.append(f'<text class="ink" x="24" y="{y + rh / 2 + 5:.1f}" font-size="15" font-weight="600">{esc(r["fmt"])}</text>')
         prev = r["fmt"]
         body.append(f'<text class="ink2" x="{LX - 12}" y="{y + rh / 2 + 4:.1f}" font-size="13" text-anchor="end">{esc(r["who"])}</text>')
         bh = 14
@@ -320,7 +384,7 @@ def bits_chart(rows, nimg):
         y += rh
     body.append(f'<line class="axis" x1="{sx(0):.1f}" x2="{sx(0):.1f}" y1="{top - 6}" y2="{yb_all}" stroke-width="1.5"/>')
     body.append(f'<text class="mute" x="24" y="{H - 14}" font-size="11">Generated by scripts/readme_charts.py · '
-                'Oodle rows from bench-results/oodle-ue · details in docs/BENCHMARKS.md</text>')
+                'Oodle rows from bench-results/oodle-ue, BC3, ETC2 and ASTC from bench-results/formats.json · details in docs/BENCHMARKS.md</text>')
     return svg_doc(W, H, body, "Fewer bits than each competitor at equal quality",
                    "Per format and competitor, how much smaller mipple's Zstd-19 compressed output is at equal error.")
 
@@ -409,13 +473,85 @@ def speed_chart(comps, nimg, threads):
                    "Per format, mean encode time per λ setting for mipple and bc7enc_rdo on the Kodak images.")
 
 
-def readme_block(comps, oodle, nimg, threads):
+def log_ticks(lo, hi):
+    ticks = [m * 10 ** e for e in range(math.floor(math.log10(lo)), math.ceil(math.log10(hi)) + 1) for m in (1, 2, 5)]
+    return [t for t in ticks if lo <= t <= hi]
+
+
+def formats_chart(fdata):
+    """Quality against encode time, one panel per newer format: mipple's effort levels as a line, every
+    competitor setting as a point. Up and to the left is better."""
+    panels = fdata["speed"]
+    W, cols, PW, PH, top = 960, 3, 296, 250, 100
+    H = top + math.ceil(len(panels) / cols) * (PH + 14) + 30
+    body = ['<text class="ink" x="24" y="38" font-size="20" font-weight="600">Quality vs encode time: BC6H, ETC2, ASTC</text>',
+            '<text class="ink2" x="24" y="60" font-size="13">One thread for every encoder, no RDO. Up and to the left is better. '
+            'Time is the total over each corpus, log scale.</text>']
+    legend(24, 82, {"m": 0, "o": 1}, body, {"m": "mipple, one point per effort level", "o": "other encoders"})
+    for idx, pnl in enumerate(panels):
+        ox = 16 + (idx % cols) * (PW + 14)
+        oy = top + (idx // cols) * (PH + 14)
+        L, R, T, B = ox + 44, ox + PW - 10, oy + 52, oy + PH - 30
+        pts = pnl["mipple"] + pnl["others"]
+        ts, qs = [p[2] for p in pts], [p[1] for p in pts]
+        tlo, thi = min(ts) / 1.6, max(ts) * 1.6
+        pad = (max(qs) - min(qs)) * 0.12
+        yt, ystep = nice_ticks(min(qs) - pad, max(qs) + pad, 5)
+        y0, y1 = min(yt[0], min(qs) - pad), max(yt[-1], max(qs) + pad)
+        sx = lambda v: L + (math.log(v) - math.log(tlo)) / (math.log(thi) - math.log(tlo)) * (R - L)
+        sy = lambda v: B - (v - y0) / (y1 - y0) * (B - T)
+        body.append(f'<text class="ink" x="{ox + 8}" y="{oy + 20}" font-size="15" font-weight="600">{esc(pnl["panel"])}'
+                    f'<tspan class="ink2" font-weight="400" font-size="12">  {esc(pnl["use"])}</tspan></text>')
+        for t in yt:
+            body.append(f'<line class="grid" x1="{L}" x2="{R}" y1="{sy(t):.1f}" y2="{sy(t):.1f}" stroke-width="1"/>')
+            body.append(f'<text class="mute num" x="{L - 6}" y="{sy(t) + 4:.1f}" font-size="11" text-anchor="end">{fmt_tick(t, ystep)}</text>')
+        for t in log_ticks(tlo, thi):
+            body.append(f'<text class="mute num" x="{sx(t):.1f}" y="{B + 16}" font-size="11" text-anchor="middle">{t:g}</text>')
+        body.append(f'<line class="axis" x1="{L}" x2="{R}" y1="{B}" y2="{B}" stroke-width="1"/>')
+        body.append(f'<text class="mute" x="{R}" y="{T - 10}" font-size="11" text-anchor="end">{esc(pnl["metric"])} ↑ · seconds →</text>')
+        m = sorted(pnl["mipple"], key=lambda p: p[2])
+        d = " ".join(f"{'M' if i == 0 else 'L'}{sx(p[2]):.1f},{sy(p[1]):.1f}" for i, p in enumerate(m))
+        body.append(f'<path class="s0" d="{d}" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
+        for name, q, t in pnl["others"]:
+            body.append(f'<circle class="f1 ring" cx="{sx(t):.1f}" cy="{sy(q):.1f}" r="4.5" stroke-width="2">'
+                        f'<title>{esc(name)}: {q:.3f} dB, {t:g} s</title></circle>')
+        for name, q, t in m:
+            body.append(f'<circle class="f0 ring" cx="{sx(t):.1f}" cy="{sy(q):.1f}" r="4.5" stroke-width="2">'
+                        f'<title>mipple {esc(name)}: {q:.3f} dB, {t:g} s</title></circle>')
+        # Direct labels: competitors right of their point (except the panel's "quiet" ones, which keep only
+        # their tooltip), mipple's fastest and slowest effort above theirs.
+        labs = [[sy(q) + 4, sx(t) + 8, n, "ink2"] for n, q, t in pnl["others"] if n not in pnl.get("quiet", ())]
+        labs += [[sy(m[0][1]) - 9, sx(m[0][2]) - 4, "mipple " + m[0][0], "ink"]]
+        if len(m) > 1:
+            labs += [[sy(m[-1][1]) - 9, sx(m[-1][2]) - 4, m[-1][0], "ink"]]
+        placed = []  # [y, left, right]
+        for y, x, n, cls in sorted(labs):
+            # A label that would run past the panel's right edge ends at its point instead (below it, for a competitor).
+            w, anchor = 5.6 * len(n), ""
+            if x + w > R:
+                x, y, anchor = x - (4 if cls == "ink2" else -8), y + (14 if cls == "ink2" else 0), ' text-anchor="end"'
+            lx = x - w if anchor else x
+            # Push down past any placed label it would overlap.
+            for py, pl, pr in sorted(placed):
+                if lx < pr + 4 and pl < lx + w + 4 and abs(y - py) < 13:
+                    y = py + 13
+            placed.append([y, lx, lx + w])
+            body.append(f'<text class="{cls}" x="{x:.1f}" y="{min(y, B - 4):.1f}" font-size="11"{anchor}>{esc(n)}</text>')
+    body.append(f'<text class="mute" x="24" y="{H - 14}" font-size="11">Generated by scripts/readme_charts.py from '
+                'bench-results/formats.json (the docs/BENCHMARKS.md tables, which give each command)</text>')
+    return svg_doc(W, H, body, "Quality vs encode time: BC6H, ETC2, ASTC",
+                   "Per format, quality against single-thread encode time for mipple's effort levels and each competitor setting.")
+
+
+def readme_block(comps, oodle, nimg, threads, extra=()):
     lines = ["<!-- results:start -->",
              "<!-- Generated by scripts/readme_charts.py; edit that script, not this block. -->",
              "",
              '<img src="docs/img/bits.svg" alt="Fewer bits than each competitor at equal quality, per format" width="100%">',
              "",
              '<img src="docs/img/oodle.svg" alt="Bits per texel vs Oodle Texture 2.9.16 on Kodak, per Oodle lambda" width="100%">',
+             "",
+             '<img src="docs/img/formats.svg" alt="Quality vs single-thread encode time for BC6H, ETC2 and ASTC: mipple vs ISPC, texconv and Compressonator" width="100%">',
              "",
              '<img src="docs/img/rd-curves.svg" alt="Rate-distortion curves per format: mipple vs bc7enc_rdo" width="100%">',
              "",
@@ -446,6 +582,9 @@ def readme_block(comps, oodle, nimg, threads):
                     d = sorted((p[k] / p[1] - 1) * 100 for p in o["pts"])
                     lines.append(f"| {fmt.upper()} | {OODLE_NAME} (Unreal 5.8), equal {key} | {f(d[0])} to {f(d[-1])} "
                                  f"({lam}) | n/a | n/a | n/a |")
+    for r in extra:
+        dv = r.get("dv")
+        lines.append(f'| {r["fmt"]} | {r["who"]} | {f(-r["v"])} | {f(None if dv is None else -dv)} | n/a | n/a |')
     lines += ["", "Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads "
               "`bench-results/compete-kodak24-rdo/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites "
               "this block and `docs/img/*.svg`).",
@@ -457,18 +596,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rows", type=Path, default=ROOT / "bench-results/compete-kodak24-rdo/rows.csv")
     ap.add_argument("--oodle", type=Path, default=ROOT / "bench-results/oodle-ue/results.json")
+    ap.add_argument("--formats", type=Path, default=ROOT / "bench-results/formats.json")
     ap.add_argument("--readme", type=Path, default=ROOT / "README.md")
     ap.add_argument("--img", type=Path, default=ROOT / "docs/img")
     a = ap.parse_args()
     data, nimg, threads = load(a.rows)
     comps = comparisons(data)
     oodle = load_oodle(a.oodle)
+    fdata = load_formats(a.formats)
+    extra = extra_bits(fdata)
     a.img.mkdir(parents=True, exist_ok=True)
     out = {"rd-curves.svg": rd_curves(data, comps, nimg, threads),
-           "bits.svg": bits_chart(bits_rows(comps, oodle), nimg),
+           "bits.svg": bits_chart(bits_rows(comps, oodle, extra), nimg),
            "speed.svg": speed_chart(comps, nimg, threads)}
     if oodle:
         out["oodle.svg"] = oodle_chart(oodle)
+    if fdata["speed"]:
+        out["formats.svg"] = formats_chart(fdata)
     for name, svg in out.items():
         (a.img / name).write_text(svg, encoding="utf-8", newline="\n")
     text = a.readme.read_text(encoding="utf-8")
@@ -476,8 +620,8 @@ def main():
     if s < 0 or e < 0:
         sys.exit(f"{a.readme}: add <!-- results:start --> and <!-- results:end --> markers where the block goes")
     e += len("<!-- results:end -->")
-    a.readme.write_text(text[:s] + readme_block(comps, oodle, nimg, threads) + text[e:], encoding="utf-8", newline="\n")
-    for r in bits_rows(comps, oodle):
+    a.readme.write_text(text[:s] + readme_block(comps, oodle, nimg, threads, extra) + text[e:], encoding="utf-8", newline="\n")
+    for r in bits_rows(comps, oodle, extra):
         rng = f'  ({r["lo"]:+.1f} to {r["hi"]:+.1f})' if r["lo"] is not None else ""
         print(f'{r["fmt"]} vs {r["who"]}: {r["v"]:.1f}% fewer bits{rng}')
 

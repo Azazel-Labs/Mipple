@@ -44,7 +44,7 @@ fn higher_effort_is_not_worse() {
 #[test]
 fn rdo_trades_quality_for_size() {
     for (name, img) in corpus(128) {
-        // ASTC has no RDO (and its blocks are not 4x4).
+        // ASTC's blocks are not 4x4: its pass has its own tests.
         for format in Format::ALL.into_iter().filter(|f| !f.is_astc()) {
             let w = format.error_weights();
             let (src, base) = encode_base(&img, format, 1);

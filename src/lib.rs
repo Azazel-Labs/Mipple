@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Covers BC1, BC3, BC4, BC5, BC6H and BC7 (every mode encoded and decoded), ETC2 RGB/RGBA8,
-//! EAC R11/RG11 and ASTC LDR 4x4/6x6/8x8 (no RDO yet) for mobile,
+//! EAC R11/RG11 and ASTC LDR 4x4/6x6/8x8 for mobile,
 //! a byte-level LZ rate model shared by every format, and a KTX2 writer/reader.
 
 pub mod alpha;

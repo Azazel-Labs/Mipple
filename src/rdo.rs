@@ -142,7 +142,6 @@ impl RdoParams {
     /// it searches 128 deep plus the localized search's picks instead.
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
-            // ASTC has no RDO yet; this only sizes its Zstd window.
             Format::Bc6h | Format::Bc7 | Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 16 * 1024,
             Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba => 8 * 1024,
             Format::Bc5 | Format::EacRg11 => 3072,
@@ -550,7 +549,7 @@ impl LzModel {
 /// The bits above which a candidate with distortion `dist` cannot beat `best` at `lambda` (with
 /// slack for the f32/f64 rounding, so it never cuts a winner short).
 #[inline]
-fn bit_budget(best: f64, dist: f64, lambda: f64) -> f32 {
+pub(crate) fn bit_budget(best: f64, dist: f64, lambda: f64) -> f32 {
     ((best - dist) / lambda * (1.0 + 1e-6) + 1e-3) as f32
 }
 
@@ -2369,7 +2368,7 @@ const VERIFY_SKIP7: f64 = 0.6;
 /// requested level. On Kodak-24 (λ 0.25 to 3) the level-19 ratio exceeded the level-1 ratio by at
 /// most 0.065, so such a chunk is still at most 0.97 of the base's size. A level-19 compression costs
 /// about 100 level-1 compressions; this skips most of the check's 3% of BC7 RDO CPU at λ 1.
-const VERIFY_QUICK: f64 = 0.9;
+pub(crate) const VERIFY_QUICK: f64 = 0.9;
 
 /// Localized search: blocks the shape signatures pass to the ranker.
 const LOCAL_M: usize = 128;
@@ -2504,8 +2503,8 @@ pub fn optimize(format: Format, src: &[Block], blocks: &mut [[u8; 16]], w: &[u32
 ///
 /// # Panics
 ///
-/// For ASTC, whose blocks are not the 4x4 source blocks this pass scores against (ASTC RDO is on
-/// the roadmap).
+/// For ASTC, whose blocks are not the 4x4 source blocks this pass scores against
+/// ([`crate::astc::encode::rdo::optimize`] is its pass).
 pub fn optimize_with_alt(
     format: Format,
     src: &[Block],
@@ -2514,7 +2513,7 @@ pub fn optimize_with_alt(
     w: &[u32; 4],
     p: &RdoParams,
 ) -> RdoStats {
-    assert!(!format.is_astc(), "RDO works on 4x4 blocks; {format} has no RDO yet");
+    assert!(!format.is_astc(), "RDO works on 4x4 blocks; {format} has its own pass");
     assert_eq!(src.len(), blocks.len());
     if !p.enabled() || blocks.is_empty() {
         return RdoStats {

@@ -2,8 +2,8 @@
 """ASTC LDR benchmark: mipple vs Intel ISPC Texture Compressor (fast profile) at 4x4, 6x6 and 8x8.
 
 Both encoders write a `.astc` file; `mipple score --astc-linear` grades both the same way: RGB PSNR, luma
-SSIM and Zstd-19 size. ISPC encodes for linear decoding, so mipple runs with `--linear` too (an sRGB
-encode would be graded against a different decoder).
+SSIM, and Zstd-19 and Deflate-9 size. ISPC encodes for linear decoding, so mipple runs with `--linear` too
+(an sRGB encode would be graded against a different decoder).
 
 Encoders (each skipped if not found):
   --mipple     target/release/mipple (efforts from --efforts)
@@ -71,10 +71,10 @@ def main():
 
     def score(src, enc):
         r = run([str(a.mipple), "score", str(src), str(enc), "--csv", "--astc-linear"], env).strip().split(",")
-        return float(r[5]), float(r[6]), int(r[9]), int(r[3]) * int(r[4])
+        return float(r[5]), float(r[6]), int(r[9]), int(r[10]), int(r[3]) * int(r[4])
 
-    print("| footprint / encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |")
-    print("| --- | ---: | ---: | ---: | ---: |")
+    print("| footprint / encoder | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: |")
     for fp in a.footprints.split(","):
         # (name, command for (source, output), seconds from its stdout)
         encoders = []
@@ -88,7 +88,7 @@ def main():
                                  lambda s, d, fp=fp, e=e: [str(a.mipple), "encode", str(s), "-o", str(d), "-f",
                                                            f"astc-{fp}", "-e", e, "--no-mips", "--linear"],
                                  lambda out: float(re.search(r"time: base ([0-9.]+)s", out).group(1))))
-        totals = {name: [0.0] * 5 for name, _, _ in encoders}  # secs, psnr, ssim, zstd bytes, texels
+        totals = {name: [0.0] * 6 for name, _, _ in encoders}  # secs, psnr, ssim, zstd, deflate bytes, texels
         for img in imgs:
             for name, encode, secs_of in encoders:
                 enc = work / f"{img.stem}_{name.replace(' ', '_')}.astc"
@@ -97,9 +97,10 @@ def main():
                 for i, v in enumerate(score(img, enc), 1):
                     tot[i] += v
         for name, _, _ in encoders:
-            secs, psnr, ssim, zst, tex = totals[name]
+            secs, psnr, ssim, zst, dfl, tex = totals[name]
             k = len(imgs)
-            print(f"| {name} | {psnr / k:.3f} | {ssim / k:.5f} | {zst * 8 / tex:.3f} | {secs:.2f} |", flush=True)
+            print(f"| {name} | {psnr / k:.3f} | {ssim / k:.5f} | {zst * 8 / tex:.3f} | {dfl * 8 / tex:.3f} | {secs:.2f} |",
+                  flush=True)
 
 
 if __name__ == "__main__":
