@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""ASTC LDR benchmark: mipple vs Intel ISPC Texture Compressor (fast profile) at 4x4, 6x6 and 8x8.
+"""ASTC LDR benchmark: mipple vs Arm's astcenc and Intel ISPC Texture Compressor at 4x4, 6x6 and 8x8.
 
-Both encoders write a `.astc` file; `mipple score --astc-linear` grades both the same way: RGB PSNR, luma
-SSIM, and Zstd-19 and Deflate-9 size. ISPC encodes for linear decoding, so mipple runs with `--linear` too
-(an sRGB encode would be graded against a different decoder).
+Every encoder writes a `.astc` file; `mipple score --astc-linear` grades them all the same way: RGB PSNR,
+luma SSIM, and Zstd-19 and Deflate-9 size. ISPC encodes for linear decoding and astcenc runs with `-cl`, so
+mipple runs with `--linear` too (an sRGB encode would be graded against a different decoder).
 
 Encoders (each skipped if not found):
   --mipple     target/release/mipple (efforts from --efforts)
   --harness    tools/competitors bcn_harness built with ISPC (`ispc_astc:<W>x<H>`, fast profile)
+  --astcenc    Arm's prebuilt astcenc release (third_party/dl/astcenc, the AVX2 build; presets from
+               --astcenc-presets, `-j` set to --threads)
 
-Not on disk, so not graded: astcenc (building from GitHub is not available here).
-
-Time: mipple's own base-encode time and the harness's block loop, best of --runs per image, summed over
+Time: mipple's own base-encode time, the harness's block loop and astcenc's "Coding time" (which excludes
+loading and writing), best of --runs per image, summed over
 the images. Both run on one thread unless --threads says otherwise. The encoders take turns per image,
 so drift in clock speed lands on both. On a hybrid CPU, pin to one performance core with --cpu (on a
 Core Ultra 7 155H, logical CPUs 0, 1 and 10-19 are P-cores; 2-9 are E-cores, which run ISPC about 1.8x
@@ -44,6 +45,9 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "bench-results" / "astc")
     ap.add_argument("--mipple", type=Path, default=ROOT / "target" / "release" / "mipple.exe")
     ap.add_argument("--harness", type=Path, default=ROOT / "third_party" / "build-harness" / "Release" / "bcn_harness.exe")
+    ap.add_argument("--astcenc", type=Path,
+                    default=ROOT / "third_party" / "dl" / "astcenc" / "x64" / "bin" / "astcenc-avx2.exe")
+    ap.add_argument("--astcenc-presets", default="fast,medium,thorough")
     ap.add_argument("--footprints", default="4x4,6x6,8x8")
     ap.add_argument("--efforts", default="0,2")
     ap.add_argument("--runs", type=int, default=3, help="best of N timings per image")
@@ -82,6 +86,12 @@ def main():
             encoders.append((f"{fp} ISPC fast",
                              lambda s, d, fp=fp: [str(a.harness), f"ispc_astc:{fp}", str(s), str(d), str(a.threads)],
                              lambda out: float(re.search(r"secs=([0-9.]+)", out).group(1))))
+        if a.astcenc.exists():
+            for pr in a.astcenc_presets.split(","):
+                encoders.append((f"{fp} astcenc {pr}",
+                                 lambda s, d, fp=fp, pr=pr: [str(a.astcenc), "-cl", str(s), str(d), fp, f"-{pr}",
+                                                             "-j", str(a.threads)],
+                                 lambda out: float(re.search(r"Coding time:\s+([0-9.]+)", out).group(1))))
         if a.mipple.exists():
             for e in a.efforts.split(","):
                 encoders.append((f"{fp} mipple effort {e}",

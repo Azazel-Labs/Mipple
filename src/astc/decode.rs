@@ -226,6 +226,40 @@ mod tests {
         assert!(out.iter().all(|&p| p == out[0]));
     }
 
+    /// A two-partition block from astcenc 5.7.1 (`-thorough`, kodim01 at 4x4) that spells equal CEMs
+    /// with a class selector, so its mode takes two bits below the weights. `want` is astcenc's own
+    /// decode, which keeps the top byte of the 16-bit result (the decode_unorm8 rule) where this
+    /// decoder rounds it, so channels may differ by one.
+    #[test]
+    fn long_form_equal_cems_decode() {
+        let raw: [u8; 16] = [
+            0x51, 0xe8, 0x84, 0x29, 0xd3, 0x97, 0xfa, 0xb5, 0x0b, 0xdc, 0xfe, 0x74, 0x90, 0xc1, 0x74, 0x7f,
+        ];
+        let want: [Rgba; 16] = [
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [99, 99, 98, 255],
+            [97, 96, 94, 255],
+            [95, 94, 90, 255],
+            [95, 94, 90, 255],
+            [95, 94, 90, 255],
+            [80, 74, 68, 255],
+            [60, 55, 47, 255],
+            [70, 64, 57, 255],
+            [70, 64, 57, 255],
+        ];
+        let mut out = [[0u8; 4]; 16];
+        decode_block(&raw, 4, 4, false, &mut out);
+        for (o, w) in out.iter().zip(&want) {
+            assert!((0..4).all(|c| o[c].abs_diff(w[c]) <= 1), "{out:?}");
+        }
+    }
+
     #[test]
     fn reserved_blocks_decode_to_the_error_color() {
         let mut out = [[0u8; 4]; 16];

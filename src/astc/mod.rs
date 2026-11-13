@@ -659,6 +659,13 @@ fn extra_cem_bits(partitions: u8, cems: &[u8]) -> usize {
 /// The endpoint range a block with this mode, partition count and CEMs uses: the largest that
 /// fits the bits left, or `None` if the block is invalid.
 pub fn color_range(mode: BlockMode, partitions: u8, cems: &[u8]) -> Option<u8> {
+    color_range_with(mode, partitions, cems, extra_cem_bits(partitions, &cems[..partitions as usize]))
+}
+
+/// [`color_range`] for a block whose mode field takes `extra` bits below the weights. A block may
+/// spell equal CEMs the long way (a nonzero class selector), as astcenc does, and still pay for the
+/// extra bits.
+fn color_range_with(mode: BlockMode, partitions: u8, cems: &[u8], extra: usize) -> Option<u8> {
     if partitions == 4 && mode.dual {
         return None;
     }
@@ -667,8 +674,7 @@ pub fn color_range(mode: BlockMode, partitions: u8, cems: &[u8]) -> Option<u8> {
         return None;
     }
     let config = if partitions == 1 { 17 } else { 29 };
-    let used =
-        config + mode.weight_bits() + extra_cem_bits(partitions, &cems[..partitions as usize]) + 2 * mode.dual as usize;
+    let used = config + mode.weight_bits() + extra + 2 * mode.dual as usize;
     let avail = 128usize.checked_sub(used)?;
     (MIN_COLOR_RANGE..21)
         .rev()
@@ -687,6 +693,7 @@ impl Symbolic {
         let weight_bits = mode.weight_bits();
         let mut below = 128 - weight_bits;
         let mut cems = [0u8; 4];
+        let mut extra = 0;
         let seed;
         if partitions == 1 {
             seed = 0;
@@ -697,7 +704,7 @@ impl Symbolic {
             if ty & 3 == 0 {
                 cems = [(ty >> 2) as u8 & 15; 4];
             } else {
-                let extra = 3 * partitions as usize - 4;
+                extra = 3 * partitions as usize - 4;
                 below -= extra;
                 ty |= (((v >> below) & ((1u128 << extra) - 1)) as u32) << 6;
                 let base = (ty & 3) - 1;
@@ -709,7 +716,7 @@ impl Symbolic {
                 }
             }
         }
-        let color_quant = color_range(mode, partitions, &cems)?;
+        let color_quant = color_range_with(mode, partitions, &cems, extra)?;
         let ccs = if mode.dual { ((v >> (below - 2)) & 3) as u8 } else { 0 };
         let mut colors = [0u8; 18];
         let n: usize = cems[..partitions as usize].iter().map(|&c| cem_values(c)).sum();
