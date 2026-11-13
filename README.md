@@ -157,7 +157,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
   is CPU only for now).
 - A BC6H encoder (unsigned half floats, all 14 modes) that reads Radiance `.hdr` and is scored with mPSNR
   and log2 RMSE in linear light; `scripts/compete_bc6h.py` grades it against ISPC, texconv and
-  Compressonator. No RDO or GPU kernel for it yet.
+  Compressonator. `--lambda` runs an RDO pass for it with a log-space distortion (about 42% smaller Zstd
+  files at λ 2). No GPU kernel for it yet.
 - ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGBA8, and EAC R11 / RG11 (unsigned)
   encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against
   Compressonator. CPU only.

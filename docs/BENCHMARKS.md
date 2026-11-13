@@ -560,7 +560,30 @@ effort that is both better and faster:
   its time.
 - Effort 5 is 0.17 dB ahead of every competitor setting, in 2.1 s.
 
-Zstd sizes are within 0.5% of each other for every encoder at matching quality (BC6H has no RDO yet).
+Without RDO, Zstd sizes are within 0.5% of each other for every encoder at matching quality.
+
+### BC6H RDO
+
+`--lambda` runs an RDO pass over the effort-5 blocks. Distortion is the squared error of the half-float bit
+patterns, which is close to relative (log) error, so a λ means the same at every exposure. Each block tries
+whole-block copies from the last 256 blocks, the endpoints of the last 256 blocks with its own indices
+re-chosen, and the indices of the last 32 blocks with least-squares endpoints refit to them. It scores each
+candidate with the same LZ rate model as the 8-bit formats. Same twenty images, totals of the Zstd-19 KTX2
+files (no mips), `--zstd 19` so the pass checks its chunks against Zstd:
+
+| λ | file bytes | vs λ 0 | mPSNR dB | log2 RMSE |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 9,693,737 | | 47.022 | 0.03830 |
+| 1 | 6,209,485 | -35.9% | 45.782 | 0.04260 |
+| 2 | 5,570,380 | -42.5% | 44.980 | 0.04646 |
+| 4 | 4,870,733 | -49.8% | 43.854 | 0.05284 |
+| 8 | 4,149,481 | -57.2% | 42.382 | 0.06290 |
+| 16 | 3,455,613 | -64.4% | 40.570 | 0.07824 |
+
+At λ 2 the files are 42% smaller than plain effort 5, at the quality of effort 0 or ISPC veryfast. None of the
+other BC6H encoders here has an RDO mode. Refitting endpoints to borrowed indices is worth 3.2% BD-rate
+against re-indexing alone. Looking back 32 blocks for refits instead of 256 costs 0.3% BD-rate for about half
+the RDO time.
 
 ## ETC2 and EAC vs Compressonator
 
@@ -629,12 +652,12 @@ R11 from the red channel and RG11 from red and green, PSNR over those channels:
 | mipple effort 5 | 45.106 | 3.698 | 13.2 | 45.066 | 7.138 | 25.1 |
 | mipple effort 9 | 45.208 | 3.701 | 23.2 | 45.167 | 7.157 | 47.2 |
 
-## ASTC vs ISPC
+## ASTC vs ISPC and astcenc
 
 ASTC LDR on all 24 Kodak images, one thread for both encoders, top level only, `python scripts/compete_astc.py
 test-images/kodak --runs 3 --efforts 0,2 --cpu 16`. Intel's ISPC Texture Compressor (`ispc_astc:<W>x<H>` in
-`bcn_harness`, its fast profile, the only ASTC profile it has for opaque images) is the only ASTC encoder on
-disk: astcenc could not be built here, so it is not graded. Both encode for linear decoding and are scored by
+`bcn_harness`, its fast profile, the only ASTC profile it has for opaque images); Arm's astcenc is in the next
+section. Both encode for linear decoding and are scored by
 `mipple score --astc-linear`: PSNR over RGB, luma SSIM, bits/texel after Zstd-19, and time as the sum over the
 images of each image's best of three runs (mipple's encode loop, the harness's block loop). The script pins
 everything to one P-core of the Core Ultra 7 155H (logical CPU 16) and runs the encoders in turn on each
@@ -659,6 +682,47 @@ time at 6x6 (ISPC's 6x6 time moved between 1.09 and 1.26 s across pinned runs, a
 it). At 25-63 texels (6x6 among them), effort 0 encodes two candidates with two polish passes instead of one
 with three; at 4x4 and 8x8 the one candidate is already well ahead. Effort 2 leads further in quality (0.96 /
 0.31 / 0.44 dB) at 2.3-2.4× ISPC's time.
+
+### vs astcenc
+
+Arm's astcenc 5.7.1 (the prebuilt AVX2 release, `-cl`, `-j 1`, presets fast / medium / thorough) on the same
+24 images, `python scripts/compete_astc.py test-images/kodak --runs 1 --efforts 0,2,5`. Its time is its own
+"Coding time" line, which leaves out loading and writing. This run was not pinned and the laptop was on
+battery, so times compare only within this table (mipple effort 0 took about twice its pinned time above):
+
+| footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 4x4 | astcenc fast | 44.580 | 0.99722 | 7.216 | 3.63 |
+| 4x4 | astcenc medium | 45.223 | 0.99750 | 7.363 | 15.78 |
+| 4x4 | astcenc thorough | 45.472 | 0.99759 | 7.453 | 43.13 |
+| 4x4 | mipple effort 0 | 44.414 | 0.99741 | 6.926 | 2.43 |
+| 4x4 | mipple effort 2 | 44.744 | 0.99753 | 7.148 | 6.92 |
+| 4x4 | mipple effort 5 | 44.956 | 0.99745 | 7.185 | 28.69 |
+| 6x6 | astcenc fast | 37.657 | 0.98337 | 3.205 | 2.49 |
+| 6x6 | astcenc medium | 38.218 | 0.98561 | 3.298 | 9.16 |
+| 6x6 | astcenc thorough | 38.451 | 0.98664 | 3.384 | 41.36 |
+| 6x6 | mipple effort 0 | 37.649 | 0.98392 | 3.277 | 2.02 |
+| 6x6 | mipple effort 2 | 37.876 | 0.98463 | 3.287 | 5.01 |
+| 6x6 | mipple effort 5 | 38.010 | 0.98481 | 3.292 | 16.96 |
+| 8x8 | astcenc fast | 33.682 | 0.95448 | 1.742 | 5.63 |
+| 8x8 | astcenc medium | 34.404 | 0.96329 | 1.843 | 17.53 |
+| 8x8 | astcenc thorough | 34.635 | 0.96589 | 1.917 | 75.80 |
+| 8x8 | mipple effort 0 | 33.833 | 0.95966 | 1.859 | 2.59 |
+| 8x8 | mipple effort 2 | 34.086 | 0.96129 | 1.873 | 6.66 |
+| 8x8 | mipple effort 5 | 34.217 | 0.96202 | 1.875 | 20.58 |
+
+astcenc leads at the top. Medium is 0.48 / 0.34 / 0.32 dB ahead of effort 2 in PSNR at 4x4 / 6x6 / 8x8, in 2.3×
+/ 1.8× / 2.6× its time, and ahead of effort 5 (0.27 / 0.21 / 0.19 dB) in less time. At 4x4 effort 2 keeps
+SSIM (0.99753 vs 0.99750) and 3% smaller files. Against fast, effort 0 is faster at every footprint and leads
+in SSIM; at 4x4 it is 0.17 dB behind in PSNR with files 4% smaller, at 6x6 level in PSNR with files 2% larger,
+and at 8x8 0.15 dB ahead with files 6% larger. astcenc uses formats mipple's encoder does not yet emit:
+base+offset RGB (CEM 9), base+scale RGB (CEM 6), and different CEMs per partition. On kodim01 at 4x4 medium,
+14% of its blocks are one-partition CEM 9 and 5% one-partition CEM 6; mipple uses direct RGB (CEM 8) or RGBA
+(CEM 12) only.
+
+Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
+way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
+endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.
 
 RDO at effort 0 on the same images, one thread pinned to the same P-core, `mipple bench test-images/kodak -f
 astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4 -e 0` with `RAYON_NUM_THREADS=1`. Each cell is PSNR dB / SSIM /

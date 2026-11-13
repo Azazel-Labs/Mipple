@@ -37,7 +37,7 @@ pub struct EncodeOptions {
     /// An alpha-test cutoff (0-1) whose coverage every mip keeps (cutouts drawn with alpha test or
     /// alpha to coverage); `None` averages alpha plainly.
     pub alpha_cutoff: Option<f32>,
-    /// RDO settings (`lambda == 0` disables RDO). BC6H has no RDO yet and ignores λ.
+    /// RDO settings (`lambda == 0` disables RDO). BC6H RDO runs in [`encode_hdr`].
     pub rdo: RdoParams,
     /// Where base encoding runs: [`GpuMode::Auto`] (default) uses the GPU where its encoder is the
     /// faster one ([`crate::gpu::Gpu::preferred`]). Formats without a GPU encoder, builds without
@@ -359,7 +359,7 @@ pub fn prepare<'a>(surface: &'a Surface, opts: &EncodeOptions) -> Vec<Cow<'a, Su
 fn rdo_params(opts: &EncodeOptions) -> RdoParams {
     RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
-        // The 8-bit RDO does not apply to BC6H.
+        // The 8-bit RDO does not apply to BC6H, whose own pass runs in `encode_hdr`.
         lambda: if opts.format == Format::Bc6h {
             0.0
         } else {
@@ -520,8 +520,8 @@ fn encode_with(
 }
 
 /// Encodes an HDR image to BC6H (unsigned half floats), with a box-filtered mip chain when
-/// `opts.mips`. Uses `opts.effort` and `opts.mips`; `opts.format` must be [`Format::Bc6h`] (RDO
-/// for BC6H is not implemented yet).
+/// `opts.mips`, then RDO when `opts.rdo` enables it ([`crate::bc6h::rdo`]). Uses `opts.effort`,
+/// `opts.mips` and `opts.rdo`; `opts.format` must be [`Format::Bc6h`].
 pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
     assert_eq!(opts.format, Format::Bc6h, "encode_hdr encodes BC6H");
     let chain = if opts.mips {
@@ -538,13 +538,18 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
             data: crate::bc6h::encode_surface(l, opts.effort),
         })
         .collect();
-    let blocks = levels.iter().map(|l| l.data.len() / 16).sum();
+    let base_secs = t0.elapsed().as_secs_f64();
+    let t1 = Instant::now();
+    let mut levels = levels;
+    let rdo = chain
+        .iter()
+        .zip(levels.iter_mut())
+        .map(|(l, lv)| crate::bc6h::rdo::optimize(l, &mut lv.data, &opts.rdo))
+        .fold(RdoStats::default(), RdoStats::merge);
     let report = EncodeReport {
-        base_secs: t0.elapsed().as_secs_f64(),
-        rdo: RdoStats {
-            blocks,
-            ..Default::default()
-        },
+        base_secs,
+        rdo_secs: if opts.rdo.enabled() { t1.elapsed().as_secs_f64() } else { 0.0 },
+        rdo,
         ..Default::default()
     };
     let tex = EncodedTexture {

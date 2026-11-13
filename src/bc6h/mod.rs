@@ -13,6 +13,7 @@
 use crate::bc7::{anchors, subset_of};
 
 mod batch;
+pub mod rdo;
 
 /// Half-float bits (R, G, B) of one texel.
 pub type Half3 = [u16; 3];

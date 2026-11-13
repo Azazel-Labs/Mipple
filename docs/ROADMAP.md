@@ -8,7 +8,7 @@ milestone in progress; every green push to main is released as the next patch (`
 
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
    more footprints, a faster RDO pass.
-2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
+2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
    signed EAC, a SIMD batch encoder.
 
@@ -140,12 +140,17 @@ Open for v0.9.x:
     the f32 rows, one FMA per palette entry, and a per-mode packer. Pinned to one P-core, effort 0 is
     0.09 dB ahead of ISPC veryfast and 6% faster, effort 1 0.13 dB ahead of ISPC fast in 53% of its time,
     effort 2 ahead of ISPC basic in 35% of its time; efforts 1-9 encode the same blocks as before.
-  - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
+  - [x] RDO for BC6H: half-float bit-pattern distortion (log-like, so λ means the same across exposures);
+    whole copies, re-indexed borrowed endpoints and endpoints refit to borrowed indices. On the 20 HDRIs,
+    λ 2 makes the Zstd files 42% smaller at the quality of effort 0 (BENCHMARKS.md).
+  - [ ] Signed BC6H, GPU kernel.
 - [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
   (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo. On Kodak, one
   thread on one P-core, effort 0 leads ISPC fast in PSNR, SSIM, Zstd size and time at 4x4 / 6x6 / 8x8
   (0.63 / 0.09 / 0.18 dB ahead at 0.78× / 1.00× / 0.91× its time); effort 2 is 0.96 / 0.31 / 0.44 dB ahead
-  at about 2.4× its time (BENCHMARKS.md). astcenc was not available to grade.
+  at about 2.4× its time (BENCHMARKS.md). Arm's astcenc medium is 0.3-0.5 dB ahead of effort 2 in about 2×
+  its time: it also uses base+offset and base+scale endpoints and per-partition CEMs, which mipple's
+  encoder does not emit yet.
   - [x] RDO for ASTC: its own pass over the surface (blocks are not 4x4) with whole-block copies, earlier
     heads re-weighted and earlier weights refitted. On Kodak at λ 1, Zstd size falls 39% / 21% / 13% at
     4x4 / 6x6 / 8x8, costing 2.9 and 0.24 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.03 dB higher;

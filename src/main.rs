@@ -189,7 +189,7 @@ struct EncodeArgs {
     /// Encoder effort, 0 (fastest) to 9 (best); 5 is balanced.
     #[arg(short, long, default_value_t = mipple::format::DEFAULT_EFFORT, value_parser = clap::value_parser!(u8).range(0..=9))]
     effort: u8,
-    /// RDO lambda; 0 disables RDO. Try 0.5 – 4. (BC6H has no RDO yet.)
+    /// RDO lambda; 0 disables RDO. Try 0.5 – 4.
     #[arg(short, long, default_value_t = 0.0)]
     lambda: f32,
     /// Treat the input as linear data (default for BC4/BC5; for BC6H, 8-bit input as linear 0-1
@@ -634,20 +634,19 @@ fn score_hdr(
 
 /// `encode -f bc6h`: float input (Radiance `.hdr`; 8-bit images decoded from sRGB unless `--linear`).
 fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
-    if a.lambda > 0.0 {
-        eprintln!("note: BC6H has no RDO yet; encoding without it");
-    }
     let src = HdrSurface::load(&a.input, a.linear)?;
     let mut opts = EncodeOptions::new(Format::Bc6h);
     opts.effort = a.effort;
     opts.mips = !a.no_mips;
+    opts.rdo = a.rdo.params(a.lambda);
+    opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
     rayon::broadcast(|_| ());
     let t = Instant::now();
     let (tex, report) = pipeline::encode_hdr(&src, &opts);
     let encode_secs = t.elapsed().as_secs_f64();
     let is_dds = a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds"));
     let zstd = (a.zstd > 0).then_some(a.zstd);
-    let sc_params = format!("--format bc6h --effort {} --zstd {}", a.effort, a.zstd);
+    let sc_params = format!("--format bc6h --effort {} --lambda {} --zstd {}", a.effort, a.lambda, a.zstd);
     let bytes = if is_dds {
         dds::write(&tex)?
     } else {
@@ -682,9 +681,17 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
         stops.1,
         hdr::log_rmse(&rep, &dec)
     );
+    if opts.rdo.enabled() {
+        println!(
+            "  rdo: {} of {} blocks changed, {} chunk(s) reverted, est. {:.0} -> {:.0} bits",
+            report.rdo.changed, report.rdo.blocks, report.rdo.reverted_chunks, report.rdo.est_bits_before,
+            report.rdo.est_bits_after
+        );
+    }
     println!(
-        "  time: base {:.6}s, encode {encode_secs:.6}s, total {:.6}s (CPU)",
+        "  time: base {:.6}s, rdo {:.6}s, encode {encode_secs:.6}s, total {:.6}s (CPU)",
         report.base_secs,
+        report.rdo_secs,
         t.elapsed().as_secs_f64()
     );
     Ok(())
