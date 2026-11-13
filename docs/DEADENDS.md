@@ -95,6 +95,11 @@ CPU times come from paired runs on the same core.
   the plain gate at 512 (with the reduced one at 512) moves λ 20 / 30 at RMSE from −1.7% / −2.3% to −1.6% /
   −2.2% while SSIM gains 0.1-0.2, at 768 to −1.3% / −1.5%, and at 4096 alone λ 30 at RMSE goes to +0.2%. The
   reduced gate at 1024 or 2048 moves λ 40 at RMSE −3.2% to −3.1% for about 2% less time.
+- **The batch (effort-5 search) encoder as BC7 RDO's plain second base.** It is the encoder that builds the
+  entropy-reduced base, so it costs a fraction of the effort-8 alt, but RDO keeps much of the alt's extra
+  quality: Kodak-24 vs Oodle at RMSE λ 20 / 30 / 40 went from −1.7% / −2.3% / −3.2% to −1.1% / −0.9% / −2.1%
+  (SSIM 0.2-0.3 behind too), for no measurable time saved on 8 Kodak images (the gated effort-8 alt is already
+  only about 10% of λ 1).
 - **A deduplicated prefilter scan at low λ.** Whole blocks and index halves are only 0-10%
   repeated within the ranker's 2048-block reach at λ 1 (30-60% at λ 4+), so deduplication pays
   only at higher λ.
