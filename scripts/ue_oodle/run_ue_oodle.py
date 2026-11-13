@@ -113,7 +113,11 @@ def run_ue(proj: Path, args, logfile: Path):
             import psutil
             me = psutil.Process(r.pid)
             while r.poll() is None:
-                for c in me.children(recursive=True):
+                try:  # UE itself may exit between the poll and the listing
+                    kids = me.children(recursive=True)
+                except psutil.Error:
+                    break
+                for c in kids:
                     try:
                         t = c.cpu_times()
                         child_cpu[c.pid] = t.user + t.system

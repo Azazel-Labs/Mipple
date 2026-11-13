@@ -425,8 +425,14 @@ and layout-copy refits whose least-squares bound already exceeds the error bound
 one-field refinement of a mode-6 block no longer tries other modes' first halves over its indices (about 3% less
 at λ 1; those never won on Kodak-24 or the Poly Haven test set, and one synthetic mask moved by 0.2% in size at a 0.01 dB
 better PSNR). Chained, these paired measurements
-put mipple at or slightly under Oodle's CPU time for the same size and quality (about 0.92-1.01×; absolute timings on this
-laptop drift by about 5% between sessions, so the ratio wants a fresh side-by-side run).
+seemed to put mipple at or slightly under Oodle's CPU time for the same size and quality (about 0.92-1.01× of the 62
+CPU-seconds above), but a fresh side-by-side run at b99ffa3 does not bear that out. Oodle's share of a cook, taken as a
+texture-only cook (fresh imports, shaders already in the DDC) minus a cook with a full DDC, was about 47 CPU-seconds
+(four texture-only cooks at 90.6-101.9 against 46.6-53.6 with a full DDC) and 2-3 s of wall time. mipple at λ 1 and
+1.5, which bracket Oodle's λ 30 RMSE, used 55-64 CPU-seconds encoding the 24 images one after another with all
+threads (13-14 s wall), 76-98 encoding all 24 at once with one thread each (5.7-6.9 s wall), and 33 s on one pinned
+P-core. CPU-seconds on this hybrid, hyperthreaded CPU depend heavily on load, but on every basis mipple's BC7 RDO
+costs more than Oodle's: about 1.2-2× its CPU for smaller files at the same quality.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
 sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on

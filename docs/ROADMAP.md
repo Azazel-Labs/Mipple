@@ -89,9 +89,10 @@ Open for v0.9.x:
   shots (kodim07, kodim20) are still up to 5.5% behind there. Oodle's RDO output has about 3× more index-half
   repeats. 128 KiB chunks are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing
   (1.4-1.5× wall time).
-- [ ] **BC7 RDO clearly faster than Oodle** (paused 2026-11-11): quality is ahead in every cell, but CPU is
-  only about level (0.92-1.01× Oodle's at the same size and quality; mipple λ 1-1.5 against Oodle λ 30; history in
-  [BENCHMARKS.md](BENCHMARKS.md)). Target: about 25% less CPU at λ 1 with every table cell still ahead.
+- [ ] **BC7 RDO clearly faster than Oodle** (reopened 2026-11-13): quality is ahead in every cell, but CPU is
+  behind. A fresh side-by-side run puts Oodle's share of a UE cook at about 47 CPU-seconds for Kodak-24 at λ 30
+  and mipple's λ 1-1.5 at 55-98, depending on threading (about 1.2-2×; details in
+  [BENCHMARKS.md](BENCHMARKS.md)). Target: about half the CPU at λ 1 with every table cell still ahead.
   Where λ 1 CPU goes (busy time, kodim05): main RDO loop 76%, of which far search 18% (half of it mode-6
   re-indexing), ranker prefilter scan 15%, near candidates 11%, refinement about 10%; the two extra bases
   (`pipeline::rdo_bases`) 20%; Zstd check and KTX2 write about 7%.
