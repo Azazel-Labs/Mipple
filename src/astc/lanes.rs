@@ -1,5 +1,6 @@
-//! Eight i16 lanes for the encoder's integer error kernels: SSE2 (x86-64's baseline) there,
-//! plain arrays with the same wrapping arithmetic elsewhere.
+//! Eight i16 lanes for the encoder's integer error kernels and four f32 lanes for its separable
+//! transforms: SSE2 (x86-64's baseline) there, plain arrays with the same arithmetic elsewhere.
+//! Each f32 lane rounds exactly as the scalar code would (no fused multiply-add).
 
 // SAFETY (every `unsafe` block in `imp` for x86-64): SSE2 is part of the x86-64 baseline, and
 // the loads and stores are unaligned 16-byte accesses of 16-byte arrays.
@@ -86,6 +87,51 @@ mod imp {
             v
         }
     }
+
+    /// Four f32 lanes.
+    #[derive(Clone, Copy)]
+    pub struct F32x4(__m128);
+
+    impl F32x4 {
+        #[inline]
+        pub fn zero() -> Self {
+            Self(unsafe { _mm_setzero_ps() })
+        }
+
+        #[inline]
+        pub fn splat(v: f32) -> Self {
+            Self(unsafe { _mm_set1_ps(v) })
+        }
+
+        /// The first four values of `v`.
+        #[inline]
+        pub fn load(v: &[f32]) -> Self {
+            let v: &[f32; 4] = v[..4].try_into().unwrap();
+            Self(unsafe { _mm_loadu_ps(v.as_ptr()) })
+        }
+
+        /// Stores the lanes to the first four values of `v`.
+        #[inline]
+        pub fn store(self, v: &mut [f32]) {
+            let v: &mut [f32; 4] = (&mut v[..4]).try_into().unwrap();
+            unsafe { _mm_storeu_ps(v.as_mut_ptr(), self.0) }
+        }
+
+        #[inline]
+        pub fn add(self, o: Self) -> Self {
+            Self(unsafe { _mm_add_ps(self.0, o.0) })
+        }
+
+        #[inline]
+        pub fn sub(self, o: Self) -> Self {
+            Self(unsafe { _mm_sub_ps(self.0, o.0) })
+        }
+
+        #[inline]
+        pub fn mul(self, o: Self) -> Self {
+            Self(unsafe { _mm_mul_ps(self.0, o.0) })
+        }
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -165,6 +211,49 @@ mod imp {
             self.0
         }
     }
+
+    /// Four f32 lanes.
+    #[derive(Clone, Copy)]
+    pub struct F32x4([f32; 4]);
+
+    impl F32x4 {
+        #[inline]
+        pub fn zero() -> Self {
+            Self([0.0; 4])
+        }
+
+        #[inline]
+        pub fn splat(v: f32) -> Self {
+            Self([v; 4])
+        }
+
+        /// The first four values of `v`.
+        #[inline]
+        pub fn load(v: &[f32]) -> Self {
+            Self(v[..4].try_into().unwrap())
+        }
+
+        /// Stores the lanes to the first four values of `v`.
+        #[inline]
+        pub fn store(self, v: &mut [f32]) {
+            v[..4].copy_from_slice(&self.0);
+        }
+
+        #[inline]
+        pub fn add(self, o: Self) -> Self {
+            Self(std::array::from_fn(|l| self.0[l] + o.0[l]))
+        }
+
+        #[inline]
+        pub fn sub(self, o: Self) -> Self {
+            Self(std::array::from_fn(|l| self.0[l] - o.0[l]))
+        }
+
+        #[inline]
+        pub fn mul(self, o: Self) -> Self {
+            Self(std::array::from_fn(|l| self.0[l] * o.0[l]))
+        }
+    }
 }
 
-pub use imp::{I16x8, I32x4};
+pub use imp::{F32x4, I16x8, I32x4};

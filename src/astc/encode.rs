@@ -7,7 +7,7 @@
 //! and measured.
 
 use super::decode::ERROR;
-use super::lanes::{I16x8, I32x4};
+use super::lanes::{F32x4, I16x8, I32x4};
 use super::{BlockMode, COLOR_UNQUANT, RANGES, Symbolic, WEIGHT_RANGES, WEIGHT_UNQUANT, block_mode, color_range};
 use crate::surface::{Rgba, Surface};
 
@@ -30,9 +30,10 @@ struct Grid {
     /// For each grid point, the texels it reaches and the weight (sixteenths).
     rev: Vec<Vec<(u8, u8)>>,
     /// The infill taken as separable (bilinear across, then down), and its least-squares inverse
-    /// each way: `sep.pxt[x * gx + gx_i]` maps a row of texels to grid columns, `sep.py[gy_i * bh
-    /// + y]` texel rows to grid rows, `sep.fxt[gx_i * bw + x]` grid columns back to texels, and
-    /// `sep.fy[y]` is each texel row's two grid rows and the second's share.
+    /// each way: `sep.pxt[x * pad(gx) + gx_i]` maps a row of texels to grid columns, `sep.py[gy_i *
+    /// bh + y]` texel rows to grid rows, `sep.fxt[gx_i * pad(bw) + x]` grid columns back to texels,
+    /// and `sep.fy[y]` is each texel row's two grid rows and the second's share. Rows are padded
+    /// with zeros to whole `F32x4`s.
     sep: Sep,
     /// Single-plane block modes on this grid, with the endpoint range for one to three
     /// partitions of RGB (CEM 8) and RGBA (CEM 12); `u8::MAX` where the mode leaves too few bits.
@@ -113,13 +114,28 @@ impl Sep {
         let (fx, pinv_x) = axis(bw, gx);
         let (_, pinv_y) = axis(bh, gy);
         let (bwu, gxu) = (bw as usize, gx as usize);
+        let (sw, sg) = (pad(bwu), pad(gxu));
         Sep {
             bw: bwu,
-            pxt: (0..bwu * gxu)
-                .map(|i| pinv_x[(i % gxu) * bwu + i / gxu] as f32)
+            pxt: (0..bwu * sg)
+                .map(|i| {
+                    if i % sg < gxu {
+                        pinv_x[(i % sg) * bwu + i / sg] as f32
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
             py: pinv_y.iter().map(|&v| v as f32).collect(),
-            fxt: (0..gxu * bwu).map(|i| fx[(i % bwu) * gxu + i / bwu] as f32).collect(),
+            fxt: (0..gxu * sw)
+                .map(|i| {
+                    if i % sw < bwu {
+                        fx[(i % sw) * gxu + i / sw] as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
             fy: (0..bh)
                 .map(|t| {
                     let (j, w) = place(bh, gy, t);
@@ -130,6 +146,29 @@ impl Sep {
                     }
                 })
                 .collect(),
+        }
+    }
+}
+
+/// `n` rounded up to whole `F32x4`s.
+#[inline]
+fn pad(n: usize) -> usize {
+    (n + 3) & !3
+}
+
+/// `rows[r]` (padded to `F32x4`s) as `F32x4`s: `out[r * pad(w) ..][..w] = Σ_k c(r, k) · m[k]`,
+/// where `m[k]` is row `k` of `m` (stride `pad(w)`), summed in order of `k` from zero, exactly as
+/// the scalar loop would. `out` rows have stride `pad(w)` too.
+#[inline(always)]
+fn mix_rows(out: &mut [f32], nr: usize, nk: usize, w: usize, m: &[f32], c: impl Fn(usize, usize) -> f32) {
+    let sw = pad(w);
+    for r in 0..nr {
+        for v in (0..sw).step_by(4) {
+            let mut a = F32x4::zero();
+            for k in 0..nk {
+                a = a.add(F32x4::splat(c(r, k)).mul(F32x4::load(&m[k * sw + v..])));
+            }
+            a.store(&mut out[r * sw + v..]);
         }
     }
 }
@@ -181,7 +220,7 @@ pub struct Footprint {
     pmasks: [Vec<u64>; 2],
     /// Mask words per texel mask.
     nw: usize,
-    /// Orthonormal DCT-II bases across and down: `dct_x[x * bw + f]` (transposed),
+    /// Orthonormal DCT-II bases across and down: `dct_x[x * pad(bw) + f]` (transposed, padded),
     /// `dct_y[f * bh + y]`.
     dct_x: Vec<f32>,
     dct_y: Vec<f32>,
@@ -210,28 +249,18 @@ type Spectrum = [[f32; 13]; 13];
 
 fn spectrum(fp: &Footprint, v: &[f32]) -> Spectrum {
     let (bw, bh) = (fp.bw as usize, fp.bh as usize);
-    let mut r = [0f32; MAX_TEXELS];
-    for y in 0..bh {
-        let ry = &mut r[y * bw..(y + 1) * bw];
-        for x in 0..bw {
-            let vx = v[y * bw + x];
-            for (o, &b) in ry.iter_mut().zip(&fp.dct_x[x * bw..(x + 1) * bw]) {
-                *o += vx * b;
-            }
-        }
-    }
+    let sw = pad(bw);
+    // Across (each texel row to its frequencies), then down.
+    let mut r = [0f32; 12 * 12];
+    mix_rows(&mut r, bh, bw, bw, &fp.dct_x, |y, x| v[y * bw + x]);
+    let mut c = [0f32; 12 * 12];
+    mix_rows(&mut c, bh, bh, bw, &r, |fy, y| fp.dct_y[fy * bh + y]);
     let mut p = [[0f32; 13]; 13];
     for fy in 0..bh {
-        let mut c = [0f32; 12];
-        for y in 0..bh {
-            let d = fp.dct_y[fy * bh + y];
-            for (o, &x) in c.iter_mut().zip(&r[y * bw..(y + 1) * bw]) {
-                *o += d * x;
-            }
-        }
         let mut row = 0.0;
         for fx in 0..bw {
-            row += c[fx] * c[fx];
+            let e = c[fy * sw + fx];
+            row += e * e;
             p[fy + 1][fx + 1] = p[fy][fx + 1] + row;
         }
     }
@@ -416,8 +445,10 @@ impl Footprint {
             nw,
             dct_x: {
                 let b = dct_basis(bw);
-                let w = bw as usize;
-                (0..w * w).map(|i| b[(i % w) * w + i / w]).collect()
+                let (w, sw) = (bw as usize, pad(bw as usize));
+                (0..w * sw)
+                    .map(|i| if i % sw < w { b[(i % sw) * w + i / sw] } else { 0.0 })
+                    .collect()
             },
             dct_y: dct_basis(bh),
         }
@@ -569,27 +600,28 @@ fn decimate(grid: &Grid, u: &[f32], g: &mut [f32]) {
     let sep = &grid.sep;
     let (bw, gx, gy) = (sep.bw, grid.gx as usize, grid.gy as usize);
     let bh = u.len() / bw;
-    let mut rows = [0f32; MAX_TEXELS];
+    let mut rows = [0f32; 12 * 12];
+    mix_rows(&mut rows, gy, bh, bw, &padded(u, bw), |yy, y| sep.py[yy * bh + y]);
+    let sw = pad(bw);
+    let mut out = [0f32; 12 * 12];
+    mix_rows(&mut out, gy, bw, gx, &sep.pxt, |yy, x| rows[yy * sw + x]);
+    let sg = pad(gx);
     for yy in 0..gy {
-        let row = &mut rows[yy * bw..(yy + 1) * bw];
-        for (y, &c) in sep.py[yy * bh..(yy + 1) * bh].iter().enumerate() {
-            for (o, &x) in row.iter_mut().zip(&u[y * bw..(y + 1) * bw]) {
-                *o += c * x;
-            }
+        for xx in 0..gx {
+            g[yy * gx + xx] = out[yy * sg + xx].clamp(0.0, 64.0);
         }
     }
-    for yy in 0..gy {
-        let out = &mut g[yy * gx..(yy + 1) * gx];
-        out.fill(0.0);
-        for (x, &c) in rows[yy * bw..(yy + 1) * bw].iter().enumerate() {
-            for (o, &p) in out.iter_mut().zip(&sep.pxt[x * gx..(x + 1) * gx]) {
-                *o += c * p;
-            }
-        }
-        for o in out {
-            *o = o.clamp(0.0, 64.0);
-        }
+}
+
+/// The rows of `u` (`w` wide) padded with zeros to whole `F32x4`s.
+#[inline]
+fn padded(u: &[f32], w: usize) -> [f32; 12 * 12] {
+    let sw = pad(w);
+    let mut p = [0f32; 12 * 12];
+    for (y, row) in u.chunks_exact(w).enumerate() {
+        p[y * sw..y * sw + w].copy_from_slice(row);
     }
+    p
 }
 
 /// Like `decimate`, and returns the squared error the (unquantized, separably infilled) weights
@@ -601,22 +633,23 @@ fn decimate_err(grid: &Grid, u: &[f32], g: &mut [f32], scale: impl Fn(usize) -> 
     }
     let sep = &grid.sep;
     let (bw, gx, gy) = (sep.bw, grid.gx as usize, grid.gy as usize);
+    let sw = pad(bw);
     // Across: each grid row to a row of texel columns.
-    let mut rows = [0f32; MAX_TEXELS];
-    for yy in 0..gy {
-        let row = &mut rows[yy * bw..(yy + 1) * bw];
-        for (xx, &c) in g[yy * gx..(yy + 1) * gx].iter().enumerate() {
-            for (o, &f) in row.iter_mut().zip(&sep.fxt[xx * bw..(xx + 1) * bw]) {
-                *o += c * f;
-            }
-        }
-    }
+    let mut rows = [0f32; 12 * 12];
+    mix_rows(&mut rows, gy, gx, bw, &sep.fxt, |yy, xx| g[yy * gx + xx]);
+    let up = padded(u, bw);
     let mut err = 0.0;
+    let mut dd = [0f32; 12];
     for (y, &(j, w)) in sep.fy.iter().enumerate() {
-        let (r0, r1) = (&rows[j * bw..(j + 1) * bw], &rows[(j + 1) * bw..(j + 2) * bw]);
+        let w4 = F32x4::splat(w);
+        for v in (0..sw).step_by(4) {
+            let r0 = F32x4::load(&rows[j * sw + v..]);
+            let r1 = F32x4::load(&rows[(j + 1) * sw + v..]);
+            let d = F32x4::load(&up[y * sw + v..]).sub(r0.add(w4.mul(r1.sub(r0))));
+            d.mul(d).store(&mut dd[v..]);
+        }
         for x in 0..bw {
-            let d = u[y * bw + x] - (r0[x] + w * (r1[x] - r0[x]));
-            err += d * d * scale(y * bw + x);
+            err += dd[x] * scale(y * bw + x);
         }
     }
     err
@@ -638,55 +671,71 @@ fn quantize_decimated(grid: &Grid, q: usize, planes: usize, g: &[[f32; 64]; 2], 
     let wq = &tables().wq[q];
     for (pl, gp) in g.iter().enumerate().take(planes) {
         for j in 0..grid.rev.len() {
-            codes[planes * j + pl] = wq[gp[j].round() as usize];
+            codes[planes * j + pl] = wq[round_pos(gp[j])];
         }
     }
 }
 
-/// Least-squares endpoints for texel weights (0..=64: `w`, and `w2` in channel `ccs`), over the
-/// texels labelled `p`.
-fn refit(t: &Texels, w: &[u8], w2: &[u8], ccs: usize, labels: &[u8], p: u8) -> ([f32; 4], [f32; 4]) {
-    // The normal equations' matrix for each plane: sums of (1-f)^2, f(1-f), f^2.
-    let mut abc = [[0f32; 3]; 2];
-    let mut r0 = [0f32; 4];
-    let mut r1 = [0f32; 4];
-    let mut mean = [0f32; 4];
-    let mut count = 0f32;
+/// Least-squares endpoints for texel weights (0..=64: `w`, and `w2` in channel `ccs`) for each
+/// of partitions 0..`count` by `labels`.
+fn refit(t: &Texels, w: &[u8], w2: &[u8], ccs: usize, labels: &[u8], count: u8) -> [([f32; 4], [f32; 4]); 3] {
+    // Per partition, in sixty-fourths: the normal equations' matrix for each plane (sums of
+    // (64-w)^2, w(64-w), w^2), the right-hand sides, the channel sums and the texel count. As
+    // floats these sums would be exact too (under 2^24 units), so integers give the same values.
+    #[derive(Clone, Copy, Default)]
+    struct Sums {
+        abc: [[u32; 3]; 2],
+        r0: [u32; 4],
+        r1: [u32; 4],
+        sum: [u32; 4],
+        n: u32,
+    }
+    let mut sums = [Sums::default(); 3];
     let planes = 1 + (ccs < NO_CCS) as usize;
     for i in 0..t.n {
-        if labels[i] != p {
-            continue;
-        }
-        let f = [w[i] as f32 * (1.0 / 64.0), w2[i] as f32 * (1.0 / 64.0)];
+        let s = &mut sums[labels[i] as usize];
+        let f = [w[i] as u32, w2[i] as u32];
         for pl in 0..planes {
-            let (x, y) = (f[pl], 1.0 - f[pl]);
-            abc[pl][0] += y * y;
-            abc[pl][1] += x * y;
-            abc[pl][2] += x * x;
+            let (x, y) = (f[pl], 64 - f[pl]);
+            s.abc[pl][0] += y * y;
+            s.abc[pl][1] += x * y;
+            s.abc[pl][2] += x * x;
         }
-        count += 1.0;
+        s.n += 1;
         for ch in 0..4 {
             let x = f[(ch == ccs) as usize];
-            r0[ch] += (1.0 - x) * t.f[i][ch];
-            r1[ch] += x * t.f[i][ch];
-            mean[ch] += t.f[i][ch];
+            let v = t.px[i][ch] as u32;
+            s.r0[ch] += (64 - x) * v;
+            s.r1[ch] += x * v;
+            s.sum[ch] += v;
         }
     }
-    let mut e0 = [0f32; 4];
-    let mut e1 = [0f32; 4];
-    for ch in 0..4 {
-        let [a, b, c] = abc[(ch == ccs) as usize];
-        let det = a * c - b * b;
-        if det.abs() < 1e-3 * count.max(1.0) {
-            let m = mean[ch] / count.max(1.0);
-            (e0[ch], e1[ch]) = (m, m);
-        } else {
-            let inv = 1.0 / det;
-            e0[ch] = ((c * r0[ch] - b * r1[ch]) * inv).clamp(0.0, 255.0);
-            e1[ch] = ((a * r1[ch] - b * r0[ch]) * inv).clamp(0.0, 255.0);
+    let mut out = [([0f32; 4], [0f32; 4]); 3];
+    for (s, (e0, e1)) in sums.iter().zip(&mut out).take(count as usize) {
+        let n = s.n as f32;
+        for ch in 0..4 {
+            let [a, b, c] = s.abc[(ch == ccs) as usize].map(|v| v as f32 * (1.0 / 4096.0));
+            let (r0, r1) = (s.r0[ch] as f32 * (1.0 / 64.0), s.r1[ch] as f32 * (1.0 / 64.0));
+            let det = a * c - b * b;
+            if det.abs() < 1e-3 * n.max(1.0) {
+                let m = s.sum[ch] as f32 / n.max(1.0);
+                (e0[ch], e1[ch]) = (m, m);
+            } else {
+                let inv = 1.0 / det;
+                e0[ch] = ((c * r0 - b * r1) * inv).clamp(0.0, 255.0);
+                e1[ch] = ((a * r1 - b * r0) * inv).clamp(0.0, 255.0);
+            }
         }
     }
-    (e0, e1)
+    out
+}
+
+/// `x.round()` for `x` in 0..2^23 (or NaN, as zero), without a library call where SSE4.1 is
+/// missing: the fraction after truncating is exact.
+#[inline]
+fn round_pos(x: f32) -> usize {
+    let i = x as i32;
+    (i + (x - i as f32 >= 0.5) as i32) as usize
 }
 
 /// The best encoding found so far.
@@ -940,7 +989,18 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(t: &Texels, count: u8, seed: u16, labels: &[u8], ccs: usize) -> Self {
+    /// The layout of partitions 0..`count` by `labels` (whose moments are `ms`), with channel
+    /// `ccs` on a second plane; `axis0`, when given, is partition 0's dominant axis (of its scatter
+    /// without channel `ccs`), already computed.
+    fn new(
+        t: &Texels,
+        count: u8,
+        seed: u16,
+        labels: &[u8],
+        ccs: usize,
+        ms: &[Moments; 3],
+        axis0: Option<[f32; 4]>,
+    ) -> Self {
         let n = t.n;
         let mut l = Layout {
             count,
@@ -954,7 +1014,6 @@ impl Layout {
             orth: 0.0,
         };
         l.labels[..n].copy_from_slice(&labels[..n]);
-        let ms = Moments::of(t, labels, count);
         let mut axes = [[0f32; 4]; 3];
         let mut means = [[0f32; 4]; 3];
         for p in 0..count as usize {
@@ -965,7 +1024,10 @@ impl Layout {
                     cov[ccs][a] = 0.0;
                 }
             }
-            let mut axis = dominant(&cov);
+            let mut axis = match axis0 {
+                Some(a) if p == 0 => a,
+                _ => dominant(&cov),
+            };
             // Point the axis so the second endpoint has the larger RGB sum, as the decoder wants.
             if axis[0] + axis[1] + axis[2] < 0.0 {
                 axis = axis.map(|x| -x);
@@ -1105,10 +1167,10 @@ fn try_candidate(
     let cu = &COLOR_UNQUANT[cq as usize];
     let mut cc = [([0u8; 4], [0u8; 4]); 3];
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    for p in 0..lay.count as usize {
-        let (f0, f1) = refit(t, &w[0][..t.n], &w[1][..t.n], ccs, &lay.labels, p as u8);
-        let mut c0: [u8; 4] = std::array::from_fn(|ch| cqt[f0[ch].round() as usize]);
-        let mut c1: [u8; 4] = std::array::from_fn(|ch| cqt[f1[ch].round() as usize]);
+    let fits = refit(t, &w[0][..t.n], &w[1][..t.n], ccs, &lay.labels, lay.count);
+    for (p, &(f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
+        let mut c0: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f0[ch])]);
+        let mut c1: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f1[ch])]);
         let un = |c: [u8; 4]| -> [i32; 4] {
             let mut e = c.map(|x| cu[x as usize] as i32);
             if cem == 8 {
@@ -1134,7 +1196,7 @@ fn try_candidate(
                     infill(grid, &g, planes, pl, wp);
                 }
             } else {
-                c0 = std::array::from_fn(|ch| cqt[((f0[ch] + f1[ch]) * 0.5).round() as usize]);
+                c0 = std::array::from_fn(|ch| cqt[round_pos((f0[ch] + f1[ch]) * 0.5)]);
                 c1 = c0;
                 (e0, e1) = (un(c0), un(c1));
             }
@@ -1178,36 +1240,6 @@ fn void_extent(c: Rgba) -> [u8; 16] {
     v.to_le_bytes()
 }
 
-/// The principal axis (unit length, or zero if they are all one color) and mean of the texels
-/// labelled `p`, leaving out channel `skip` (or none, if it is `NO_CCS`).
-fn principal_axis(t: &Texels, labels: &[u8], p: u8, skip: usize) -> ([f32; 4], [f32; 4]) {
-    let (mean, mut cov) = moments(t, labels, p);
-    if skip < NO_CCS {
-        for a in 0..4 {
-            cov[a][skip] = 0.0;
-            cov[skip][a] = 0.0;
-        }
-    }
-    (dominant(&cov), mean)
-}
-
-/// The mean and covariance (scatter) of the colors of the texels in partition `p`.
-fn moments(t: &Texels, labels: &[u8], p: u8) -> ([f32; 4], [[f32; 4]; 4]) {
-    let mut m = Moments::default();
-    for i in (0..t.n).filter(|&i| labels[i] == p) {
-        let q = &t.px[i];
-        m.n += 1;
-        for a in 0..4 {
-            let x = q[a] as u32;
-            m.s[a] += x;
-            for b in a..4 {
-                m.ss[a][b] += x * q[b] as u32;
-            }
-        }
-    }
-    m.mean_cov()
-}
-
 /// The unit dominant eigenvector of a covariance matrix by power iteration (zero if it is
 /// degenerate).
 fn dominant(cov: &[[f32; 4]; 4]) -> [f32; 4] {
@@ -1235,12 +1267,13 @@ fn dominant(cov: &[[f32; 4]; 4]) -> [f32; 4] {
 
 /// A k-means clustering of the texels' colors into `k` groups (2 or 3), seeded from the extremes
 /// of the principal axis, as one bit mask per group.
-fn kmeans(t: &Texels, k: usize) -> [[u64; 3]; 3] {
-    let zero = [0u8; MAX_TEXELS];
-    let (axis, mean) = principal_axis(t, &zero, 0, NO_CCS);
-    let proj = |i: usize| -> f32 { (0..4).map(|c| (t.f[i][c] - mean[c]) * axis[c]).sum() };
-    let lo = (0..t.n).min_by(|&a, &b| proj(a).total_cmp(&proj(b))).unwrap();
-    let hi = (0..t.n).max_by(|&a, &b| proj(a).total_cmp(&proj(b))).unwrap();
+fn kmeans(t: &Texels, k: usize, axis: &[f32; 4], mean: &[f32; 4]) -> [[u64; 3]; 3] {
+    let mut proj = [0f32; MAX_TEXELS];
+    for (o, f) in proj.iter_mut().zip(&t.f[..t.n]) {
+        *o = (0..4).map(|c| (f[c] - mean[c]) * axis[c]).sum();
+    }
+    let lo = (0..t.n).min_by(|&a, &b| proj[a].total_cmp(&proj[b])).unwrap();
+    let hi = (0..t.n).max_by(|&a, &b| proj[a].total_cmp(&proj[b])).unwrap();
     let dist = |a: &[f32; 4], b: &[f32; 4]| -> f32 { (0..t.ch).map(|c| (a[c] - b[c]) * (a[c] - b[c])).sum() };
     let mut centers = [t.f[lo], t.f[hi], t.f[lo]];
     if k == 3 {
@@ -1494,14 +1527,17 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let cem = if alpha { 12u8 } else { 8 };
     let ce = alpha as usize;
     let es = effort_settings(effort);
-    let mut layouts = vec![Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS)];
+    // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
+    let ms1 = Moments::of(&t, &[0; MAX_TEXELS], 1);
+    let (mean1, cov) = ms1[0].mean_cov();
+    let axis1 = dominant(&cov);
+    let mut layouts = vec![Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS, &ms1, Some(axis1))];
     // The texels' mean squared distance from their line, per channel.
     let off_line = layouts[0].orth / (n * t.ch) as f32;
     if es.dual > 0 {
         // Channels for the second plane, those leaving the rest closest to a line first: the
         // variance of the other channels off their dominant axis.
-        let (_, cov) = moments(&t, &[0; MAX_TEXELS], 0);
-        let mut off: Vec<(f32, usize)> = (0..t.ch)
+        let mut off: Vec<(f32, usize, [f32; 4])> = (0..t.ch)
             .map(|c| {
                 let mut sub = cov;
                 for a in 0..4 {
@@ -1512,12 +1548,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 let along: f32 = (0..4)
                     .map(|a| v[a] * (0..4).map(|b| sub[a][b] * v[b]).sum::<f32>())
                     .sum();
-                ((0..t.ch).map(|a| sub[a][a]).sum::<f32>() - along, c)
+                ((0..t.ch).map(|a| sub[a][a]).sum::<f32>() - along, c, v)
             })
             .collect();
         off.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for &(_, c) in off.iter().take(es.dual) {
-            layouts.push(Layout::new(&t, 1, 0, &[0; MAX_TEXELS], c));
+        for &(_, c, v) in off.iter().take(es.dual) {
+            layouts.push(Layout::new(&t, 1, 0, &[0; MAX_TEXELS], c, &ms1, Some(v)));
         }
     }
     for (pi, &want) in es.patterns.iter().enumerate() {
@@ -1526,9 +1562,18 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         if want == 0 || pats.is_empty() || off_line < es.line[pi] {
             continue;
         }
-        let km = kmeans(&t, k);
+        let km = kmeans(&t, k, &axis1, &mean1);
         for i in rank_patterns(fp, k, &km, n as u32, want) {
-            layouts.push(Layout::new(&t, k as u8, pats[i].seed, &pats[i].labels, NO_CCS));
+            let ms = Moments::of(&t, &pats[i].labels, k as u8);
+            layouts.push(Layout::new(
+                &t,
+                k as u8,
+                pats[i].seed,
+                &pats[i].labels,
+                NO_CCS,
+                &ms,
+                None,
+            ));
         }
     }
     // Score every (partitioning, grid, weight range): the error of the ideal weights decimated to
@@ -1794,6 +1839,17 @@ mod tests {
             sum / count as f64,
             sum_ispc / count as f64
         );
+    }
+
+    #[test]
+    fn round_pos_is_round() {
+        // Every float in 0.25..4, around the first halves, and a stride of the rest up to 2^23.
+        let mut b = 0u32;
+        while f32::from_bits(b) < 8_388_608.0 {
+            let x = f32::from_bits(b);
+            assert_eq!(round_pos(x), x.round() as usize, "{x}");
+            b += if (0.25..4.0).contains(&x) { 1 } else { 61 };
+        }
     }
 
     #[test]
