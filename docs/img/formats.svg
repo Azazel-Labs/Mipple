@@ -137,18 +137,18 @@
 <text class="mute num" x="54" y="470.9" font-size="11" text-anchor="end">44.50</text>
 <line class="grid" x1="60" x2="302" y1="431.4" y2="431.4" stroke-width="1"/>
 <text class="mute num" x="54" y="435.4" font-size="11" text-anchor="end">44.75</text>
-<text class="mute num" x="87.4" y="600" font-size="11" text-anchor="middle">1</text>
-<text class="mute num" x="172.6" y="600" font-size="11" text-anchor="middle">2</text>
-<text class="mute num" x="285.3" y="600" font-size="11" text-anchor="middle">5</text>
+<text class="mute num" x="99.9" y="600" font-size="11" text-anchor="middle">1</text>
+<text class="mute num" x="181.5" y="600" font-size="11" text-anchor="middle">2</text>
+<text class="mute num" x="289.3" y="600" font-size="11" text-anchor="middle">5</text>
 <line class="axis" x1="60" x2="302" y1="584" y2="584" stroke-width="1"/>
 <text class="mute" x="302" y="406" font-size="11" text-anchor="end">PSNR dB ↑ · seconds →</text>
-<path class="s0" d="M117.8,479.1 L244.2,432.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle class="f1 ring" cx="135.6" cy="567.7" r="4.5" stroke-width="2"><title>ISPC fast: 43.789 dB, 1.48 s</title></circle>
-<circle class="f0 ring" cx="117.8" cy="479.1" r="4.5" stroke-width="2"><title>mipple effort 0: 44.414 dB, 1.28 s</title></circle>
-<circle class="f0 ring" cx="244.2" cy="432.3" r="4.5" stroke-width="2"><title>mipple effort 2: 44.744 dB, 3.58 s</title></circle>
-<text class="ink" x="240.2" y="423.3" font-size="11">effort 2</text>
-<text class="ink" x="113.8" y="470.1" font-size="11">mipple effort 0</text>
-<text class="ink2" x="143.6" y="571.7" font-size="11">ISPC fast</text>
+<path class="s0" d="M115.3,479.1 L246.7,432.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="145.2" cy="567.7" r="4.5" stroke-width="2"><title>ISPC fast: 43.789 dB, 1.47 s</title></circle>
+<circle class="f0 ring" cx="115.3" cy="479.1" r="4.5" stroke-width="2"><title>mipple effort 0: 44.414 dB, 1.14 s</title></circle>
+<circle class="f0 ring" cx="246.7" cy="432.3" r="4.5" stroke-width="2"><title>mipple effort 2: 44.744 dB, 3.48 s</title></circle>
+<text class="ink" x="242.7" y="423.3" font-size="11">effort 2</text>
+<text class="ink" x="111.3" y="470.1" font-size="11">mipple effort 0</text>
+<text class="ink2" x="153.2" y="571.7" font-size="11">ISPC fast</text>
 <text class="ink" x="334" y="384" font-size="15" font-weight="600">ASTC 6x6<tspan class="ink2" font-weight="400" font-size="12">  Kodak 24, 1 P-core</tspan></text>
 <line class="grid" x1="370" x2="612" y1="551.7" y2="551.7" stroke-width="1"/>
 <text class="mute num" x="364" y="555.7" font-size="11" text-anchor="end">37.6</text>
@@ -158,17 +158,17 @@
 <text class="mute num" x="364" y="469.2" font-size="11" text-anchor="end">37.8</text>
 <line class="grid" x1="370" x2="612" y1="421.9" y2="421.9" stroke-width="1"/>
 <text class="mute num" x="364" y="425.9" font-size="11" text-anchor="end">37.9</text>
-<text class="mute num" x="415.7" y="600" font-size="11" text-anchor="middle">1</text>
-<text class="mute num" x="504.6" y="600" font-size="11" text-anchor="middle">2</text>
+<text class="mute num" x="420.9" y="600" font-size="11" text-anchor="middle">1</text>
+<text class="mute num" x="512.8" y="600" font-size="11" text-anchor="middle">2</text>
 <line class="axis" x1="370" x2="612" y1="584" y2="584" stroke-width="1"/>
 <text class="mute" x="612" y="406" font-size="11" text-anchor="end">PSNR dB ↑ · seconds →</text>
-<path class="s0" d="M430.2,561.7 L551.8,432.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle class="f1 ring" cx="432.5" cy="567.7" r="4.5" stroke-width="2"><title>ISPC fast: 37.563 dB, 1.14 s</title></circle>
-<circle class="f0 ring" cx="430.2" cy="561.7" r="4.5" stroke-width="2"><title>mipple effort 0: 37.577 dB, 1.12 s</title></circle>
-<circle class="f0 ring" cx="551.8" cy="432.3" r="4.5" stroke-width="2"><title>mipple effort 2: 37.876 dB, 2.89 s</title></circle>
-<text class="ink" x="547.8" y="423.3" font-size="11">effort 2</text>
-<text class="ink" x="426.2" y="552.7" font-size="11">mipple effort 0</text>
-<text class="ink2" x="440.5" y="571.7" font-size="11">ISPC fast</text>
+<path class="s0" d="M432.3,530.5 L549.7,432.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="432.3" cy="567.7" r="4.5" stroke-width="2"><title>ISPC fast: 37.563 dB, 1.09 s</title></circle>
+<circle class="f0 ring" cx="432.3" cy="530.5" r="4.5" stroke-width="2"><title>mipple effort 0: 37.649 dB, 1.09 s</title></circle>
+<circle class="f0 ring" cx="549.7" cy="432.3" r="4.5" stroke-width="2"><title>mipple effort 2: 37.876 dB, 2.64 s</title></circle>
+<text class="ink" x="545.7" y="423.3" font-size="11">effort 2</text>
+<text class="ink" x="428.3" y="521.5" font-size="11">mipple effort 0</text>
+<text class="ink2" x="440.3" y="571.7" font-size="11">ISPC fast</text>
 <text class="ink" x="644" y="384" font-size="15" font-weight="600">ASTC 8x8<tspan class="ink2" font-weight="400" font-size="12">  Kodak 24, 1 P-core</tspan></text>
 <line class="grid" x1="680" x2="922" y1="583.3" y2="583.3" stroke-width="1"/>
 <text class="mute num" x="674" y="587.3" font-size="11" text-anchor="end">33.6</text>
@@ -182,16 +182,16 @@
 <text class="mute num" x="674" y="463.0" font-size="11" text-anchor="end">34.0</text>
 <line class="grid" x1="680" x2="922" y1="427.9" y2="427.9" stroke-width="1"/>
 <text class="mute num" x="674" y="431.9" font-size="11" text-anchor="end">34.1</text>
-<text class="mute num" x="739.5" y="600" font-size="11" text-anchor="middle">1</text>
-<text class="mute num" x="831.0" y="600" font-size="11" text-anchor="middle">2</text>
+<text class="mute num" x="753.8" y="600" font-size="11" text-anchor="middle">1</text>
+<text class="mute num" x="844.5" y="600" font-size="11" text-anchor="middle">2</text>
 <line class="axis" x1="680" x2="922" y1="584" y2="584" stroke-width="1"/>
 <text class="mute" x="922" y="406" font-size="11" text-anchor="end">PSNR dB ↑ · seconds →</text>
-<path class="s0" d="M742.1,510.9 L859.9,432.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle class="f1 ring" cx="745.9" cy="567.7" r="4.5" stroke-width="2"><title>ISPC fast: 33.650 dB, 1.05 s</title></circle>
-<circle class="f0 ring" cx="742.1" cy="510.9" r="4.5" stroke-width="2"><title>mipple effort 0: 33.833 dB, 1.02 s</title></circle>
-<circle class="f0 ring" cx="859.9" cy="432.3" r="4.5" stroke-width="2"><title>mipple effort 2: 34.086 dB, 2.49 s</title></circle>
-<text class="ink" x="855.9" y="423.3" font-size="11">effort 2</text>
-<text class="ink" x="738.1" y="501.9" font-size="11">mipple effort 0</text>
-<text class="ink2" x="753.9" y="571.7" font-size="11">ISPC fast</text>
+<path class="s0" d="M741.5,510.9 L860.5,432.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle class="f1 ring" cx="753.8" cy="567.7" r="4.5" stroke-width="2"><title>ISPC fast: 33.650 dB, 1 s</title></circle>
+<circle class="f0 ring" cx="741.5" cy="510.9" r="4.5" stroke-width="2"><title>mipple effort 0: 33.833 dB, 0.91 s</title></circle>
+<circle class="f0 ring" cx="860.5" cy="432.3" r="4.5" stroke-width="2"><title>mipple effort 2: 34.086 dB, 2.26 s</title></circle>
+<text class="ink" x="856.5" y="423.3" font-size="11">effort 2</text>
+<text class="ink" x="737.5" y="501.9" font-size="11">mipple effort 0</text>
+<text class="ink2" x="761.8" y="571.7" font-size="11">ISPC fast</text>
 <text class="mute" x="24" y="644" font-size="11">Generated by scripts/readme_charts.py from bench-results/formats.json (the docs/BENCHMARKS.md tables, which give each command)</text>
 </svg>

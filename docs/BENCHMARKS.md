@@ -626,20 +626,22 @@ slower), and their times are not comparable with these:
 
 | footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
 | --- | --- | ---: | ---: | ---: | ---: |
-| 4x4 | ISPC fast | 43.789 | 0.99677 | 7.286 | 1.48 |
-| 4x4 | mipple effort 0 | 44.414 | 0.99741 | 6.926 | 1.28 |
-| 4x4 | mipple effort 2 | 44.744 | 0.99753 | 7.148 | 3.58 |
-| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 1.14 |
-| 6x6 | mipple effort 0 | 37.577 | 0.98380 | 3.248 | 1.12 |
-| 6x6 | mipple effort 2 | 37.876 | 0.98463 | 3.287 | 2.89 |
-| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.05 |
-| 8x8 | mipple effort 0 | 33.833 | 0.95966 | 1.859 | 1.02 |
-| 8x8 | mipple effort 2 | 34.086 | 0.96129 | 1.873 | 2.49 |
+| 4x4 | ISPC fast | 43.789 | 0.99677 | 7.286 | 1.47 |
+| 4x4 | mipple effort 0 | 44.414 | 0.99741 | 6.926 | 1.14 |
+| 4x4 | mipple effort 2 | 44.744 | 0.99753 | 7.148 | 3.48 |
+| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 1.09 |
+| 6x6 | mipple effort 0 | 37.649 | 0.98392 | 3.277 | 1.09 |
+| 6x6 | mipple effort 2 | 37.876 | 0.98463 | 3.287 | 2.64 |
+| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.00 |
+| 8x8 | mipple effort 0 | 33.833 | 0.95966 | 1.859 | 0.91 |
+| 8x8 | mipple effort 2 | 34.086 | 0.96129 | 1.873 | 2.26 |
 
-Effort 0 leads ISPC fast in PSNR, SSIM, size and time at every footprint: 0.63 / 0.01 / 0.18 dB ahead, 4.9%
-/ 2.5% / 1.2% smaller after Zstd, and 14% / 2% / 3% faster at 4x4 / 6x6 / 8x8. The 6x6 lead is thin in both
-quality and time: other pinned runs had effort 0 up to 7% slower than ISPC there, so call it parity. Effort 2 leads further in quality (0.96 /
-0.31 / 0.44 dB) at 2.4-2.5× ISPC's time.
+Effort 0 leads ISPC fast in PSNR, SSIM and size at every footprint, 0.63 / 0.09 / 0.18 dB ahead and 4.9% /
+1.7% / 1.2% smaller after Zstd at 4x4 / 6x6 / 8x8. It is 22% and 9% faster at 4x4 and 8x8 and takes the same
+time at 6x6 (ISPC's 6x6 time moved between 1.09 and 1.26 s across pinned runs, and effort 0 stayed at or under
+it). At 25-63 texels (6x6 among them), effort 0 encodes two candidates with two polish passes instead of one
+with three; at 4x4 and 8x8 the one candidate is already well ahead. Effort 2 leads further in quality (0.96 /
+0.31 / 0.44 dB) at 2.3-2.4× ISPC's time.
 
 RDO at effort 0 on the same images, one thread pinned to the same P-core, `mipple bench test-images/kodak -f
 astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4 -e 0` with `RAYON_NUM_THREADS=1`. Each cell is PSNR dB / SSIM /
@@ -647,23 +649,23 @@ Zstd-19 bpt; the RDO pass's time is its total over the 24 images:
 
 | λ | 4x4 | 6x6 | 8x8 |
 | --- | --- | --- | --- |
-| 0 | 44.414 / 0.99741 / 6.926 | 37.576 / 0.98380 / 3.248 | 33.833 / 0.95966 / 1.859 |
-| 0.5 | 42.995 / 0.99361 / 5.042 (84 s) | 37.557 / 0.98281 / 2.864 (80 s) | 33.894 / 0.95981 / 1.715 (50 s) |
-| 1 | 41.536 / 0.98697 / 4.214 (84 s) | 37.368 / 0.98028 / 2.594 (57 s) | 33.860 / 0.95870 / 1.610 (49 s) |
-| 2 | 39.765 / 0.97663 / 3.535 (69 s) | 36.919 / 0.97356 / 2.220 (50 s) | 33.760 / 0.95548 / 1.448 (49 s) |
-| 4 | 37.604 / 0.95982 / 2.936 (70 s) | 36.197 / 0.96387 / 1.907 (47 s) | 33.561 / 0.94975 / 1.285 (49 s) |
+| 0 | 44.414 / 0.99741 / 6.926 | 37.649 / 0.98392 / 3.277 | 33.833 / 0.95966 / 1.859 |
+| 0.5 | 42.995 / 0.99361 / 5.042 (53 s) | 37.608 / 0.98288 / 2.884 (44 s) | 33.894 / 0.95981 / 1.715 (39 s) |
+| 1 | 41.536 / 0.98697 / 4.214 (49 s) | 37.413 / 0.98033 / 2.605 (43 s) | 33.860 / 0.95870 / 1.610 (38 s) |
+| 2 | 39.765 / 0.97663 / 3.535 (45 s) | 36.956 / 0.97365 / 2.228 (39 s) | 33.760 / 0.95548 / 1.448 (35 s) |
+| 4 | 37.604 / 0.95982 / 2.936 (43 s) | 36.219 / 0.96392 / 1.906 (36 s) | 33.561 / 0.94975 / 1.285 (33 s) |
 | ISPC fast | 43.789 / 0.99677 / 7.286 | 37.563 / 0.98365 / 3.332 | 33.650 / 0.95837 / 1.881 |
 
-At ISPC fast's PSNR (interpolated along each λ curve in log rate), mipple's files are 17.3% / 10.6% / 27.9%
-smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 16.4% / 10.1% / 27.2% smaller after Deflate-9 (ISPC fast: 7.431 /
-3.368 / 1.896 bpt; mipple λ 0: 7.117 / 3.299 / 1.877; λ 1: 4.398 / 2.647 / 1.632). The 6x6 figure is the
-least certain: the curve is nearly flat between λ 0 and 0.5, right where ISPC's PSNR falls, so a 0.001 dB
-change in either moves it by a few tenths of a percent. At 8x8, light RDO raises PSNR (0.06 dB at λ 0.5): a polished re-weight or refit of an earlier block is
+At ISPC fast's PSNR (interpolated along each λ curve in log rate), mipple's files are 17.3% / 15.5% / 27.9%
+smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 16.4% / 15.0% / 27.2% smaller after Deflate-9 (ISPC fast: 7.431 /
+3.368 / 1.896 bpt; mipple λ 0: 7.117 / 3.324 / 1.877; λ 1: 4.398 / 2.654 / 1.632). The 6x6 figure is the
+least certain: the curve is nearly flat between λ 0 and 0.5, near ISPC's PSNR, so a small change in either
+PSNR moves it by several tenths of a percent. At 8x8, light RDO raises PSNR (0.06 dB at λ 0.5): a polished re-weight or refit of an earlier block is
 sometimes closer to the source than effort 0's own encode of the block. The candidates are whole copies of the previous 256 blocks, an earlier
 block's head (mode, partition, endpoints) with the weights re-chosen, and an earlier block's weights with the
 endpoints refitted, each polished once; exact error lower bounds skip most of them without changing the
-output. The pass runs on whole surfaces (blocks are not 4x4) and costs 2-3.5 s per Kodak image on one thread,
-40-65× the effort-0 encode; it parallelizes across 16 KiB chunks like the other formats' passes.
+output. The pass runs on whole surfaces (blocks are not 4x4) and costs 1.4-2.2 s per Kodak image on one thread,
+33-47× the effort-0 encode; it parallelizes across 16 KiB chunks like the other formats' passes.
 
 ## Lossless field split (`--prep`)
 

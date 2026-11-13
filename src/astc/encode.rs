@@ -924,9 +924,17 @@ fn polish_parts<const W: bool, const E: bool>(
         }
     }
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
-    for _ in 0..passes {
-        let mut improved = false;
+    // Steps tried since the last one taken. Each try depends only on the block's current state, so
+    // once every weight and endpoint code has been tried in a row without a step, the rest of the
+    // passes would only repeat those tries: stop there, mid-pass, with the same result.
+    let steps = if W { kk } else { 0 } + if E { parts * 2 * nv } else { 0 };
+    let mut idle = 0;
+    'passes: for _ in 0..passes {
         for j in 0..if W { kk } else { 0 } {
+            if idle >= steps {
+                break 'passes;
+            }
+            idle += 1;
             let (gp, pl) = (j / planes, j % planes);
             let old = sym.weights[j];
             let nb = [tb.wnb[q][0][old as usize], tb.wnb[q][1][old as usize]];
@@ -959,32 +967,37 @@ fn polish_parts<const W: bool, const E: bool>(
                 wl[pl][pos[i] as usize] = w as i16;
                 errp[pl][i] = texel_err(&base, &slope, i, pl, w);
             }
-            improved = true;
+            idle = 0;
         }
         for p in 0..if E { parts } else { 0 } {
             for v in 0..2 * nv {
+                if idle >= steps {
+                    break 'passes;
+                }
+                idle += 1;
                 let c = v / 2;
                 let pl = plane_of(c);
                 let slot = 2 * nv * p + v;
                 let old = sym.colors[slot];
-                // The endpoints after each step, unless it leaves the second endpoint's sum below
-                // the first's (which would swap them).
-                let mut cand = [None; 2];
+                // The code and channel `c`'s endpoints after each step, unless it leaves the second
+                // endpoint's sum below the first's (which would swap them). Only the code is kept
+                // per step (whole endpoint pairs in an `Option` stalled on store forwarding).
+                let mut cand = [None::<u8>; 2];
                 let mut pairs = [(eps[p].0[c], eps[p].1[c]); 3];
+                let s0 = eps[p].0[0] + eps[p].0[1] + eps[p].0[2];
+                let s1 = eps[p].1[0] + eps[p].1[1] + eps[p].1[2];
                 for dir in 0..2 {
                     let nc = tb.cnb[cq][dir][old as usize];
                     if nc == old {
                         continue;
                     }
-                    let mut e = eps[p];
-                    if v % 2 == 0 {
-                        e.0[c] = cu[nc as usize] as i32;
-                    } else {
-                        e.1[c] = cu[nc as usize] as i32;
-                    }
-                    if e.1[0] + e.1[1] + e.1[2] >= e.0[0] + e.0[1] + e.0[2] {
-                        cand[dir] = Some((nc, e));
-                        pairs[dir + 1] = (e.0[c], e.1[c]);
+                    let x = cu[nc as usize] as i32;
+                    let (e0, e1) = pairs[0];
+                    let (n0, n1) = if v % 2 == 0 { (x, e1) } else { (e0, x) };
+                    let (t0, t1) = if c < 3 { (s0 - e0 + n0, s1 - e1 + n1) } else { (s0, s1) };
+                    if t1 >= t0 {
+                        cand[dir] = Some(nc);
+                        pairs[dir + 1] = (n0, n1);
                     }
                 }
                 if cand == [None; 2] {
@@ -1007,20 +1020,18 @@ fn polish_parts<const W: bool, const E: bool>(
                 let Some(dir) = (0..2).find(|&dir| cand[dir].is_some() && err[dir + 1] < err[0]) else {
                     continue;
                 };
-                let (nc, e) = cand[dir].unwrap();
+                let nc = cand[dir].unwrap();
                 sym.colors[slot] = nc;
-                eps[p] = e;
+                (eps[p].0[c], eps[p].1[c]) = pairs[dir + 1];
+                let e = eps[p];
                 (base[p], slope[p]) = lanes_of(&e);
                 for i in 0..n {
                     if lay.labels[i] as usize == p {
                         errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
                     }
                 }
-                improved = true;
+                idle = 0;
             }
-        }
-        if !improved {
-            break;
         }
     }
     errp[..planes].iter().map(|e| e[..n].iter().sum::<i32>()).sum::<i32>() as u32
@@ -1491,7 +1502,8 @@ fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, 
     top.into_iter().map(|e| e.1).collect()
 }
 
-/// Candidates whose decimation error is measured, per candidate encoded.
+/// Candidates whose decimation error is measured, per candidate encoded, unless an effort level
+/// sets its own shortlist.
 const SHORTLIST: usize = 4;
 
 /// The weight of decimation error against the quantization terms when ranking candidates. Finer
@@ -1507,6 +1519,9 @@ struct Effort {
     patterns: [usize; 2],
     /// Candidates (partitioning, grid, weight range) encoded exactly, best estimates first.
     candidates: usize,
+    /// Candidates whose decimation error is measured, to pick those encoded (0: `SHORTLIST` per
+    /// candidate encoded).
+    shortlist: usize,
     /// Rounds of re-deriving weights from the quantized endpoints.
     refine: usize,
     /// Coordinate-descent passes over the final block.
@@ -1520,10 +1535,20 @@ struct Effort {
     line: [f32; 3],
 }
 
-fn effort_settings(effort: u8) -> Effort {
+/// The settings for `effort` on a footprint of `texels` texels.
+fn effort_settings(effort: u8, texels: usize) -> Effort {
+    let mut e = effort_table(effort, texels);
+    if e.shortlist == 0 {
+        e.shortlist = e.candidates * SHORTLIST;
+    }
+    e
+}
+
+fn effort_table(effort: u8, texels: usize) -> Effort {
     #[cfg(test)]
     if effort == u8::MAX {
-        // Tuning runs: `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3,line_dual`.
+        // Tuning runs:
+        // `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist`.
         static E: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
         return *E.get_or_init(|| {
             let mut v: Vec<f64> = std::env::var("MIPPLE_ASTC_EFFORT")
@@ -1531,11 +1556,12 @@ fn effort_settings(effort: u8) -> Effort {
                 .split(',')
                 .map(|x| x.parse().unwrap())
                 .collect();
-            v.resize(9, 0.0);
+            v.resize(10, 0.0);
             let u = |i: usize| v[i] as usize;
             Effort {
                 patterns: [u(0), u(1)],
                 candidates: u(2),
+                shortlist: u(9),
                 refine: u(3),
                 polish: u(4),
                 dual: u(5),
@@ -1544,9 +1570,21 @@ fn effort_settings(effort: u8) -> Effort {
         });
     }
     match effort {
+        // From 25 to 63 texels (6x6 among them), a second candidate and a longer shortlist: on
+        // Kodak at 6x6, +0.07 dB for about 10% more time (one thread).
+        0 if (25..64).contains(&texels) => Effort {
+            patterns: [1, 0],
+            candidates: 2,
+            shortlist: 5,
+            refine: 0,
+            polish: 2,
+            dual: 1,
+            line: [8.0, 16.0, 2.0],
+        },
         0 => Effort {
             patterns: [1, 0],
             candidates: 1,
+            shortlist: 0,
             refine: 0,
             polish: 3,
             dual: 1,
@@ -1555,6 +1593,7 @@ fn effort_settings(effort: u8) -> Effort {
         1 => Effort {
             patterns: [2, 0],
             candidates: 3,
+            shortlist: 0,
             refine: 1,
             polish: 1,
             dual: 1,
@@ -1563,6 +1602,7 @@ fn effort_settings(effort: u8) -> Effort {
         2 => Effort {
             patterns: [2, 1],
             candidates: 4,
+            shortlist: 0,
             refine: 1,
             polish: 2,
             dual: 2,
@@ -1571,6 +1611,7 @@ fn effort_settings(effort: u8) -> Effort {
         3 => Effort {
             patterns: [3, 1],
             candidates: 6,
+            shortlist: 0,
             refine: 1,
             polish: 2,
             dual: 2,
@@ -1579,6 +1620,7 @@ fn effort_settings(effort: u8) -> Effort {
         4 => Effort {
             patterns: [4, 2],
             candidates: 8,
+            shortlist: 0,
             refine: 2,
             polish: 3,
             dual: 4,
@@ -1587,6 +1629,7 @@ fn effort_settings(effort: u8) -> Effort {
         5 => Effort {
             patterns: [6, 3],
             candidates: 12,
+            shortlist: 0,
             refine: 2,
             polish: 4,
             dual: 4,
@@ -1595,6 +1638,7 @@ fn effort_settings(effort: u8) -> Effort {
         6 => Effort {
             patterns: [8, 4],
             candidates: 16,
+            shortlist: 0,
             refine: 2,
             polish: 4,
             dual: 4,
@@ -1603,6 +1647,7 @@ fn effort_settings(effort: u8) -> Effort {
         7 => Effort {
             patterns: [12, 6],
             candidates: 24,
+            shortlist: 0,
             refine: 3,
             polish: 6,
             dual: 4,
@@ -1611,6 +1656,7 @@ fn effort_settings(effort: u8) -> Effort {
         8 => Effort {
             patterns: [16, 8],
             candidates: 32,
+            shortlist: 0,
             refine: 3,
             polish: 6,
             dual: 4,
@@ -1619,6 +1665,7 @@ fn effort_settings(effort: u8) -> Effort {
         _ => Effort {
             patterns: [32, 16],
             candidates: 64,
+            shortlist: 0,
             refine: 4,
             polish: 8,
             dual: 4,
@@ -1652,7 +1699,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     }
     let cem = if alpha { 12u8 } else { 8 };
     let ce = alpha as usize;
-    let es = effort_settings(effort);
+    let es = effort_settings(effort, n);
     // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
     let lab1: [i16; MAX_TEXELS] = std::array::from_fn(|i| if i < n { 0 } else { -1 });
     let ms1 = Moments::of(&t, &lab1, 1);
@@ -1704,7 +1751,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     // The `short` best so far, by estimate, ascending: each the score's ordered bits above its
     // layout, grid and index into the grid's estimates (so equal scores go to the first in that
     // order, whatever order they are scored in), unused ones `empty`.
-    let short = es.candidates * SHORTLIST;
+    let short = es.shortlist;
     // Floats' bits, flipped to order as unsigned integers as the floats do.
     let ord = |x: f32| {
         let b = x.to_bits();

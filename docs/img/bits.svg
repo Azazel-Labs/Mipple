@@ -114,8 +114,8 @@
 <text class="ink num" x="594.7" y="744.5" font-size="12"><tspan font-weight="600">17.3%</tspan><tspan class="mute"></tspan></text>
 <text class="ink" x="24" y="789.0" font-size="15" font-weight="600">ASTC 6x6</text>
 <text class="ink2" x="318" y="788.0" font-size="13" text-anchor="end">ISPC fast</text>
-<rect class="f3" x="330.0" y="777.0" width="157.5" height="14" rx="3"><title>ISPC fast: 10.6% fewer bits (Kodak 24, at ISPC fast’s 37.56 dB (interpolated between λ points), Zstd-19; Deflate-9 -10.1%)</title></rect>
-<text class="ink num" x="493.5" y="788.5" font-size="12"><tspan font-weight="600">10.6%</tspan><tspan class="mute"></tspan></text>
+<rect class="f3" x="330.0" y="777.0" width="230.5" height="14" rx="3"><title>ISPC fast: 15.5% fewer bits (Kodak 24, at ISPC fast’s 37.56 dB (interpolated between λ points), Zstd-19; Deflate-9 -15.0%)</title></rect>
+<text class="ink num" x="566.5" y="788.5" font-size="12"><tspan font-weight="600">15.5%</tspan><tspan class="mute"></tspan></text>
 <text class="ink" x="24" y="833.0" font-size="15" font-weight="600">ASTC 8x8</text>
 <text class="ink2" x="318" y="832.0" font-size="13" text-anchor="end">ISPC fast</text>
 <rect class="f3" x="330.0" y="821.0" width="416.6" height="14" rx="3"><title>ISPC fast: 27.9% fewer bits (Kodak 24, at ISPC fast’s 33.65 dB (interpolated between λ points), Zstd-19; Deflate-9 -27.2%)</title></rect>

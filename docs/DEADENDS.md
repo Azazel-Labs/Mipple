@@ -185,6 +185,18 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   code: one candidate encoded instead of two, which a better candidate ranking (decimation error
   weighted 1.5×) made affordable, and the dual-plane layouts gated by how far the texels sit from
   one line. Going well past ISPC's speed likely needs work across blocks in SIMD, as for BC6H.
+- **Other ways to spend effort 0's time at 6x6.** Kodak 24, one P-core, against ISPC fast in the
+  same run (1.13-1.18 s, 37.563 dB). The old effort 0 (one candidate, three polish passes,
+  shortlist 4) gave 37.577 dB at 1.21 s. With two candidates: one polish pass and the default
+  shortlist of 8 is 37.639 dB at 1.23 s; two passes 37.692 dB at 1.36 s; three passes 37.702 dB
+  at 1.39 s; a refine round on top 37.766 dB at 1.62 s. Three candidates with one pass is
+  37.686 dB at 1.47 s. Each shortlist entry costs about 7% time, and a shortlist of 2 loses
+  0.16 dB. Dropping the dual-plane layouts loses 0.09-0.15 dB for little time. Raising the
+  dual-plane and 2-partition line thresholds, which gate those layouts by how far texels sit from
+  one line, barely saves any time. Gating the second candidate by its estimate against the
+  first's measured error saves little time and loses quality, like the estimate-margin stop above. Kept: two candidates,
+  two passes and a shortlist of 5 (37.649 dB at ISPC's time). A second candidate makes Zstd
+  output about 0.9% larger than the old effort 0, though it is still 1.7% smaller than ISPC's.
 - **A second polish pass on ASTC RDO candidates.** Polishing a re-weighted or refitted candidate's
   re-chosen half twice instead of once is even on Kodak 24 (BD-rate within 0.25% at every footprint)
   for up to 7% more RDO time; not polishing at all costs 0.5-1.4%. One pass stays.

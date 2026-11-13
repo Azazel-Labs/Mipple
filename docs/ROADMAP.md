@@ -7,7 +7,7 @@ milestone in progress; every green push to main is released as the next patch (`
 ## Next up
 
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
-   a clear lead over ISPC at 6x6 (0.01 dB ahead at about its time), more footprints, a faster RDO pass.
+   more footprints, a faster RDO pass.
 2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
    signed EAC, a SIMD batch encoder.
@@ -136,11 +136,11 @@ Open for v0.9.x:
 - [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
   (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo. On Kodak, one
   thread on one P-core, effort 0 leads ISPC fast in PSNR, SSIM, Zstd size and time at 4x4 / 6x6 / 8x8
-  (0.63 / 0.01 / 0.18 dB ahead at 0.86× / 0.98× / 0.97× its time); effort 2 is 0.96 / 0.31 / 0.44 dB ahead
-  at about 2.5× its time (BENCHMARKS.md). astcenc was not available to grade.
+  (0.63 / 0.09 / 0.18 dB ahead at 0.78× / 1.00× / 0.91× its time); effort 2 is 0.96 / 0.31 / 0.44 dB ahead
+  at about 2.4× its time (BENCHMARKS.md). astcenc was not available to grade.
   - [x] RDO for ASTC: its own pass over the surface (blocks are not 4x4) with whole-block copies, earlier
-    heads re-weighted and earlier weights refitted. On Kodak at λ 1, Zstd size falls 39% / 20% / 13% at
-    4x4 / 6x6 / 8x8, costing 2.9 and 0.21 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.03 dB higher;
+    heads re-weighted and earlier weights refitted. On Kodak at λ 1, Zstd size falls 39% / 21% / 13% at
+    4x4 / 6x6 / 8x8, costing 2.9 and 0.24 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.03 dB higher;
     BENCHMARKS.md).
   - [ ] A GPU kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),

@@ -59,7 +59,7 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | ETC2 RGB | Compressonator | **−25.2%** | **−24.6%** | n/a | n/a |
 | ETC2 RGBA | Compressonator | **−23.6%** | **−24.1%** | n/a | n/a |
 | ASTC 4x4 | ISPC fast | **−17.3%** | **−16.4%** | n/a | n/a |
-| ASTC 6x6 | ISPC fast | **−10.6%** | **−10.1%** | n/a | n/a |
+| ASTC 6x6 | ISPC fast | **−15.5%** | **−15.0%** | n/a | n/a |
 | ASTC 8x8 | ISPC fast | **−27.9%** | **−27.2%** | n/a | n/a |
 
 Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads `bench-results/compete-kodak24-rdo/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites this block and `docs/img/*.svg`).

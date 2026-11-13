@@ -108,7 +108,8 @@ pass, below). Each block is fitted
 with a line in color space, the texels' positions on it become ideal weights, and those are decimated to
 every weight grid the footprint allows by exact least squares (the infill taken as separable). Every (grid,
 weight range, partitioning) candidate is ranked by an estimate of weight and endpoint quantization noise from
-per-footprint mode tables; the best few (2 at effort 0, more with effort) are encoded exactly, with weights
+per-footprint mode tables; the best few (at effort 0, 1 at 4x4 and 8x8 and 2 at 6x6; more with effort) are
+encoded exactly, with weights
 re-derived from the quantized endpoints and a coordinate-descent polish over the final block. Two- and
 three-partition patterns (the ones closest to a k-means clustering) and dual-plane layouts are tried when
 the block is far enough from one line. ASTC decodes differently in sRGB and linear mode, so the encoder is
