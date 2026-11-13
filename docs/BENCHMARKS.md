@@ -375,16 +375,17 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 
 | Oodle λ | BC1 at RMSE | BC1 at SSIM | BC7 at RMSE | BC7 at SSIM | BC4 at RMSE | BC4 at SSIM | BC5 at RMSE | BC5 at SSIM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | −17.6% | −8.5% | −6.3% (15/24 images) | −2.5% (4/24) | −13.2% | −5.0% | −30.8% | −10.9% |
-| 1 | −13.8% | −5.8% | −2.8% (12/24) | −0.8% (4/24) | −3.8% | −1.1% | −4.1% | −0.7% |
-| 10 | −9.6% | −5.7% | −1.0% | −3.0% | −5.7% | −0.9% | −9.8% | −2.4% |
-| 20 | −8.8% | −5.2% | −0.4% | −1.5% | −8.6% | −1.7% | −14.7% | −3.6% |
-| 30 | −8.8% | −4.6% | −0.7% | −0.7% | −11.5% | −2.5% | −17.9% | −4.0% |
-| 40 | −8.8% | −4.0% | −1.3% | −0.2% | −13.9% | −3.3% | −20.1% | −4.3% |
+| 0 | −18.9% | −9.4% | −6.5% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
+| 1 | −15.1% | −6.8% | −2.9% (12/24) | −0.9% (4/24) | −4.0% | −1.7% | −4.5% | −1.8% |
+| 10 | −11.5% | −7.5% | −1.9% | −3.9% | −6.6% | −2.1% | −10.7% | −4.2% |
+| 20 | −11.0% | −7.3% | −1.7% | −2.5% | −9.6% | −3.2% | −15.7% | −5.7% |
+| 30 | −11.3% | −6.9% | −2.3% | −1.8% | −12.6% | −4.3% | −19.0% | −6.3% |
+| 40 | −11.5% | −6.7% | −3.1% | −1.5% | −15.1% | −5.1% | −21.2% | −6.7% |
 
-All four are mipple 0.9.18 (smooth weight 4×, halved at channel std 12; BC4/BC5 RDO from an effort-8 base),
-BC7 rerun after the far-search speedups, the lighter second base, the mode-6-only far re-indexing, the shorter
-ranker lists and the second base without mode 3 (below). BC5's R16G16 input is rebuilt from the
+All four are rerun at 4e8547d (the near-tie deferred decision, the neighbourhood smoothness weight, BC1
+lookahead and the BC7 far-search gate; before it BC1 was −8.8% / −4.0% to −5.7% at λ 10-40 and BC7 −0.4% to
+−1.3% at RMSE, −0.2% to −3.0% at SSIM), on top of mipple 0.9.18's smooth weight (4×, halved at channel std
+12), BC4/BC5 RDO from an effort-8 base, and the BC7 speedups below. BC5's R16G16 input is rebuilt from the
 PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces the recorded λ 0 scores exactly.
 
 Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
@@ -427,12 +428,12 @@ better PSNR). Chained, these paired measurements
 put mipple at or slightly under Oodle's CPU time for the same size and quality (about 0.92-1.01×; absolute timings on this
 laptop drift by about 5% between sessions, so the ratio wants a fresh side-by-side run).
 
-mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a sweep: BC1 loses 5 of 288 image/λ/metric cells (kodim05 and kodim17 at
-λ 30-40 on SSIM, up to +2.4%); BC7 at λ 10-40 is behind on RMSE for 25 of 96 image/λ pairs (up to +2.5%,
-kodim08) and on SSIM for 26 (up to +5.5%, kodim07 and kodim20, smooth-sky images where Oodle's RDO keeps more
-structure at λ 30-40); BC4 and BC5 are behind on RMSE in 6 and 3 of 120 image/λ pairs at λ 1-40 (up to +0.6%, +1.1%), but on SSIM
-in 23 and 37: BC4 most on kodim05, kodim14 and kodim18 (+4% to +6% at λ 20-40), BC5 on kodim02, kodim13 and
-kodim22 (up to +8.7%).
+mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
+sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on
+RMSE for 10 of 96 image/λ pairs (up to +0.8%, kodim08) and on SSIM for 19 (up to +4.1%, kodim20, kodim19 and
+kodim09, smooth-sky images where Oodle's RDO keeps more structure at λ 30-40); BC4 and BC5 are behind on RMSE
+in 4 and 2 of 120 image/λ pairs at λ 1-40 (up to +0.4%, +0.6%), but on SSIM in 14 and 22: BC4 most on kodim18
+and kodim05 (about +4% at λ 20-40), BC5 on kodim02 and kodim13 (up to +6.7%).
 
 BC5 λ 1 was the last cell behind (+4.0%, then +2.6% after the smooth-weight change, 22 of 24 images reaching
 Oodle's RMSE): Oodle's λ 1 is more accurate than its own λ 0, and mipple's -e 5 base (endpoint window radius 1)

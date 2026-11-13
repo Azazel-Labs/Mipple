@@ -32,6 +32,10 @@ CPU times come from paired runs on the same core.
   overlapping 8x8 windows at the same k it loses 0.5-0.9 points of BC7 size at Oodle Texture's
   RMSE (λ 10-20 fall behind Oodle) for no SSIM gain at λ ≥ 20. Large windows mask texels next to
   edges that the error metric still sees.
+- **A smaller near-tie threshold for the deferred decision, to save time.** `--defer` 0.1 against 0.3
+  (λ 1, one thread on one P-core) keeps most of the time cost: 1.49× / 1.13× / 1.27× the RDO time of no
+  deferral for BC5 / BC7 / BC3, against 1.51× / 1.21× / 1.31×, for about two thirds of the BD-rate gain
+  (BC5 −0.16% vs −0.27%). The cost is in deferring at all, so 0.3 stays for every format.
 - **Averaging the per-channel smoothness terms** (k²/(k²+σ²) per channel instead of with the
   largest channel's variance). BC7 moves strongly toward RMSE (−1.9% to −2.8% size at Oodle
   Texture's RMSE) but falls behind Oodle on SSIM at λ 30-40 (+0.6% / +1.1%).

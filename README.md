@@ -43,18 +43,18 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | Format | vs | Zstd-19 | Deflate-9 | mipple time (s) | competitor time (s) |
 | --- | --- | --- | --- | --- | --- |
 | BC1 | bc7enc_rdo | **−26.8%** | **−23.9%** | 7.8-11.7 | 11.9-13.3 |
-| BC1 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−9.6%** to **−8.8%** (λ 10-40) | n/a | n/a | n/a |
-| BC1 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−5.7%** to **−4.0%** (λ 10-40) | n/a | n/a | n/a |
+| BC1 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−11.5%** to **−11.0%** (λ 10-40) | n/a | n/a | n/a |
+| BC1 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−7.5%** to **−6.7%** (λ 10-40) | n/a | n/a | n/a |
 | BC4 | bc7enc_rdo | **−20.0%** | **−18.4%** | 4.1-5.9 | 8.3-9.4 |
-| BC4 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−13.9%** to **−5.7%** (λ 10-40) | n/a | n/a | n/a |
-| BC4 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.3%** to **−0.9%** (λ 10-40) | n/a | n/a | n/a |
+| BC4 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−15.1%** to **−6.6%** (λ 10-40) | n/a | n/a | n/a |
+| BC4 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−5.1%** to **−2.1%** (λ 10-40) | n/a | n/a | n/a |
 | BC5 | bc7enc_rdo | **−26.1%** | **−23.8%** | 6.6-9.8 | 10.8-12.3 |
-| BC5 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−20.1%** to **−9.8%** (λ 10-40) | n/a | n/a | n/a |
-| BC5 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−4.3%** to **−2.4%** (λ 10-40) | n/a | n/a | n/a |
+| BC5 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−21.2%** to **−10.7%** (λ 10-40) | n/a | n/a | n/a |
+| BC5 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−6.7%** to **−4.2%** (λ 10-40) | n/a | n/a | n/a |
 | BC7 | bc7enc_rdo (bc7e) | **−31.5%** | **−29.2%** | 17.1-28.5 | 51.8-57.8 |
 | BC7 | bc7enc_rdo (-e) | **−30.5%** | **−28.6%** | 17.1-28.5 | 38.1-44.4 |
-| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−1.5%** to **−0.6%** (λ 10-40) | n/a | n/a | n/a |
-| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.1%** to **−0.3%** (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−3.1%** to **−1.7%** (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.9%** to **−1.5%** (λ 10-40) | n/a | n/a | n/a |
 | BC3 | bc7enc_rdo | **−16.0%** | **−14.4%** | n/a | n/a |
 | ETC2 RGB | Compressonator | **−25.2%** | **−24.6%** | n/a | n/a |
 | ETC2 RGBA | Compressonator | **−23.6%** | **−24.1%** | n/a | n/a |
