@@ -106,12 +106,20 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   samples at 6x6, but the cost is branch misses across the whole estimate loop (about 150
   estimates and 70 inserts per block, close to a coin flip each). Collecting every estimate in a
   buffer and trimming it once at the end was slower. A branchless insert of packed (score bits,
-  index) keys by min/max came out within 3% (kept, since it is no slower). The lever is fewer
-  estimates, not a faster insert.
+  index) keys by min/max came out within 3% (kept, since it is no slower). Visiting only the grids
+  whose first estimate's bound (computed for every grid at once, four lanes at a time) is under
+  the shortlist's last score cut the grid visits from 55 to about 20 per block at 6x6, output
+  byte-identical, and was no faster either. The lever is fewer estimates, not a faster insert.
+- **Summing the measured decimation error in lanes.** Taking `decimate_err`'s error sum eight
+  texels at a time, with the grid padded once per block instead of per candidate, timed identical
+  to the scalar loop in interleaved runs on one P-core. Decimation's cost is the per-grid filter
+  taps, not the sum.
 - **Scalar micro-optimization to reach ISPC fast's speed.** After the cheap early-outs, the time
   is spread over polish (about 21%), layouts, candidate encoding, decimation and spectra, and no
-  single stage is worth 2×. As with BC6H, matching ISPC needs work across blocks or across
-  texels in SIMD.
+  single stage is worth 2×. What finally matched ISPC fast was less work per block, not faster
+  code: one candidate encoded instead of two, which a better candidate ranking (decimation error
+  weighted 1.5×) made affordable, and the dual-plane layouts gated by how far the texels sit from
+  one line. Going well past ISPC's speed likely needs work across blocks in SIMD, as for BC6H.
 
 ## ETC2 / EAC
 

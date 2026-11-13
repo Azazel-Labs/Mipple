@@ -7,7 +7,7 @@ milestone in progress; every green push to main is released as the next patch (`
 ## Next up
 
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output.~~ Done (v1.0 below); next for it: the RDO pass (blocks are not 4x4,
-   so λ > 0 is refused), a GPU kernel, closing the speed gap to ISPC at 4x4 and 6x6, more footprints.
+   so λ > 0 is refused), a GPU kernel, a clear lead over ISPC at 6x6 (0.01 dB ahead at about its time), more footprints.
 2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
    signed EAC, a SIMD batch encoder.
@@ -130,9 +130,9 @@ Open for v0.9.x:
   - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
 - [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
   (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo. On Kodak, one
-  thread, effort 0 is 0.75 / 0.04 / 0.15 dB ahead of ISPC fast at 4x4 / 6x6 / 8x8, at 2.1× / 2.5× its time
-  at 4x4 / 6x6 and 0.83× at 8x8; effort 2 is 0.98 / 0.28 / 0.37 dB ahead (BENCHMARKS.md). astcenc was not
-  available to grade.
+  thread on one P-core, effort 0 leads ISPC fast in PSNR, SSIM, Zstd size and time at 4x4 / 6x6 / 8x8
+  (0.63 / 0.01 / 0.18 dB ahead at 0.86× / 0.98× / 0.97× its time); effort 2 is 0.96 / 0.31 / 0.44 dB ahead
+  at about 2.5× its time (BENCHMARKS.md). astcenc was not available to grade.
   - [ ] RDO for ASTC (blocks are not 4x4, so the RDO pass does not apply and λ > 0 is refused), a GPU
     kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),

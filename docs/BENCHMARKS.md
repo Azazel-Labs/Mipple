@@ -603,29 +603,31 @@ R11 from the red channel and RG11 from red and green, PSNR over those channels:
 ## ASTC vs ISPC
 
 ASTC LDR on all 24 Kodak images, one thread for both encoders, top level only, `python scripts/compete_astc.py
-test-images/kodak --runs 3 --efforts 0,2`. Intel's ISPC Texture Compressor (`ispc_astc:<W>x<H>` in
+test-images/kodak --runs 3 --efforts 0,2 --cpu 16`. Intel's ISPC Texture Compressor (`ispc_astc:<W>x<H>` in
 `bcn_harness`, its fast profile, the only ASTC profile it has for opaque images) is the only ASTC encoder on
 disk: astcenc could not be built here, so it is not graded. Both encode for linear decoding and are scored by
 `mipple score --astc-linear`: PSNR over RGB, luma SSIM, bits/texel after Zstd-19, and time as the sum over the
-images of each image's best of three runs (mipple's encode loop, the harness's block loop). The times are
-the encoder at 46a0021; the SIMD polish after it gives byte-identical blocks and is somewhat faster:
+images of each image's best of three runs (mipple's encode loop, the harness's block loop). The script pins
+everything to one P-core of the Core Ultra 7 155H (logical CPU 16) and runs the encoders in turn on each
+image. Earlier tables here were unpinned, so encodes landed on P- or E-cores (E-cores run ISPC about 1.8×
+slower), and their times are not comparable with these:
 
 | footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
 | --- | --- | ---: | ---: | ---: | ---: |
-| 4x4 | ISPC fast | 43.789 | 0.99677 | 7.286 | 1.71 |
-| 4x4 | mipple effort 0 | 44.538 | 0.99733 | 7.111 | 3.56 |
-| 4x4 | mipple effort 2 | 44.766 | 0.99745 | 7.167 | 7.24 |
-| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 1.40 |
-| 6x6 | mipple effort 0 | 37.601 | 0.98323 | 3.297 | 3.42 |
-| 6x6 | mipple effort 2 | 37.847 | 0.98415 | 3.298 | 7.08 |
-| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 3.24 |
-| 8x8 | mipple effort 0 | 33.804 | 0.95808 | 1.881 | 2.69 |
-| 8x8 | mipple effort 2 | 34.018 | 0.95998 | 1.880 | 11.15 |
+| 4x4 | ISPC fast | 43.789 | 0.99677 | 7.286 | 1.48 |
+| 4x4 | mipple effort 0 | 44.414 | 0.99741 | 6.926 | 1.28 |
+| 4x4 | mipple effort 2 | 44.744 | 0.99753 | 7.148 | 3.58 |
+| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 1.14 |
+| 6x6 | mipple effort 0 | 37.577 | 0.98380 | 3.248 | 1.12 |
+| 6x6 | mipple effort 2 | 37.876 | 0.98463 | 3.287 | 2.89 |
+| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.05 |
+| 8x8 | mipple effort 0 | 33.833 | 0.95966 | 1.859 | 1.02 |
+| 8x8 | mipple effort 2 | 34.086 | 0.96129 | 1.873 | 2.49 |
 
-Effort 0 leads ISPC fast in PSNR at every footprint (0.75, 0.04 and 0.15 dB) but is 2.1× and 2.5× slower at
-4x4 and 6x6; at 8x8 it is 17% faster. Its SSIM is slightly behind at 6x6 and 8x8. Effort 2 leads in both
-metrics everywhere, at 3.4-5.1× ISPC's time. mipple's blocks are 2.4% and 1.1% smaller after Zstd at 4x4 and
-6x6 and the same size at 8x8; there is no RDO pass for ASTC yet, so λ > 0 is refused.
+Effort 0 leads ISPC fast in PSNR, SSIM, size and time at every footprint: 0.63 / 0.01 / 0.18 dB ahead, 4.9%
+/ 2.5% / 1.2% smaller after Zstd, and 14% / 2% / 3% faster at 4x4 / 6x6 / 8x8. The 6x6 lead is thin in both
+quality and time: other pinned runs had effort 0 up to 7% slower than ISPC there, so call it parity. Effort 2 leads further in quality (0.96 /
+0.31 / 0.44 dB) at 2.4-2.5× ISPC's time. There is no RDO pass for ASTC yet, so λ > 0 is refused.
 
 ## Lossless field split (`--prep`)
 

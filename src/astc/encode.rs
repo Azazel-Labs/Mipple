@@ -1480,6 +1480,12 @@ fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, 
 /// Candidates whose decimation error is measured, per candidate encoded.
 const SHORTLIST: usize = 4;
 
+/// The weight of decimation error against the quantization terms when ranking candidates. Finer
+/// grids than the plain sum picks win often enough to matter: on Kodak at efforts 0 and 2, 1.5
+/// gains 0.03-0.08 dB and 0.0005-0.0015 SSIM at 6x6 and 8x8 (at 4x4, SSIM up and PSNR within
+/// 0.03 dB). The pick among the candidates encoded is still by their exact error.
+const DECIMATION_BIAS: f32 = 1.5;
+
 /// Settings for one effort level.
 #[derive(Clone, Copy)]
 struct Effort {
@@ -1494,15 +1500,16 @@ struct Effort {
     /// Dual-plane layouts tried (one channel on the second plane, those leaving the other
     /// channels closest to a line first).
     dual: usize,
-    /// Two- and three-partition patterns are tried only when the texels' mean squared distance
-    /// from one line, per channel, is at least this.
-    line: [f32; 2],
+    /// Two- and three-partition patterns (`line[0]`, `line[1]`) and dual-plane layouts
+    /// (`line[2]`) are tried only when the texels' mean squared distance from one line, per
+    /// channel, is at least this.
+    line: [f32; 3],
 }
 
 fn effort_settings(effort: u8) -> Effort {
     #[cfg(test)]
     if effort == u8::MAX {
-        // Tuning runs: `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3`.
+        // Tuning runs: `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3,line_dual`.
         static E: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
         return *E.get_or_init(|| {
             let mut v: Vec<f64> = std::env::var("MIPPLE_ASTC_EFFORT")
@@ -1510,7 +1517,7 @@ fn effort_settings(effort: u8) -> Effort {
                 .split(',')
                 .map(|x| x.parse().unwrap())
                 .collect();
-            v.resize(8, 0.0);
+            v.resize(9, 0.0);
             let u = |i: usize| v[i] as usize;
             Effort {
                 patterns: [u(0), u(1)],
@@ -1518,18 +1525,18 @@ fn effort_settings(effort: u8) -> Effort {
                 refine: u(3),
                 polish: u(4),
                 dual: u(5),
-                line: [v[6] as f32, v[7] as f32],
+                line: [v[6] as f32, v[7] as f32, v[8] as f32],
             }
         });
     }
     match effort {
         0 => Effort {
             patterns: [1, 0],
-            candidates: 2,
+            candidates: 1,
             refine: 0,
-            polish: 1,
+            polish: 3,
             dual: 1,
-            line: [2.0, 16.0],
+            line: [8.0, 16.0, 2.0],
         },
         1 => Effort {
             patterns: [2, 0],
@@ -1537,7 +1544,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 1,
             polish: 1,
             dual: 1,
-            line: [2.0, 16.0],
+            line: [2.0, 16.0, 0.0],
         },
         2 => Effort {
             patterns: [2, 1],
@@ -1545,7 +1552,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 1,
             polish: 2,
             dual: 2,
-            line: [2.0, 16.0],
+            line: [2.0, 16.0, 0.0],
         },
         3 => Effort {
             patterns: [3, 1],
@@ -1553,7 +1560,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 1,
             polish: 2,
             dual: 2,
-            line: [1.0, 8.0],
+            line: [1.0, 8.0, 0.0],
         },
         4 => Effort {
             patterns: [4, 2],
@@ -1561,7 +1568,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 2,
             polish: 3,
             dual: 4,
-            line: [1.0, 8.0],
+            line: [1.0, 8.0, 0.0],
         },
         5 => Effort {
             patterns: [6, 3],
@@ -1569,7 +1576,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 2,
             polish: 4,
             dual: 4,
-            line: [0.5, 4.0],
+            line: [0.5, 4.0, 0.0],
         },
         6 => Effort {
             patterns: [8, 4],
@@ -1577,7 +1584,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 2,
             polish: 4,
             dual: 4,
-            line: [0.5, 4.0],
+            line: [0.5, 4.0, 0.0],
         },
         7 => Effort {
             patterns: [12, 6],
@@ -1585,7 +1592,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 3,
             polish: 6,
             dual: 4,
-            line: [0.25, 2.0],
+            line: [0.25, 2.0, 0.0],
         },
         8 => Effort {
             patterns: [16, 8],
@@ -1593,7 +1600,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 3,
             polish: 6,
             dual: 4,
-            line: [0.25, 2.0],
+            line: [0.25, 2.0, 0.0],
         },
         _ => Effort {
             patterns: [32, 16],
@@ -1601,7 +1608,7 @@ fn effort_settings(effort: u8) -> Effort {
             refine: 4,
             polish: 8,
             dual: 4,
-            line: [0.0, 0.0],
+            line: [0.0, 0.0, 0.0],
         },
     }
 }
@@ -1641,7 +1648,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     layouts.push(Layout::new(&t, 1, 0, &lab1, NO_CCS, &ms1, Some(axis1)));
     // The texels' mean squared distance from their line, per channel.
     let off_line = layouts[0].orth / (n * t.ch) as f32;
-    if es.dual > 0 {
+    if es.dual > 0 && off_line >= es.line[2] {
         // Channels for the second plane, those leaving the rest closest to a line first: the
         // variance of the other channels off their dominant axis.
         let mut off: Vec<(f32, usize, [f32; 4])> = (0..t.ch)
@@ -1723,6 +1730,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             if let Some(sp2) = &sp2 {
                 derr += sp2[bh][bw] - sp2[gy][gx];
             }
+            derr *= DECIMATION_BIAS;
             for (ei, e) in grid.est[kind].iter().enumerate() {
                 // No later mode has less weight noise or less endpoint noise than this bound.
                 if ord(derr + (span * e.wnoise + per_texel * e.cnoise_after + lay.orth)) > thr {
@@ -1775,7 +1783,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 derr
             }
         };
-        c.0 = c.1 + derr;
+        c.0 = c.1 + DECIMATION_BIAS * derr;
     }
     let keep = es.candidates.min(cands.len());
     if keep < cands.len() {
@@ -1920,6 +1928,7 @@ mod tests {
             .collect();
         files.sort();
         let (mut secs, mut sum, mut sum_ispc, mut count) = (0f64, 0f64, 0f64, 0);
+        let (mut ssim, mut ssim_ispc) = (0f64, 0f64);
         for f in files.iter().filter(|f| f.extension().is_some_and(|e| e == "png")) {
             let src = Surface::load(f).unwrap();
             let t0 = std::time::Instant::now();
@@ -1939,25 +1948,32 @@ mod tests {
             let dec = super::super::decode::decode_rgba(&data, src.width, src.height, bw, bh, false);
             let p = crate::metrics::psnr(&src, &dec, &[0, 1, 2]);
             sum += p;
+            ssim += crate::metrics::ssim_luma(&src, &dec);
             count += 1;
             let mut line = format!("{}: {p:.3}", f.file_stem().unwrap().to_string_lossy());
             if let Some(dir) = parts.get(3) {
-                let path = std::path::Path::new(dir)
-                    .join(format!("{}_{bw}x{bh}.astc", f.file_stem().unwrap().to_string_lossy()));
-                if let Ok(bytes) = std::fs::read(&path) {
+                // ISPC's encodes, as this bench names them or as scripts/compete_astc.py does.
+                let stem = f.file_stem().unwrap().to_string_lossy();
+                let read = |name: String| std::fs::read(std::path::Path::new(dir).join(name));
+                if let Ok(bytes) =
+                    read(format!("{stem}_{bw}x{bh}.astc")).or_else(|_| read(format!("{stem}_{bw}x{bh}_ISPC_fast.astc")))
+                {
                     let a = super::super::file::read(&bytes).unwrap();
                     let d = super::super::decode::decode_rgba(&a.blocks, a.width, a.height, bw, bh, false);
                     let q = crate::metrics::psnr(&src, &d, &[0, 1, 2]);
                     sum_ispc += q;
+                    ssim_ispc += crate::metrics::ssim_luma(&src, &d);
                     line += &format!("  ispc {q:.3}");
                 }
             }
             println!("{line}");
         }
         println!(
-            "{bw}x{bh} effort {effort}: mean RGB PSNR {:.3} dB (ispc {:.3}), {secs:.3} s on one thread",
+            "{bw}x{bh} effort {effort}: mean RGB PSNR {:.3} dB (ispc {:.3}), {secs:.3} s on one thread, luma SSIM {:.5} (ispc {:.5})",
             sum / count as f64,
-            sum_ispc / count as f64
+            sum_ispc / count as f64,
+            ssim / count as f64,
+            ssim_ispc / count as f64
         );
     }
 

@@ -12,15 +12,20 @@ Encoders (each skipped if not found):
 Not on disk, so not graded: astcenc (building from GitHub is not available here).
 
 Time: mipple's own base-encode time and the harness's block loop, best of --runs per image, summed over
-the images. Both run on one thread unless --threads says otherwise.
+the images. Both run on one thread unless --threads says otherwise. The encoders take turns per image,
+so drift in clock speed lands on both. On a hybrid CPU, pin to one performance core with --cpu (on a
+Core Ultra 7 155H, logical CPUs 0, 1 and 10-19 are P-cores; 2-9 are E-cores, which run ISPC about 1.8x
+slower and mipple differently, so an unpinned run compares whatever cores each encode lands on).
 
-Usage: python scripts/compete_astc.py test-images/kodak --runs 3 --efforts 0,2
+Usage: python scripts/compete_astc.py test-images/kodak --runs 3 --efforts 0,2 --cpu 16
 """
 
 import argparse
+import ctypes
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,7 +49,17 @@ def main():
     ap.add_argument("--runs", type=int, default=3, help="best of N timings per image")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="first N images only")
+    ap.add_argument("--cpu", type=int, default=None, help="pin this script and the encoders to this logical CPU")
     a = ap.parse_args()
+    if a.cpu is not None:
+        # Child processes inherit the affinity.
+        if sys.platform == "win32":
+            k = ctypes.windll.kernel32
+            k.GetCurrentProcess.restype = ctypes.c_void_p
+            if not k.SetProcessAffinityMask(ctypes.c_void_p(k.GetCurrentProcess()), ctypes.c_size_t(1 << a.cpu)):
+                raise SystemExit(f"could not pin to CPU {a.cpu}")
+        else:
+            os.sched_setaffinity(0, {a.cpu})
 
     imgs = sorted(p for p in a.images.iterdir() if p.suffix.lower() in (".png", ".jpg", ".tga"))
     if a.limit:
@@ -58,32 +73,33 @@ def main():
         r = run([str(a.mipple), "score", str(src), str(enc), "--csv", "--astc-linear"], env).strip().split(",")
         return float(r[5]), float(r[6]), int(r[9]), int(r[3]) * int(r[4])
 
-    def grade(name, encode, secs_of):
-        secs = psnr = ssim = zst = tex = 0.0
-        for img in imgs:
-            enc = work / f"{img.stem}_{name.replace(' ', '_')}.astc"
-            secs += min(secs_of(run(encode(img, enc), env)) for _ in range(a.runs))
-            p, q, z, n = score(img, enc)
-            psnr += p
-            ssim += q
-            zst += z
-            tex += n
-        k = len(imgs)
-        print(f"| {name} | {psnr / k:.3f} | {ssim / k:.5f} | {zst * 8 / tex:.3f} | {secs:.2f} |", flush=True)
-
     print("| footprint / encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |")
     print("| --- | ---: | ---: | ---: | ---: |")
     for fp in a.footprints.split(","):
+        # (name, command for (source, output), seconds from its stdout)
+        encoders = []
         if a.harness.exists():
-            grade(f"{fp} ISPC fast",
-                  lambda s, d, fp=fp: [str(a.harness), f"ispc_astc:{fp}", str(s), str(d), str(a.threads)],
-                  lambda out: float(re.search(r"secs=([0-9.]+)", out).group(1)))
+            encoders.append((f"{fp} ISPC fast",
+                             lambda s, d, fp=fp: [str(a.harness), f"ispc_astc:{fp}", str(s), str(d), str(a.threads)],
+                             lambda out: float(re.search(r"secs=([0-9.]+)", out).group(1))))
         if a.mipple.exists():
             for e in a.efforts.split(","):
-                grade(f"{fp} mipple effort {e}",
-                      lambda s, d, fp=fp, e=e: [str(a.mipple), "encode", str(s), "-o", str(d), "-f", f"astc-{fp}",
-                                                "-e", e, "--no-mips", "--linear"],
-                      lambda out: float(re.search(r"time: base ([0-9.]+)s", out).group(1)))
+                encoders.append((f"{fp} mipple effort {e}",
+                                 lambda s, d, fp=fp, e=e: [str(a.mipple), "encode", str(s), "-o", str(d), "-f",
+                                                           f"astc-{fp}", "-e", e, "--no-mips", "--linear"],
+                                 lambda out: float(re.search(r"time: base ([0-9.]+)s", out).group(1))))
+        totals = {name: [0.0] * 5 for name, _, _ in encoders}  # secs, psnr, ssim, zstd bytes, texels
+        for img in imgs:
+            for name, encode, secs_of in encoders:
+                enc = work / f"{img.stem}_{name.replace(' ', '_')}.astc"
+                tot = totals[name]
+                tot[0] += min(secs_of(run(encode(img, enc), env)) for _ in range(a.runs))
+                for i, v in enumerate(score(img, enc), 1):
+                    tot[i] += v
+        for name, _, _ in encoders:
+            secs, psnr, ssim, zst, tex = totals[name]
+            k = len(imgs)
+            print(f"| {name} | {psnr / k:.3f} | {ssim / k:.5f} | {zst * 8 / tex:.3f} | {secs:.2f} |", flush=True)
 
 
 if __name__ == "__main__":
