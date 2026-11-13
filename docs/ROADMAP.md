@@ -101,8 +101,9 @@ Open for v0.9.x:
   - Rejected (quality, or slower with no gain): see [DEADENDS.md](DEADENDS.md#bc7-rdo).
   - Measured, not pursued: whole blocks and index halves are only 0-10% repeated within the ranker's 2048-block
     reach at λ 1 on most images (30-60% at λ 4+), so a deduplicated prefilter scan pays mostly at higher λ.
-  - Next: a ranker reach of 1024 (the rate model's window) instead of 2048 (halves the prefilter scan; needs a
-    quality run); structural cuts to the far re-indexing and the second base, using the cross-domain research
+  - Measured, not pursued: a ranker reach of 1024 or 512 saves no measurable time (the profile's 15% for the
+    scan overstates it), and neither does a shallower rate-model hash chain (depth 4 is slower).
+  - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
 - [ ] **Smarter entropy reduction:** pick mode/partition/p-bits by an estimated rate *given the previous blocks*

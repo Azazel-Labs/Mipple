@@ -56,6 +56,18 @@ CPU times come from paired runs on the same core.
   - Building the second base only where the entropy-reduced base errs by 64λ or more costs 1.9×
     the CPU, because that base also bounds the search.
 - **Ranker prefilter with 4 blocks per key** (instead of 8) lost about 0.07%.
+- **A shorter ranker reach (1024 or 512 blocks instead of 2048).** No measurable time saved (8 Kodak
+  images, λ 1, one pinned core, interleaved best of three: 11.20 / 11.29 / 11.12 s) for 0.3% / 0.4% larger
+  Zstd files. Profiles put the prefilter scan near 15% of λ 1 time, but halving it doesn't show up.
+- **Per-field refinement depth.** Refining only 64 blocks back for the endpoint half saves about 2% of
+  λ 1 time, and for the index half about 4%, but each shrinks the lead over Oodle by 0.1-0.3 points
+  (λ 40 SSIM −1.5% to −1.3% / −1.2%).
+- **Starting from the plain base instead of the entropy-reduced one (`--entropy off`).** Slower (36.9 s
+  vs 32.9 s for Kodak-24 at λ 1 on one pinned core) and 2% larger at λ 1, and the SSIM lead over Oodle at
+  λ 30 / 40 falls from −1.8% / −1.5% to −1.0% / −0.6%.
+- **A different hash-chain depth for the rate model (16 now).** Depth 4 is slower (44 s vs 37 s for
+  Kodak-24 at λ 1): the weaker model's estimates leave looser bounds, so the search does more work. Depth 8
+  saves nothing, and depths 32 / 64 add 6% / 22% to RDO time. Quality moves by 0.1 point or less.
 - **Byte-identical micro-variants that didn't help:**
   - u16 hash-chain deltas;
   - skipping `texels_far` when cached;
