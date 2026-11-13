@@ -20,7 +20,14 @@ const FORMAT_NOTES = {
   "etc2-rgb": "4 bits/texel · RGB, opaque · the mobile (OpenGL ES 3, Vulkan) counterpart of BC1",
   "etc2-rgba": "8 bits/texel · ETC2 RGB plus an EAC alpha channel · the mobile counterpart of BC3",
   bc7: "8 bits/texel · RGB or RGBA · best color quality. With RDO (λ > 0) it runs the effort-8 search first, which takes tens of seconds per 512² image in the browser",
+  "astc-4x4": "8 bits/texel · RGB or RGBA, 4×4 texels per 16-byte block · the mobile counterpart of BC7. No RDO yet, so λ is ignored",
+  "astc-6x6": "3.56 bits/texel · RGB or RGBA, 6×6 texels per block · smaller than any BC format at some cost in detail. No RDO yet",
+  "astc-8x8": "2 bits/texel · RGB or RGBA, 8×8 texels per block · for large, soft textures. No RDO yet",
 };
+
+// ASTC has no RDO yet: the encoder ignores λ (and `mipple encode` refuses λ > 0).
+const hasRdo = (s) => !s.format.startsWith("astc");
+const lambdaOf = (s) => (hasRdo(s) ? s.lambda : 0);
 
 const DEFAULTS = {
   format: "bc1",
@@ -133,7 +140,7 @@ function setTags() {
   }
   left.textContent = "Original";
   right.hidden = !viewer.hasDecoded;
-  right.textContent = `${s.format.toUpperCase()} · λ ${s.lambda} · e${s.effort}`;
+  right.textContent = `${s.format.toUpperCase()} · λ ${lambdaOf(s)} · e${s.effort}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -382,7 +389,7 @@ function showResult(r, s) {
   $("normal-stat").hidden = !Number.isFinite(r.normalDeg);
   $("s-normal").textContent = Number.isFinite(r.normalDeg) ? `${r.normalDeg.toFixed(2)}°` : "–";
   $("s-time").textContent = fmtMs(r.baseMs + r.rdoMs);
-  $("s-rdo").textContent = s.lambda > 0 ? `${((100 * r.rdoChanged) / Math.max(1, r.blocks)).toFixed(1)}%` : "off";
+  $("s-rdo").textContent = lambdaOf(s) > 0 ? `${((100 * r.rdoChanged) / Math.max(1, r.blocks)).toFixed(1)}%` : "off";
   $("s-raw").textContent = fmtBytes(r.rawBytes);
   $("s-file").textContent = fmtBytes(r.fileBytes);
 
@@ -402,7 +409,7 @@ function showResult(r, s) {
   const base = state.source.fileName.replace(/\.[^.]+$/, "");
   const dl = $("download");
   dl.href = state.downloadUrl;
-  dl.download = `${base}_${s.format}_l${s.lambda}_e${s.effort}.ktx2`;
+  dl.download = `${base}_${s.format}_l${lambdaOf(s)}_e${s.effort}.ktx2`;
   dl.setAttribute("aria-disabled", "false");
   dl.querySelector("span").textContent = `Download .ktx2 (${fmtBytes(r.fileBytes)})`;
   // One nowrap span per argument, so a line never breaks inside "--no-mips".
@@ -460,6 +467,8 @@ function syncControls() {
     b.disabled = s.format !== "bc7";
   }
   $("entropy-field").classList.toggle("disabled", s.format !== "bc7");
+  $("lambda").disabled = !hasRdo(s);
+  $("lambda-field").classList.toggle("disabled", !hasRdo(s));
   $("format-note").textContent = FORMAT_NOTES[s.format];
   $("mips").checked = s.mips;
   $("normal").checked = s.normal;

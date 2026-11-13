@@ -35,6 +35,12 @@ pub fn read(bytes: &[u8]) -> Result<AstcFile> {
     );
     let (bw, bh, bd) = (bytes[4] as u32, bytes[5] as u32, bytes[6] as u32);
     ensure!(bd == 1 && u24(&bytes[13..16]) == 1, "3D ASTC is not supported");
+    // The header is untrusted: a footprint outside the 2D ones (4x4 to 12x12) would divide by
+    // zero below, and the block count can exceed 32 bits.
+    ensure!(
+        (4..=12).contains(&bw) && (4..=12).contains(&bh),
+        "not a 2D ASTC footprint: {bw}x{bh}"
+    );
     let f = AstcFile {
         bw,
         bh,
@@ -43,7 +49,7 @@ pub fn read(bytes: &[u8]) -> Result<AstcFile> {
         blocks: Vec::new(),
     };
     let (gx, gy) = f.grid();
-    let n = (gx * gy) as usize * 16;
+    let n = usize::try_from(u64::from(gx) * u64::from(gy) * 16)?;
     ensure!(
         bytes.len() >= 16 + n,
         ".astc file truncated: {} of {} block bytes",
@@ -82,6 +88,26 @@ mod tests {
             blocks: (0..3 * 2 * 16).map(|i| i as u8).collect(),
         };
         assert_eq!(read(&write(&f)).unwrap(), f);
+    }
+
+    #[test]
+    fn rejects_bad_footprints_and_huge_sizes() {
+        let f = AstcFile {
+            bw: 4,
+            bh: 4,
+            width: 4,
+            height: 4,
+            blocks: vec![0; 16],
+        };
+        for (bw, bh) in [(0, 4), (4, 0), (3, 4), (13, 12)] {
+            let mut b = write(&f);
+            (b[4], b[5]) = (bw, bh);
+            assert!(read(&b).is_err(), "{bw}x{bh}");
+        }
+        // A 2^24-1 square at 4x4: 2^44 block bytes, far past the data.
+        let mut b = write(&f);
+        b[7..13].fill(0xff);
+        assert!(read(&b).is_err());
     }
 
     /// Prints which block configurations `.astc` files use: `MIPPLE_ASTC_STATS=a.astc;b.astc`.

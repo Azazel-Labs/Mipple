@@ -6,7 +6,8 @@ milestone in progress; every green push to main is released as the next patch (`
 
 ## Next up
 
-1. **ASTC LDR (4x4, 6x6, 8x8)** output, with the same RDO pass (v1.0 below).
+1. ~~ASTC LDR (4x4, 6x6, 8x8) output.~~ Done (v1.0 below); next for it: the RDO pass (blocks are not 4x4,
+   so λ > 0 is refused), a GPU kernel, closing the speed gap to ISPC at 4x4 and 6x6, more footprints.
 2. BC6H: RDO with a log-space distortion, signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
    signed EAC, a SIMD batch encoder.
@@ -127,7 +128,13 @@ Open for v0.9.x:
   - [x] Partition ranking across lanes (byte-identical output): effort 0 is 0.13 dB ahead of ISPC fast
     and 13% faster. The mode estimates still run one lane at a time.
   - [ ] RDO for BC6H (a log-space distortion so λ means the same across exposures), signed BC6H, GPU kernel.
-- [ ] **ASTC LDR (4x4, 6x6, 8x8)** output, with the same RDO pass. Next up.
+- [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
+  (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo. On Kodak, one
+  thread, effort 0 is 0.75 / 0.04 / 0.15 dB ahead of ISPC fast at 4x4 / 6x6 / 8x8, at 2.1× / 2.5× its time
+  at 4x4 / 6x6 and 0.83× at 8x8; effort 2 is 0.98 / 0.28 / 0.37 dB ahead (BENCHMARKS.md). astcenc was not
+  available to grade.
+  - [ ] RDO for ASTC (blocks are not 4x4, so the RDO pass does not apply and λ > 0 is refused), a GPU
+    kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
   eighth of its time and effort 1 0.94 dB ahead in half; with RDO, files are about 25% smaller at

@@ -6,7 +6,7 @@
 use crate::format::{BlockOpts, EntropyMode, Format};
 use crate::metrics;
 use crate::pipeline::{EncodedTexture, decode_blocks, flatten, rdo_bases};
-use crate::rdo::{self, RdoParams};
+use crate::rdo::{self, RdoParams, RdoStats};
 use crate::surface::Surface;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
@@ -118,6 +118,7 @@ pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) ->
         Format::Bc1 | Format::Bc3 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba => {
             metrics::ssim_luma(source, dec)
         }
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => metrics::ssim_luma(source, dec),
         Format::Bc4 | Format::EacR11 => metrics::ssim_channel(source, dec, 0),
         Format::Bc5 | Format::EacRg11 => {
             (metrics::ssim_channel(source, dec, 0) + metrics::ssim_channel(source, dec, 1)) / 2.0
@@ -157,7 +158,7 @@ pub fn score(
         source.height
     );
     let data = &tex.levels[0].data;
-    let dec = decode_blocks(tex.format, data, tex.width, tex.height, normal);
+    let dec = decode_blocks(tex.format, data, tex.width, tex.height, tex.srgb, normal);
     let (psnr, ssim, normal_deg) = quality(tex.format, source, &dec, normal);
     let zstd_bytes = zstd::bulk::compress(data, zstd_level)?.len();
     let deflate_bytes = deflate_len(data, deflate_level)?;
@@ -217,7 +218,9 @@ pub fn run(cfg: &BenchConfig, mut progress: impl FnMut(&BenchRow)) -> Result<Vec
     Ok(rows)
 }
 
-/// Runs the benchmark over in-memory images (`cfg.inputs` is ignored).
+/// Runs the benchmark over in-memory images (`cfg.inputs` is ignored). ASTC has no RDO, so it gets
+/// rows for λ = 0 only; it is encoded for sRGB decoding unless the image is a normal map, as
+/// `mipple encode` does.
 pub fn run_images(
     images: &[BenchImage],
     cfg: &BenchConfig,
@@ -233,7 +236,12 @@ pub fn run_images(
             // on first use and shared by the λ that need it.
             let mut bases: [Option<BaseEncode>; 4] = Default::default();
             let mut base_used = [false; 4];
+            // The decode mode ASTC encodes for (other formats ignore it).
+            let srgb = format.default_srgb() && !normal;
             for &lambda in &cfg.lambdas {
+                if format.is_astc() && lambda > 0.0 {
+                    continue;
+                }
                 let reduce = cfg.entropy.resolve(lambda);
                 let rdo_on = lambda > 0.0;
                 let key = reduce as usize * 2 + rdo_on as usize;
@@ -243,6 +251,7 @@ pub fn run_images(
                     let opts = BlockOpts {
                         effort: cfg.effort,
                         reduce_entropy: reduce,
+                        srgb,
                     };
                     let (base, alts) = rdo_bases(surface, &src, format, opts, rdo_on);
                     *slot = Some((base, alts, t0.elapsed().as_secs_f64()));
@@ -258,12 +267,19 @@ pub fn run_images(
                     ..cfg.rdo
                 };
                 let t1 = Instant::now();
-                let stats = rdo::optimize_with_alt(format, &src, &mut blocks, alts, &w, &params);
+                let stats = if params.enabled() {
+                    rdo::optimize_with_alt(format, &src, &mut blocks, alts, &w, &params)
+                } else {
+                    RdoStats {
+                        blocks: blocks.len(),
+                        ..Default::default()
+                    }
+                };
                 let rdo_secs = t1.elapsed().as_secs_f64();
                 let data = flatten(format, &blocks);
                 let zstd_bytes = zstd::bulk::compress(&data, cfg.zstd_level)?.len();
                 let deflate_bytes = deflate_len(&data, cfg.deflate_level)?;
-                let dec = decode_blocks(format, &data, surface.width, surface.height, normal);
+                let dec = decode_blocks(format, &data, surface.width, surface.height, srgb, normal);
                 let (psnr, ssim, normal_deg) = quality(format, surface, &dec, normal);
                 let row = BenchRow {
                     hash: fnv1a(&data),

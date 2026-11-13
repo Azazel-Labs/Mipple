@@ -115,7 +115,7 @@ pub struct Settings {
     entropy: EntropyMode,
     /// `-e`, 0 (fastest) to 9 (best).
     pub effort: u8,
-    /// `-l`, RDO lambda; 0 disables RDO.
+    /// `-l`, RDO lambda; 0 disables RDO. ASTC has no RDO and ignores it.
     pub lambda: f32,
     /// `--smooth-scale`: distortion multiplier for flat blocks.
     pub smooth_scale: f32,
@@ -138,7 +138,8 @@ pub struct Settings {
 
 #[wasm_bindgen]
 impl Settings {
-    /// `mipple encode` defaults for `format` (bc1, bc3, bc4, bc5, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11) and BC7 `entropy` (off, on, auto).
+    /// `mipple encode` defaults for `format` (bc1, bc3, bc4, bc5, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11,
+    /// astc-4x4, astc-6x6, astc-8x8) and BC7 `entropy` (off, on, auto).
     #[wasm_bindgen(constructor)]
     pub fn new(format: &str, entropy: &str) -> Result<Settings, JsError> {
         Self::parse(format, entropy).map_err(|e| js_error(&e))
@@ -148,9 +149,23 @@ impl Settings {
     pub fn command(&self, input: &str) -> String {
         let d = RdoParams::default();
         let mut c = format!(
-            "mipple encode {input} -o out.ktx2 -f {} -e {} -l {}",
-            self.format, self.effort, self.lambda
+            "mipple encode {input} -o out.ktx2 -f {} -e {}",
+            self.format, self.effort
         );
+        if self.format.is_astc() {
+            // No RDO, so none of its flags.
+            if self.normal {
+                c += " --normal";
+            }
+            if !self.mips {
+                c += " --no-mips";
+            }
+            if self.zstd != DEFAULT_ZSTD {
+                c += &format!(" --zstd {}", self.zstd);
+            }
+            return c;
+        }
+        c += &format!(" -l {}", self.lambda);
         if self.entropy != EntropyMode::default() {
             c += &format!(" --entropy {}", entropy_name(self.entropy));
         }
@@ -218,7 +233,12 @@ impl Settings {
         o.srgb = !self.normal && self.format.default_srgb();
         o.mips = self.mips;
         o.rdo = RdoParams {
-            lambda: self.lambda.max(0.0),
+            // `mipple encode` refuses λ > 0 for ASTC, which has no RDO.
+            lambda: if self.format.is_astc() {
+                0.0
+            } else {
+                self.lambda.max(0.0)
+            },
             smooth_scale: self.smooth_scale,
             smooth_std: self.smooth_std,
             max_rms_ratio: self.max_rms_ratio,
@@ -231,6 +251,9 @@ impl Settings {
 
     /// The `KTXwriterScParams` value `mipple encode` writes.
     fn sc_params(&self, opts: &EncodeOptions) -> String {
+        if self.format.is_astc() {
+            return format!("--format {} --effort {} --zstd {}", self.format, opts.effort, self.zstd);
+        }
         format!(
             "--format {} --effort {} --lambda {} --entropy {} --window {} --zstd {}",
             self.format,
@@ -471,7 +494,7 @@ async fn run(surface: &Surface, s: &Settings, gpu: Option<&'static Gpu>) -> Resu
 
 /// What a format stores, as RGBA8 for display: BC1, ETC2 RGB and BC6H opaque RGB, BC4 and EAC R11 their
 /// R channel as gray, BC5 and EAC RG11 R and G (with Z rebuilt into blue for normal maps, as
-/// `mipple decode --normal` does), BC3, ETC2 RGBA and BC7 RGBA.
+/// `mipple decode --normal` does), BC3, ETC2 RGBA, BC7 and ASTC RGBA.
 fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.pixels.len() * 4);
     for &[r, g, b, a] in &s.pixels {
@@ -483,6 +506,7 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
             }
             Format::Bc5 | Format::EacRg11 => [r, g, 0, 255],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => [r, g, b, a],
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => [r, g, b, a],
             Format::Bc6h => [r, g, b, 255],
         });
     }
@@ -537,13 +561,17 @@ mod tests {
             "etc2-rgba",
             "eac-r11",
             "eac-rg11",
+            "astc-4x4",
+            "astc-6x6",
+            "astc-8x8",
         ] {
             let mut s = Settings::parse(f, "auto").unwrap();
+            // Ignored for ASTC, as `options` drops it.
             s.lambda = 1.0;
             s.mips = false;
             let e = now(run(&src, &s, None)).unwrap();
             assert_eq!((e.width, e.height, e.levels), (36, 20, 1));
-            assert_eq!(e.raw_bytes, 9 * 5 * s.format.block_bytes());
+            assert_eq!(Some(e.raw_bytes), s.format.level_bytes(36, 20));
             assert!(e.stored_bytes < e.file_bytes);
             assert_eq!(e.decoded_view.len(), 36 * 20 * 4);
             // BC4 is lossless on this gradient: both are infinite.
@@ -583,6 +611,13 @@ mod tests {
         assert_eq!(
             s.command("in.png"),
             "mipple encode in.png -o out.ktx2 -f bc7 -e 5 -l 0.5 --no-mips --smooth-scale 2.5"
+        );
+        let mut s = Settings::parse("astc-6x6", "auto").unwrap();
+        s.lambda = 0.5;
+        s.mips = false;
+        assert_eq!(
+            s.command("in.png"),
+            "mipple encode in.png -o out.ktx2 -f astc-6x6 -e 5 --no-mips"
         );
         assert!(Settings::parse("bc2", "auto").is_err());
         assert!(Settings::parse("bc7", "maybe").is_err());

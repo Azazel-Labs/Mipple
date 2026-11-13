@@ -20,7 +20,8 @@ pub struct EncodeOptions {
     pub format: Format,
     /// 0..=[`crate::format::MAX_EFFORT`], higher is slower and better.
     pub effort: u8,
-    /// Data is sRGB-encoded color (affects mip filtering and the KTX2 vkFormat/DFD).
+    /// Data is sRGB-encoded color (affects mip filtering, the KTX2 vkFormat/DFD and, for ASTC,
+    /// which decode mode the blocks are encoded for).
     pub srgb: bool,
     /// Input is a tangent-space normal map (renormalized mips).
     pub normal_map: bool,
@@ -30,12 +31,13 @@ pub struct EncodeOptions {
     pub mips: bool,
     /// What alpha means: with transparency, the colour under transparent texels is bled from the
     /// visible colour around it and freed for the encoder, and mips weight RGB by alpha
-    /// ([`crate::alpha`]). [`AlphaMode::Auto`] (default) picks it for BC3 and BC7 colour textures.
+    /// ([`crate::alpha`]). [`AlphaMode::Auto`] (default) picks it for BC3, BC7, ETC2 RGBA8 and ASTC
+    /// colour textures.
     pub alpha: AlphaMode,
     /// An alpha-test cutoff (0-1) whose coverage every mip keeps (cutouts drawn with alpha test or
     /// alpha to coverage); `None` averages alpha plainly.
     pub alpha_cutoff: Option<f32>,
-    /// RDO settings (`lambda == 0` disables RDO).
+    /// RDO settings (`lambda == 0` disables RDO). BC6H and ASTC have no RDO yet and ignore λ.
     pub rdo: RdoParams,
     /// Where base encoding runs: [`GpuMode::Auto`] (default) uses the GPU where its encoder is the
     /// faster one ([`crate::gpu::Gpu::preferred`]). Formats without a GPU encoder, builds without
@@ -77,6 +79,7 @@ impl EncodeOptions {
         BlockOpts {
             effort: self.effort,
             reduce_entropy: self.entropy.resolve(self.rdo.lambda),
+            srgb: self.srgb && self.format.supports_srgb(),
         }
     }
 
@@ -87,9 +90,9 @@ impl EncodeOptions {
     }
 
     /// Whether alpha is treated as transparency ([`Self::alpha`]): only for formats that keep
-    /// alpha (BC3, BC7, ETC2 RGBA8) and never for normal maps.
+    /// alpha (BC3, BC7, ETC2 RGBA8, ASTC) and never for normal maps.
     pub fn alpha_transparency(&self) -> bool {
-        matches!(self.format, Format::Bc3 | Format::Bc7 | Format::Etc2Rgba)
+        (matches!(self.format, Format::Bc3 | Format::Bc7 | Format::Etc2Rgba) || self.format.is_astc())
             && !self.normal_map
             && match self.alpha {
                 AlphaMode::Auto => self.srgb,
@@ -146,7 +149,17 @@ pub struct EncodeReport {
 }
 
 /// Base-encodes every block of a surface in parallel. Returns (source blocks, encoded blocks).
+///
+/// # Panics
+///
+/// For ASTC, whose blocks do not pair with 4x4 source blocks: use [`encode`] (or
+/// [`crate::astc::encode::encode_surface`]) instead.
 pub fn encode_base(surface: &Surface, format: Format, opts: impl Into<BlockOpts>) -> (Vec<Block>, Vec<[u8; 16]>) {
+    assert!(
+        !format.is_astc(),
+        "encode_base pairs blocks with 4x4 source blocks; {format} blocks are {:?} texels",
+        format.block_dims()
+    );
     let opts = opts.into();
     let src = surface.blocks();
     let enc = if direct(format, opts) {
@@ -177,6 +190,10 @@ pub fn base_block_opts(format: Format, bo: BlockOpts, rdo: bool) -> BlockOpts {
 /// One surface's starting point for RDO, made as [`encode`] makes it: the base encoding and the
 /// alternate bases each block may start from (BC7 only). `src` is `surface.blocks()`, or empty when
 /// the format reads the surface directly and `rdo` is off.
+///
+/// # Panics
+///
+/// When `rdo` is set for ASTC, which has no RDO.
 pub fn rdo_bases(
     surface: &Surface,
     src: &[Block],
@@ -184,6 +201,7 @@ pub fn rdo_bases(
     bo: BlockOpts,
     rdo: bool,
 ) -> (Vec<[u8; 16]>, Vec<Vec<[u8; 16]>>) {
+    assert!(!(rdo && format.is_astc()), "{format} has no RDO");
     let bo = base_block_opts(format, bo, rdo);
     // BC7 RDO: the plain search at RDO_BASE_EFFORT or more, as the base or (entropy-reduced
     // base) the second base. Its cost is small next to RDO's, and RDO keeps much of the
@@ -197,6 +215,7 @@ pub fn rdo_bases(
         } else {
             bo.effort
         },
+        ..bo
     };
     let base = if format == Format::Bc7 && !bo.reduce_entropy {
         plain
@@ -230,7 +249,8 @@ pub fn rdo_bases(
     (blocks, alts)
 }
 
-/// Formats whose encoder reads the surface directly instead of materialized blocks.
+/// Formats whose encoder reads the surface directly instead of materialized blocks. ASTC must:
+/// its blocks are not 4x4.
 fn direct(format: Format, opts: BlockOpts) -> bool {
     match format {
         Format::Bc7 => crate::bc7::fast_cfg(opts).is_some(),
@@ -238,7 +258,8 @@ fn direct(format: Format, opts: BlockOpts) -> bool {
     }
 }
 
-/// Raw blocks (`format.block_bytes()` each) of a direct-path format.
+/// Raw blocks (`format.block_bytes()` each, raster order over [`Format::block_dims`] blocks) of a
+/// direct-path format.
 fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec<u8> {
     match format {
         Format::Bc1 => crate::bc1::encode_surface(surface, opts.effort),
@@ -250,6 +271,10 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
         Format::Etc2Rgba => crate::etc::encode_surface_rgba(surface, opts.effort),
         Format::EacR11 => crate::eac::encode_surface(surface, (0, 1), true, opts.effort),
         Format::EacRg11 => crate::eac::encode_surface(surface, (0, 2), true, opts.effort),
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => {
+            let (bw, bh) = format.block_dims();
+            crate::astc::encode::encode_surface(surface, bw, bh, opts.srgb, opts.effort)
+        }
         Format::Bc7 => crate::bc7::fast::encode_surface(
             surface,
             crate::bc7::fast_cfg(opts).expect("BC7 direct path without a fast configuration"),
@@ -331,8 +356,9 @@ pub fn prepare<'a>(surface: &'a Surface, opts: &EncodeOptions) -> Vec<Cow<'a, Su
 fn rdo_params(opts: &EncodeOptions) -> RdoParams {
     RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
-        // The 8-bit RDO does not apply to BC6H.
-        lambda: if opts.format == Format::Bc6h {
+        // The 8-bit RDO does not apply to BC6H, and works on 4x4 blocks, which ASTC's are not
+        // (an ASTC RDO pass is on the roadmap).
+        lambda: if opts.format == Format::Bc6h || opts.format.is_astc() {
             0.0
         } else {
             opts.rdo.lambda
@@ -521,7 +547,12 @@ pub fn decode_level_hdr(tex: &EncodedTexture, level: usize) -> crate::hdr::HdrSu
 }
 
 /// Decodes raw blocks back to an image. For BC5 with `normal_map`, Z is reconstructed into blue.
-pub fn decode_blocks(format: Format, data: &[u8], width: u32, height: u32, normal_map: bool) -> Surface {
+/// `srgb` is the decode mode, which only ASTC's decode depends on (other formats ignore it).
+pub fn decode_blocks(format: Format, data: &[u8], width: u32, height: u32, srgb: bool, normal_map: bool) -> Surface {
+    if format.is_astc() {
+        let (bw, bh) = format.block_dims();
+        return crate::astc::decode_rgba(data, width, height, bw, bh, srgb);
+    }
     let mut s = Surface::new(width, height);
     let n = format.block_bytes();
     let bw = width.div_ceil(4);
@@ -543,5 +574,5 @@ pub fn decode_blocks(format: Format, data: &[u8], width: u32, height: u32, norma
 /// Decodes one mip level of an encoded texture.
 pub fn decode_level(tex: &EncodedTexture, level: usize, normal_map: bool) -> Surface {
     let l = &tex.levels[level];
-    decode_blocks(tex.format, &l.data, l.width, l.height, normal_map)
+    decode_blocks(tex.format, &l.data, l.width, l.height, tex.srgb, normal_map)
 }

@@ -3,12 +3,12 @@
 //! Pipeline (see `docs/ARCHITECTURE.md`):
 //!
 //! ```text
-//! source image -> mip chain -> base block encode (BCn) -> RDO pass (LZ-aware) -> KTX2 (+Zstd)
-//!                                                                           \-> benchmark harness
+//! source image -> mip chain -> base block encode (BCn, ETC2, ASTC) -> RDO pass (LZ-aware) -> KTX2 (+Zstd)
+//!                                                                                       \-> benchmark harness
 //! ```
 //!
-//! Covers BC1, BC3, BC4, BC5, BC6H and BC7 (every mode encoded and decoded), ETC2 RGB/RGBA8 and
-//! EAC R11/RG11 for mobile,
+//! Covers BC1, BC3, BC4, BC5, BC6H and BC7 (every mode encoded and decoded), ETC2 RGB/RGBA8,
+//! EAC R11/RG11 and ASTC LDR 4x4/6x6/8x8 (no RDO yet) for mobile,
 //! a byte-level LZ rate model shared by every format, and a KTX2 writer/reader.
 
 pub mod alpha;

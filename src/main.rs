@@ -6,7 +6,7 @@ use mipple::bench::{self, BenchConfig};
 use mipple::gpu::Gpu;
 use mipple::hdr::{self, HdrSurface};
 use mipple::pipeline::{self, EncodeOptions};
-use mipple::{EntropyMode, Format, RdoParams, Surface, dds, ktx2, metrics, synth};
+use mipple::{EntropyMode, Format, RdoParams, Surface, astc, dds, ktx2, metrics, synth};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -14,7 +14,7 @@ use std::time::Instant;
 #[command(
     name = "mipple",
     version,
-    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC6H/BC7, ETC2/EAC → KTX2)"
+    about = "Rate-distortion optimized GPU texture encoder (BC1/BC3/BC4/BC5/BC6H/BC7, ETC2/EAC, ASTC → KTX2)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,9 +23,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Encode an image to a KTX2 file.
+    /// Encode an image to a KTX2 file (DDS for BC formats, .astc for ASTC; by extension).
     Encode(EncodeArgs),
-    /// Decode one mip level of a KTX2 file to PNG (BC6H also to Radiance .hdr, by extension).
+    /// Decode one mip level of a KTX2, DDS or .astc file to PNG (BC6H also to Radiance .hdr, by
+    /// extension).
     Decode {
         input: PathBuf,
         #[arg(short, long)]
@@ -36,8 +37,10 @@ enum Cmd {
         /// Reconstruct Z (blue) for BC5 normal maps.
         #[arg(long)]
         normal: bool,
+        #[command(flatten)]
+        astc: AstcDecodeArgs,
     },
-    /// Print a KTX2 file's header, levels and key/value data.
+    /// Print a KTX2 file's header, levels and key/value data (or an .astc file's header).
     Info { input: PathBuf },
     /// Compare two images (PSNR, SSIM, optional normal-map angular error).
     Compare {
@@ -52,7 +55,7 @@ enum Cmd {
     /// Fast regression check: encode a small fixed corpus and compare with a stored baseline.
     /// Exits non-zero on a regression.
     Check(CheckArgs),
-    /// Score any encoder's output (KTX2 or DDS, top level) against its source image,
+    /// Score any encoder's output (KTX2, DDS or .astc, top level) against its source image,
     /// with the same metrics and back-end compressors as `bench`. BC6H is scored in linear light:
     /// multi-exposure PSNR (the psnr column) and log2 RMSE (an extra last column).
     Score {
@@ -74,6 +77,8 @@ enum Cmd {
         /// Print one CSV row: label,image,format,width,height,psnr,ssim,normal_deg,raw,zstd,deflate,zstd_bpt,deflate_bpt,secs
         #[arg(long)]
         csv: bool,
+        #[command(flatten)]
+        astc: AstcDecodeArgs,
     },
     /// Write the procedural test-image set.
     Synth {
@@ -84,6 +89,15 @@ enum Cmd {
     },
     /// Report the GPU mipple would use and which formats it can encode there.
     Gpu,
+}
+
+/// How to read an .astc file, whose header does not record the decode mode.
+#[derive(Args, Clone, Copy)]
+struct AstcDecodeArgs {
+    /// Decode .astc input as linear (UNORM) rather than sRGB, the mode `encode` targets for color
+    /// textures. Ignored for KTX2 and DDS, which record it.
+    #[arg(long)]
+    astc_linear: bool,
 }
 
 #[derive(Args, Clone)]
@@ -164,25 +178,26 @@ struct EncodeArgs {
     /// Encoder effort, 0 (fastest) to 9 (best); 5 is balanced.
     #[arg(short, long, default_value_t = mipple::format::DEFAULT_EFFORT, value_parser = clap::value_parser!(u8).range(0..=9))]
     effort: u8,
-    /// RDO lambda; 0 disables RDO. Try 0.5 – 4.
+    /// RDO lambda; 0 disables RDO. Try 0.5 – 4. (BC6H and ASTC have no RDO yet.)
     #[arg(short, long, default_value_t = 0.0)]
     lambda: f32,
     /// Treat the input as linear data (default for BC4/BC5; for BC6H, 8-bit input as linear 0-1
     /// instead of sRGB).
     #[arg(long, conflicts_with = "srgb")]
     linear: bool,
-    /// Treat the input as sRGB color (default for BC1/BC3/BC7).
+    /// Treat the input as sRGB color (default for BC1/BC3/BC7, ETC2 and ASTC). For ASTC this is
+    /// also the decode mode the blocks are encoded for.
     #[arg(long)]
     srgb: bool,
     /// Input is a tangent-space normal map (renormalized mips; implies linear).
     #[arg(long)]
     normal: bool,
-    /// Only encode the top level.
+    /// Only encode the top level (always, for an .astc output).
     #[arg(long)]
     no_mips: bool,
     /// What alpha means. transparency: the colour under alpha 0 is bled from the visible colour
     /// around it (no dark mip fringes) and costs no bits; data: an independent channel; auto:
-    /// transparency for BC3 and BC7 colour textures.
+    /// transparency for BC3, BC7, ETC2 RGBA8 and ASTC colour textures.
     #[arg(long, value_enum, default_value_t = mipple::alpha::AlphaMode::Auto)]
     alpha: mipple::alpha::AlphaMode,
     /// Alpha-test cutoff (0-1) whose coverage every mip keeps, for cutouts (foliage, fences)
@@ -291,8 +306,9 @@ fn main() -> Result<()> {
             output,
             level,
             normal,
+            astc,
         } => {
-            let tex = load_encoded(&input)?;
+            let tex = load_encoded(&input, astc)?;
             if level >= tex.levels.len() {
                 bail!("level {level} out of range (file has {})", tex.levels.len());
             }
@@ -319,6 +335,20 @@ fn main() -> Result<()> {
         }
         Cmd::Info { input } => {
             let bytes = std::fs::read(&input)?;
+            if bytes.starts_with(&ASTC_MAGIC) {
+                let f = astc::file::read(&bytes)?;
+                println!(
+                    "{}: {}x{}, ASTC {}x{} footprint ({}), 1 level, {} block bytes (the decode mode is not recorded)",
+                    input.display(),
+                    f.width,
+                    f.height,
+                    f.bw,
+                    f.bh,
+                    astc_format(f.bw, f.bh).map_or("not a footprint mipple encodes".into(), |f| f.to_string()),
+                    f.blocks.len()
+                );
+                return Ok(());
+            }
             let h = ktx2::read_header(&bytes)?;
             let fmt = Format::from_vk(h.vk_format).map_or_else(
                 || "unsupported".into(),
@@ -384,8 +414,9 @@ fn main() -> Result<()> {
             label,
             secs,
             csv,
+            astc,
         } => {
-            let tex = load_encoded(&encoded)?;
+            let tex = load_encoded(&encoded, astc)?;
             if tex.format == Format::Bc6h {
                 return score_hdr(&source, &encoded, &tex, zstd_level, deflate_level, label, secs, csv);
             }
@@ -473,11 +504,48 @@ fn main() -> Result<()> {
     }
 }
 
-/// Loads a KTX2 or DDS file, detected by its magic bytes.
-fn load_encoded(path: &std::path::Path) -> Result<mipple::EncodedTexture> {
+/// The first bytes of an .astc file (its magic number, little-endian).
+const ASTC_MAGIC: [u8; 4] = 0x5CA1_AB13u32.to_le_bytes();
+
+/// The ASTC format with this block footprint, if mipple has one.
+fn astc_format(bw: u32, bh: u32) -> Option<Format> {
+    Format::ALL
+        .into_iter()
+        .find(|f| f.is_astc() && f.block_dims() == (bw, bh))
+}
+
+/// Whether `path` has the extension `ext` (any case).
+fn has_ext(path: &std::path::Path, ext: &str) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// Loads a KTX2, DDS or .astc file, detected by its magic bytes. An .astc file is one level, read
+/// in the decode mode `astc` picks (its header does not record one).
+fn load_encoded(path: &std::path::Path, astc: AstcDecodeArgs) -> Result<mipple::EncodedTexture> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if bytes.starts_with(b"DDS ") {
         dds::read(&bytes)
+    } else if bytes.starts_with(&ASTC_MAGIC) {
+        let f = astc::file::read(&bytes)?;
+        let Some(format) = astc_format(f.bw, f.bh) else {
+            bail!(
+                "{}: ASTC {}x{} blocks; mipple reads 4x4, 6x6 and 8x8",
+                path.display(),
+                f.bw,
+                f.bh
+            );
+        };
+        Ok(mipple::EncodedTexture {
+            format,
+            srgb: !astc.astc_linear,
+            width: f.width,
+            height: f.height,
+            levels: vec![pipeline::Level {
+                width: f.width,
+                height: f.height,
+                data: f.blocks,
+            }],
+        })
     } else {
         ktx2::read(&bytes)
     }
@@ -615,11 +683,28 @@ fn encode(a: EncodeArgs) -> Result<()> {
     if a.format == Format::Bc6h {
         return encode_bc6h(&a);
     }
-    if a.format.is_etc() && a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds")) {
+    let is_dds = has_ext(&a.output, "dds");
+    let is_astc_file = has_ext(&a.output, "astc");
+    if is_dds && !dds::supports(a.format) {
         bail!(
-            "DDS has no {} format (DXGI lacks ETC2 and EAC); write KTX2 instead",
+            "DDS has no {} format (it carries BC formats only, not ETC2, EAC or ASTC); write KTX2 instead",
             a.format
         );
+    }
+    if is_astc_file && !a.format.is_astc() {
+        bail!(
+            "an .astc file holds ASTC blocks, not {}: pick --format astc-4x4, astc-6x6 or astc-8x8, or write KTX2",
+            a.format
+        );
+    }
+    if a.format.is_astc() && a.lambda > 0.0 {
+        bail!("ASTC has no RDO yet: encode {} with --lambda 0 (the default)", a.format);
+    }
+    if is_astc_file && !a.no_mips {
+        eprintln!("note: an .astc file holds one level; encoding the top level only (--no-mips)");
+    }
+    if is_astc_file && a.prep != mipple::ktx2::PrepMode::Off {
+        eprintln!("note: --prep applies to KTX2 only; the .astc file stores plain blocks");
     }
     let surface = Surface::load(&a.input)?;
     let mut opts = EncodeOptions::new(a.format);
@@ -633,7 +718,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
     } else {
         a.format.default_srgb()
     };
-    opts.mips = !a.no_mips;
+    opts.mips = !a.no_mips && !is_astc_file;
     opts.alpha = a.alpha;
     opts.alpha_cutoff = a.alpha_cutoff;
     opts.gpu = if a.cpu {
@@ -652,18 +737,31 @@ fn encode(a: EncodeArgs) -> Result<()> {
     let (tex, report) = pipeline::encode(&surface, &opts);
     let encode_secs = t.elapsed().as_secs_f64();
     let zstd = (a.zstd > 0).then_some(a.zstd);
-    let sc_params = format!(
-        "--format {} --effort {} --lambda {} --entropy {} --window {} --zstd {}",
-        a.format,
-        a.effort,
-        a.lambda,
-        format!("{:?}", a.entropy).to_lowercase(),
-        opts.rdo.window_for(a.format),
-        a.zstd
-    );
-    let is_dds = a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds"));
+    let sc_params = if a.format.is_astc() {
+        // No RDO, so no λ, entropy reduction or window.
+        format!("--format {} --effort {} --zstd {}", a.format, a.effort, a.zstd)
+    } else {
+        format!(
+            "--format {} --effort {} --lambda {} --entropy {} --window {} --zstd {}",
+            a.format,
+            a.effort,
+            a.lambda,
+            format!("{:?}", a.entropy).to_lowercase(),
+            opts.rdo.window_for(a.format),
+            a.zstd
+        )
+    };
     let bytes = if is_dds {
         dds::write(&tex)?
+    } else if is_astc_file {
+        let (bw, bh) = tex.format.block_dims();
+        astc::file::write(&astc::file::AstcFile {
+            bw,
+            bh,
+            width: tex.width,
+            height: tex.height,
+            blocks: tex.levels[0].data.clone(),
+        })
     } else {
         ktx2::write(&tex, zstd, Some(&sc_params), a.prep)?
     };
@@ -689,6 +787,17 @@ fn encode(a: EncodeArgs) -> Result<()> {
         bytes.len(),
         bytes.len() as f64 * 8.0 / texels
     );
+    if is_astc_file {
+        println!(
+            "  the .astc header does not record the decode mode: these blocks are for {} decoding{}",
+            if tex.srgb { "sRGB" } else { "linear (UNORM)" },
+            if tex.srgb {
+                ""
+            } else {
+                " (mipple decode/score --astc-linear)"
+            }
+        );
+    }
     println!(
         "  level 0 PSNR {:.2} dB{}",
         metrics::psnr(&surface, &dec, &channels),
@@ -749,6 +858,9 @@ fn run_bench(a: BenchArgs) -> Result<()> {
     let mut lambdas = a.lambdas.clone();
     if !lambdas.contains(&0.0) {
         lambdas.insert(0, 0.0);
+    }
+    if a.formats.iter().any(|f| f.is_astc()) && lambdas.iter().any(|&l| l > 0.0) {
+        println!("note: ASTC has no RDO yet; its rows are λ = 0 only");
     }
     let cfg = BenchConfig {
         inputs,

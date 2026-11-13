@@ -136,6 +136,7 @@ impl Gpu {
         match format {
             Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc5 | Format::Bc6h | Format::Bc7 => false,
             Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => false,
         }
     }
 
@@ -209,6 +210,7 @@ impl Gpu {
                 // No kernel: `encodes` is false.
                 Format::Bc3 | Format::Bc6h => None,
                 Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => None,
+                Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => None,
             }
         }
         #[cfg(not(feature = "gpu"))]

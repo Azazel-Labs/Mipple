@@ -4,7 +4,7 @@
 mod common;
 
 use common::{corpus, reference_decode};
-use mipple::pipeline::encode_base;
+use mipple::pipeline::{self, EncodeOptions, encode_base};
 use mipple::{BlockOpts, Format, bc1, bc7};
 
 fn channels(format: Format) -> &'static [usize] {
@@ -18,15 +18,21 @@ fn channels(format: Format) -> &'static [usize] {
         Format::Etc2Rgba => &[0, 1, 2, 3],
         Format::EacR11 => &[0],
         Format::EacRg11 => &[0, 1],
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => &[0, 1, 2, 3],
     }
 }
 
 #[test]
 fn encoded_blocks_match_reference_decoder() {
     for (name, img) in corpus(64) {
-        for format in Format::ALL.into_iter().filter(|&f| f != Format::Bc6h) {
+        // ASTC blocks are not 4x4: `astc_blocks_match_reference_decoder` covers them.
+        for format in Format::ALL.into_iter().filter(|&f| f != Format::Bc6h && !f.is_astc()) {
             for (effort, reduce_entropy) in [(0u8, false), (1, false), (5, false), (6, false), (5, true)] {
-                let opts = BlockOpts { effort, reduce_entropy };
+                let opts = BlockOpts {
+                    effort,
+                    reduce_entropy,
+                    ..BlockOpts::default()
+                };
                 let (_, blocks) = encode_base(&img, format, opts);
                 let n = format.block_bytes();
                 let mut ours = [[0u8; 4]; 16];
@@ -48,6 +54,50 @@ fn encoded_blocks_match_reference_decoder() {
                 }
             }
         }
+    }
+}
+
+/// ASTC blocks from the CLI's encode path (whole surfaces, linear decode mode, sizes that leave
+/// partial edge blocks) decode the same in `texture2ddecoder`, to its 8-bit rounding: within 1, and
+/// mostly exact.
+#[test]
+fn astc_blocks_match_reference_decoder() {
+    for format in [Format::Astc4x4, Format::Astc6x6, Format::Astc8x8] {
+        let (bw, bh) = format.block_dims();
+        let (mut texels, mut off_by_one) = (0usize, 0usize);
+        for (name, img) in corpus(52) {
+            for effort in [0u8, 2, 5] {
+                let mut opts = EncodeOptions::new(format);
+                opts.effort = effort;
+                opts.srgb = false;
+                opts.mips = false;
+                let (tex, _) = pipeline::encode(&img, &opts);
+                let data = &tex.levels[0].data;
+                assert_eq!(Some(data.len()), format.level_bytes(img.width, img.height));
+                let mut ours = vec![[0u8; 4]; (bw * bh) as usize];
+                for (bi, raw) in data.as_chunks::<16>().0.iter().enumerate() {
+                    mipple::astc::decode_block(raw, bw, bh, false, &mut ours);
+                    let theirs = common::reference_decode_astc(raw, bw, bh);
+                    for (i, (o, t)) in ours.iter().zip(&theirs).enumerate() {
+                        for c in 0..4 {
+                            let d = o[c].abs_diff(t[c]);
+                            assert!(
+                                d <= 1,
+                                "{name} {format} e{effort} block {bi} texel {i} ch {c}: ours {o:?} ref {t:?} raw {raw:02x?}"
+                            );
+                            off_by_one += usize::from(d == 1);
+                        }
+                        texels += 1;
+                    }
+                }
+            }
+        }
+        // The rounding difference shows on a few percent of channels at most.
+        assert!(
+            off_by_one * 20 < texels * 4,
+            "{format}: {off_by_one} of {} channels off by one",
+            texels * 4
+        );
     }
 }
 
@@ -160,6 +210,7 @@ fn bc7_reduced_entropy_mode6_endpoints() {
         let opts = BlockOpts {
             effort: 1,
             reduce_entropy: true,
+            ..BlockOpts::default()
         };
         let (src, blocks) = encode_base(&img, Format::Bc7, opts);
         let (_, plain) = encode_base(&img, Format::Bc7, 1);

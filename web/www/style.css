@@ -360,6 +360,16 @@ h2 {
   flex: 1;
 }
 
+/* Ten formats: two rows of five. */
+#format {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+#format button {
+  padding-inline: 2px;
+}
+
 .seg button:disabled {
   opacity: 0.45;
   cursor: not-allowed;

@@ -4,7 +4,8 @@
 [![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
 
 A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC3 / BC4 / BC5 / BC7**
-blocks, tuned so Zstd or Deflate shrink them further, plus **BC6H** for HDR and **ETC2 / EAC** for mobile.
+blocks, tuned so Zstd or Deflate shrink them further, plus **BC6H** for HDR and **ETC2 / EAC** and **ASTC**
+(4x4, 6x6, 8x8) for mobile.
 Output goes to **KTX2** with optional Zstd supercompression. GPUs read it directly; nothing new runs at load
 time.
 
@@ -114,13 +115,13 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 | Command | What it does |
 | --- | --- |
-| `encode IN -o OUT.ktx2\|OUT.dds [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw) or DDS by extension (ETC2/EAC: KTX2 only) |
-| `decode IN.ktx2\|IN.dds -o OUT.png [--level N] [--normal]` | Decode one mip level |
-| `info IN.ktx2` | Header, per-level offsets and sizes, key/value data |
+| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`, λ 0 only) |
+| `decode IN.ktx2\|IN.dds\|IN.astc -o OUT.png [--level N] [--normal] [--astc-linear]` | Decode one mip level (a `.astc` file records no sRGB flag: it decodes as sRGB unless `--astc-linear`) |
+| `info IN.ktx2\|IN.astc` | Header, per-level offsets and sizes, key/value data |
 | `compare A B [--normal]` | PSNR (RGB, per channel, luma), SSIM, normal angular error |
 | `bench PATHS… [-f …] [-l …] [--csv] [--markdown]` | Size-vs-quality sweep across a corpus |
 | `check [--corpus DIR --limit N] [--update-baseline]` | Fast regression check against a stored baseline; non-zero exit on regression |
-| `score SRC.png ENC.dds\|ENC.ktx2 [--csv --label L --secs T]` | Grade *any* encoder's output with mipple's metrics and back ends |
+| `score SRC.png ENC.dds\|ENC.ktx2\|ENC.astc [--csv --label L --secs T]` | Grade *any* encoder's output with mipple's metrics and back ends |
 | `synth [-o DIR]` | Write the procedural test set |
 | `gpu` | The GPU adapter, what it supports, and which formats it base-encodes |
 
@@ -152,6 +153,10 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGBA8, and EAC R11 / RG11 (unsigned)
   encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against
   Compressonator. CPU only.
+- ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint) encoders and
+  a decoder for every 2D footprint, to KTX2 or `.astc`, encoded for sRGB or linear decoding;
+  `scripts/compete_astc.py` grades them against Intel ISPC, whose fast profile effort 0 beats in PSNR at all
+  three footprints on the 24 Kodak images. CPU only, no RDO yet.
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.

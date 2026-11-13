@@ -2,7 +2,8 @@
 //! bc7f harness, texconv...) can be scored with the same metrics and back ends as mipple.
 //!
 //! Reads legacy FourCC (DXT1, DXT4/DXT5, ATI1/BC4U, ATI2/BC5U) and DX10-extended headers; writes DX10.
-//! DXGI has no ETC2 or EAC formats, so those are KTX2 only and [`write`] rejects them.
+//! DXGI has no ETC2 or EAC formats and Direct3D does not use its ASTC values, so those are KTX2
+//! only (ASTC can also go to a `.astc` file) and [`write`] rejects them ([`supports`]).
 
 // Header fields are untrusted: sizes and offsets go through checked conversions and arithmetic.
 #![warn(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
@@ -27,7 +28,13 @@ fn dxgi(format: Format, srgb: bool) -> Option<u32> {
         (Format::Bc7, false) => 98,
         (Format::Bc7, true) => 99,
         (Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11, _) => return None,
+        (Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8, _) => return None,
     })
+}
+
+/// Whether [`write`] can store `format` (the BC formats; not ETC2, EAC or ASTC).
+pub fn supports(format: Format) -> bool {
+    dxgi(format, false).is_some()
 }
 
 fn from_dxgi(v: u32) -> Option<(Format, bool)> {
@@ -50,12 +57,12 @@ fn u32_field(v: usize) -> u32 {
     u32::try_from(v).expect("DDS header field fits in 32 bits")
 }
 
-/// Writes a DX10-header DDS containing every level of `tex`. Fails for formats DXGI lacks
-/// (ETC2, EAC: use KTX2).
+/// Writes a DX10-header DDS containing every level of `tex`. Fails for the formats DDS does not
+/// carry ([`supports`]: ETC2, EAC and ASTC; use KTX2).
 pub fn write(tex: &EncodedTexture) -> Result<Vec<u8>> {
     let Some(dxgi) = dxgi(tex.format, tex.srgb) else {
         bail!(
-            "DDS has no {} format (DXGI lacks ETC2 and EAC); write KTX2 instead",
+            "DDS has no {} format (it carries BC formats only, not ETC2, EAC or ASTC); write KTX2 instead",
             tex.format
         );
     };
@@ -174,7 +181,7 @@ mod tests {
             let mut o = EncodeOptions::new(format);
             o.effort = 0;
             let (tex, _) = pipeline::encode(&img, &o);
-            if format.is_etc() {
+            if !supports(format) {
                 assert!(write(&tex).is_err(), "{format}");
                 continue;
             }

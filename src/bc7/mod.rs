@@ -156,7 +156,7 @@ pub fn mode6_cfg() -> fast::Cfg {
         refits: 2,
         ..fast_cfg(BlockOpts {
             effort: 0,
-            reduce_entropy: false,
+            ..BlockOpts::default()
         })
         .expect("plain BC7 has a fast configuration")
     }

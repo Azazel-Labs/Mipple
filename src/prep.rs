@@ -11,6 +11,7 @@
 //! * ETC2 RGB, EAC R11 / RG11, ETC2 RGBA8: the BC1, BC4 / BC5 and BC3 splits, which fit their
 //!   layouts (four header bytes then four selector bytes; base and multiplier/table bytes then
 //!   six index bytes).
+//! * BC6H, ASTC: no field split yet; one stream of whole blocks.
 //! * BC7: mode byte per block (8 = invalid block, stored raw in the escape stream); shape byte
 //!   (partition, or rotation + index selection); endpoint channels one per byte (with the p-bit
 //!   folded in as the low bit for modes with a p-bit per endpoint); shared p-bits (mode 1); index
@@ -29,7 +30,7 @@ pub fn forward(format: Format, raw: &[u8]) -> Vec<u8> {
         Format::Bc4 | Format::EacR11 => split_bc4(raw, 1),
         Format::Bc5 | Format::EacRg11 => split_bc4(raw, 2),
         // No field split yet: one stream of whole blocks.
-        Format::Bc6h => vec![raw.to_vec()],
+        Format::Bc6h | Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => vec![raw.to_vec()],
         Format::Bc7 => split_bc7(raw),
     };
     let mut out = Vec::with_capacity(raw.len() + 4 * streams.len());
@@ -55,7 +56,7 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
         Format::Bc3 | Format::Etc2Rgba => 8,
         Format::Bc4 | Format::EacR11 => 3,
         Format::Bc5 | Format::EacRg11 => 6,
-        Format::Bc6h => 1,
+        Format::Bc6h | Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 1,
         Format::Bc7 => 6,
     };
     let mut lens = Vec::with_capacity(n);
@@ -77,7 +78,9 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
         Format::Bc3 | Format::Etc2Rgba => join_bc3(&streams),
         Format::Bc4 | Format::EacR11 => join_bc4(&streams, 1),
         Format::Bc5 | Format::EacRg11 => join_bc4(&streams, 2),
-        Format::Bc6h => Some(streams[0].to_vec()).filter(|s| s.len() % 16 == 0),
+        Format::Bc6h | Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => {
+            Some(streams[0].to_vec()).filter(|s| s.len() % 16 == 0)
+        }
         Format::Bc7 => join_bc7(&streams),
     }
 }

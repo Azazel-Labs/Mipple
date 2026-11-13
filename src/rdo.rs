@@ -142,7 +142,8 @@ impl RdoParams {
     /// it searches 128 deep plus the localized search's picks instead.
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
-            Format::Bc6h | Format::Bc7 => 16 * 1024,
+            // ASTC has no RDO yet; this only sizes its Zstd window.
+            Format::Bc6h | Format::Bc7 | Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 16 * 1024,
             Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba => 8 * 1024,
             Format::Bc5 | Format::EacRg11 => 3072,
             Format::Bc4 | Format::EacR11 => 2048,
@@ -207,6 +208,7 @@ impl RdoParams {
             Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc7 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
             Format::Bc5 | Format::Bc6h | Format::Etc2Rgb => 0,
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 0,
         })
     }
 
@@ -914,6 +916,8 @@ fn candidates(
         // No candidates: BC6H errors are not on the 8-bit scale, and the pipeline never runs this
         // RDO for it.
         Format::Bc6h => {}
+        // `optimize_with_alt` refuses ASTC: its blocks are not 4x4.
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => unreachable!("{format} has no RDO"),
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => {
             // Per 8-byte half, with base's other half: ETC2 color takes prev's colors with the
             // selectors re-chosen and prev's selectors with base's mode refit; EAC takes prev's
@@ -1843,6 +1847,7 @@ fn optimize_chunk(
         Format::Bc5 => w[2..] == [0, 0],
         Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => false,
     } && far_back > max_back;
     let mut far = FarEndpoints::new(format, if far_on { blocks.len() } else { 0 }, w);
     // Localized search (BC5's two channels): beyond the nearest `max_back` blocks, shape
@@ -2248,6 +2253,7 @@ fn optimize_chunk(
                 Format::Etc2Rgba => &[(0, 2), (2, 8), (8, 12), (12, 16)],
                 Format::EacR11 => &[(0, 2), (2, 8)],
                 Format::EacRg11 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
+                Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => &[(0, 16)],
             };
             let cur = best.1;
             // Each candidate changes one field, so for BC5 it keeps one half of `cur`.
@@ -2495,6 +2501,11 @@ pub fn optimize(format: Format, src: &[Block], blocks: &mut [[u8; 16]], w: &[u32
 
 /// [`optimize`] with other base encodings per block (each of `alts` is as long as `blocks`): each
 /// block starts from whichever scores best.
+///
+/// # Panics
+///
+/// For ASTC, whose blocks are not the 4x4 source blocks this pass scores against (ASTC RDO is on
+/// the roadmap).
 pub fn optimize_with_alt(
     format: Format,
     src: &[Block],
@@ -2503,6 +2514,7 @@ pub fn optimize_with_alt(
     w: &[u32; 4],
     p: &RdoParams,
 ) -> RdoStats {
+    assert!(!format.is_astc(), "RDO works on 4x4 blocks; {format} has no RDO yet");
     assert_eq!(src.len(), blocks.len());
     if !p.enabled() || blocks.is_empty() {
         return RdoStats {
@@ -2553,6 +2565,7 @@ mod tests {
         let opts = crate::format::BlockOpts {
             effort: crate::format::DEFAULT_EFFORT,
             reduce_entropy: true,
+            srgb: false,
         };
         let (src, mut blocks) = crate::pipeline::encode_base(&surf, format, opts);
         let (src, blocks) = (&src[..4096], &mut blocks[..4096]);

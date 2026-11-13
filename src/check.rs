@@ -8,6 +8,7 @@
 //! Gates (each per format, all configurable):
 //! - **BD-rate** of the size/PSNR curve (Zstd) against the baseline curve must not exceed `max_bd_rate`.
 //!   This is the headline: it judges trade-offs, so a change that loses PSNR but saves more bytes passes.
+//!   ASTC has no RDO, so it has only λ = 0 rows and only the λ = 0 gates.
 //! - **λ = 0** (no RDO) pooled PSNR must not drop more than `max_psnr_drop`, and its Zstd size must not
 //!   grow more than `max_size_growth`. This guards the base encoder on its own.
 //! - **Per image at λ = 0**, PSNR must not drop more than `max_image_psnr_drop`, so one broken image
@@ -453,7 +454,8 @@ pub fn compare(baseline: &[Entry], current: &[Entry], th: &Thresholds) -> Result
                 "{name}: BD-rate {v:+.2}% (Zstd) exceeds +{:.2}%",
                 th.max_bd_rate
             )),
-            None if same < n => rep.failures.push(format!(
+            // A single λ (ASTC, which has no RDO) is no curve: the λ=0 gates below cover it.
+            None if same < n && rows.len() > 1 => rep.failures.push(format!(
                 "{name}: BD-rate undefined (size/PSNR curves no longer overlap)"
             )),
             _ => {}
@@ -581,5 +583,15 @@ mod tests {
         assert_eq!(r.failures.len(), 3, "{:?}", r.failures);
         // Different λ list: refuse to compare.
         assert!(compare(&base[..2], &base, &th).is_err());
+        // A format with only a λ = 0 row (ASTC) has no curve: a changed encode is judged by the
+        // λ = 0 gates alone.
+        let one = [entry(Format::Astc6x6, 0.0, 40.0, 1000)];
+        assert!(
+            compare(&one, &[entry(Format::Astc6x6, 0.0, 40.05, 999)], &th)
+                .unwrap()
+                .passed()
+        );
+        let r = compare(&one, &[entry(Format::Astc6x6, 0.0, 39.0, 1000)], &th).unwrap();
+        assert_eq!(r.failures.len(), 2, "{:?}", r.failures);
     }
 }

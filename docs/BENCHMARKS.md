@@ -600,6 +600,33 @@ R11 from the red channel and RG11 from red and green, PSNR over those channels:
 | mipple effort 5 | 45.106 | 3.698 | 13.2 | 45.066 | 7.138 | 25.1 |
 | mipple effort 9 | 45.208 | 3.701 | 23.2 | 45.167 | 7.157 | 47.2 |
 
+## ASTC vs ISPC
+
+ASTC LDR on all 24 Kodak images, one thread for both encoders, top level only, `python scripts/compete_astc.py
+test-images/kodak --runs 3 --efforts 0,2`. Intel's ISPC Texture Compressor (`ispc_astc:<W>x<H>` in
+`bcn_harness`, its fast profile, the only ASTC profile it has for opaque images) is the only ASTC encoder on
+disk: astcenc could not be built here, so it is not graded. Both encode for linear decoding and are scored by
+`mipple score --astc-linear`: PSNR over RGB, luma SSIM, bits/texel after Zstd-19, and time as the sum over the
+images of each image's best of three runs (mipple's encode loop, the harness's block loop). The times are
+the encoder at 46a0021; the SIMD polish after it gives byte-identical blocks and is somewhat faster:
+
+| footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 4x4 | ISPC fast | 43.789 | 0.99677 | 7.286 | 1.71 |
+| 4x4 | mipple effort 0 | 44.538 | 0.99733 | 7.111 | 3.56 |
+| 4x4 | mipple effort 2 | 44.766 | 0.99745 | 7.167 | 7.24 |
+| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 1.40 |
+| 6x6 | mipple effort 0 | 37.601 | 0.98323 | 3.297 | 3.42 |
+| 6x6 | mipple effort 2 | 37.847 | 0.98415 | 3.298 | 7.08 |
+| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 3.24 |
+| 8x8 | mipple effort 0 | 33.804 | 0.95808 | 1.881 | 2.69 |
+| 8x8 | mipple effort 2 | 34.018 | 0.95998 | 1.880 | 11.15 |
+
+Effort 0 leads ISPC fast in PSNR at every footprint (0.75, 0.04 and 0.15 dB) but is 2.1× and 2.5× slower at
+4x4 and 6x6; at 8x8 it is 17% faster. Its SSIM is slightly behind at 6x6 and 8x8. Effort 2 leads in both
+metrics everywhere, at 3.4-5.1× ISPC's time. mipple's blocks are 2.4% and 1.1% smaller after Zstd at 4x4 and
+6x6 and the same size at 8x8; there is no RDO pass for ASTC yet, so λ > 0 is refused.
+
 ## Lossless field split (`--prep`)
 
 `src/prep.rs` applies a BC7Prep-style lossless transform before Zstd: blocks are split into byte streams of
@@ -727,6 +754,7 @@ scripts/fetch-kodak.sh
 python3 scripts/compete.py --corpus test-images/kodak --out bench-results/compete-kodak \
     --mipple target/release/mipple --bc7enc /path/to/bc7enc_rdo/build/bc7enc \
     --harness /path/to/bcn_harness       # add --threads 1 --base-only --affinity MASK for per-core tables
+python3 scripts/compete_astc.py test-images/kodak --harness /path/to/bcn_harness --runs 3 --efforts 0,2
 ```
 
 Building bc7enc_rdo with recent GCC needs `-DCMAKE_CXX_FLAGS="-include cstdint"`; add `-DSUPPORT_BC7E=TRUE`

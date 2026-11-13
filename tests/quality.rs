@@ -10,7 +10,7 @@ use mipple::{Format, metrics};
 
 fn psnr_for(format: Format, effort: u8, img: &mipple::Surface) -> f64 {
     let (_, blocks) = encode_base(img, format, effort);
-    let dec = decode_blocks(format, &flatten(format, &blocks), img.width, img.height, false);
+    let dec = decode_blocks(format, &flatten(format, &blocks), img.width, img.height, false, false);
     metrics::psnr(img, &dec, &format.metric_channels(img.has_alpha()))
 }
 
@@ -44,12 +44,13 @@ fn higher_effort_is_not_worse() {
 #[test]
 fn rdo_trades_quality_for_size() {
     for (name, img) in corpus(128) {
-        for format in Format::ALL {
+        // ASTC has no RDO (and its blocks are not 4x4).
+        for format in Format::ALL.into_iter().filter(|f| !f.is_astc()) {
             let w = format.error_weights();
             let (src, base) = encode_base(&img, format, 1);
             let base_data = flatten(format, &base);
             let base_z = zstd::bulk::compress(&base_data, 19).unwrap().len();
-            let base_dec = decode_blocks(format, &base_data, img.width, img.height, false);
+            let base_dec = decode_blocks(format, &base_data, img.width, img.height, false, false);
             let ch = format.metric_channels(img.has_alpha());
             let base_psnr = metrics::psnr(&img, &base_dec, &ch);
 
@@ -63,7 +64,7 @@ fn rdo_trades_quality_for_size() {
             let stats = rdo::optimize(format, &src, &mut blocks, &w, &params);
             let data = flatten(format, &blocks);
             let z = zstd::bulk::compress(&data, 19).unwrap().len();
-            let dec = decode_blocks(format, &data, img.width, img.height, false);
+            let dec = decode_blocks(format, &data, img.width, img.height, false, false);
             let psnr = metrics::psnr(&img, &dec, &ch);
             assert!(z <= base_z, "{name} {format}: RDO grew zstd size {base_z} -> {z}");
             assert!(

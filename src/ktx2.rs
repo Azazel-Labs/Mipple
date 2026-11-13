@@ -1,6 +1,6 @@
 //! Minimal KTX 2.0 writer and reader for block-compressed 2D textures.
 //!
-//! Supports every [`Format`] (BCn, ETC2, EAC), full mip chains, and supercompression scheme 0 (none) or
+//! Supports every [`Format`] (BCn, ETC2, EAC, ASTC LDR), full mip chains, and supercompression scheme 0 (none) or
 //! 2 (Zstandard). Layout follows the KTX 2.0 specification:
 //!
 //! ```text
@@ -32,6 +32,7 @@ fn color_model(format: Format) -> u8 {
         Format::Bc6h => 133,                                                          // KHR_DF_MODEL_BC6H
         Format::Bc7 => 134,                                                           // KHR_DF_MODEL_BC7
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 161, // KHR_DF_MODEL_ETC2
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 162,                   // KHR_DF_MODEL_ASTC
     }
 }
 
@@ -56,6 +57,8 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         // KHR_DF_CHANNEL_ETC2_RED and _GREEN.
         Format::EacR11 => &[(0, 63, 0)],
         Format::EacRg11 => &[(0, 63, 0), (64, 63, 1)],
+        // KHR_DF_CHANNEL_ASTC_DATA; LDR, so not float.
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => &[(0, 127, 0)],
     };
     let block_size = 24 + 16 * samples.len();
     let mut v = Vec::with_capacity(4 + block_size);
@@ -67,7 +70,10 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
     v.push(1); // colorPrimaries = BT709
     v.push(if srgb { 2 } else { 1 }); // transferFunction: sRGB or linear
     v.push(0); // flags: straight alpha
-    v.extend_from_slice(&[3, 3, 0, 0]); // texelBlockDimension (4x4, stored minus one)
+    // texelBlockDimension, stored minus one: 4x4, or the ASTC footprint.
+    let (bw, bh) = format.block_dims();
+    let dim = |d: u32| u8::try_from(d - 1).expect("block dimensions are at most 12");
+    v.extend_from_slice(&[dim(bw), dim(bh), 0, 0]);
     // bytesPlane0 is 0 ("unsized") when the data is supercompressed.
     let bytes_plane0 = if supercompressed {
         0

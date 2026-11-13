@@ -3,6 +3,10 @@
 use crate::surface::Block;
 use crate::{bc1, bc3, bc4, bc6h, bc7, eac, etc};
 
+/// What [`Format::encode_block`] and [`Format::decode_block`] panic with for ASTC.
+const NOT_4X4: &str = "ASTC blocks are not 4x4 texels: encode whole surfaces (pipeline::encode, \
+                        astc::encode::encode_surface) and decode with pipeline::decode_blocks";
+
 /// When to use entropy-reduced base encoding ([`BlockOpts::reduce_entropy`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
@@ -52,6 +56,10 @@ pub struct BlockOpts {
     /// Bias the base encoder toward low-entropy blocks that LZ back ends compress well
     /// (bc7enc's `-e`). BC7 only; trades some PSNR for size. See [`crate::bc7::encode`].
     pub reduce_entropy: bool,
+    /// The decode mode to encode for: ASTC decodes differently in sRGB and linear (UNORM) mode,
+    /// so its encoder needs to know which one the texture will be read with. Other formats ignore
+    /// it.
+    pub srgb: bool,
 }
 
 impl BlockOpts {
@@ -70,6 +78,7 @@ impl From<u8> for BlockOpts {
         Self {
             effort,
             reduce_entropy: false,
+            srgb: false,
         }
     }
 }
@@ -98,10 +107,19 @@ pub enum Format {
     EacR11,
     /// 8 bpp two channels for mobile, 11-bit (the BC5 analogue: normals).
     EacRg11,
+    /// ASTC LDR with a 4x4 footprint: 8 bpp RGB/RGBA (mobile and Apple GPUs; the BC7 analogue).
+    #[cfg_attr(feature = "cli", value(name = "astc-4x4"))]
+    Astc4x4,
+    /// ASTC LDR with a 6x6 footprint: 3.56 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-6x6"))]
+    Astc6x6,
+    /// ASTC LDR with an 8x8 footprint: 2 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-8x8"))]
+    Astc8x8,
 }
 
 impl Format {
-    pub const ALL: [Format; 10] = [
+    pub const ALL: [Format; 13] = [
         Format::Bc1,
         Format::Bc3,
         Format::Bc4,
@@ -112,6 +130,9 @@ impl Format {
         Format::Etc2Rgba,
         Format::EacR11,
         Format::EacRg11,
+        Format::Astc4x4,
+        Format::Astc6x6,
+        Format::Astc8x8,
     ];
 
     pub fn name(self) -> &'static str {
@@ -126,6 +147,9 @@ impl Format {
             Format::Etc2Rgba => "etc2-rgba",
             Format::EacR11 => "eac-r11",
             Format::EacRg11 => "eac-rg11",
+            Format::Astc4x4 => "astc-4x4",
+            Format::Astc6x6 => "astc-6x6",
+            Format::Astc8x8 => "astc-8x8",
         }
     }
 
@@ -137,28 +161,49 @@ impl Format {
         )
     }
 
-    /// Bytes per 4x4 block.
+    /// Whether this is an ASTC format. Its blocks cover [`Format::block_dims`] texels, which is
+    /// not 4x4 in general, so it is encoded and decoded a surface at a time: the 4x4 [`Block`]
+    /// paths ([`Format::encode_block`], [`Format::decode_block`], the RDO pass) panic for it.
+    pub fn is_astc(self) -> bool {
+        matches!(self, Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8)
+    }
+
+    /// Texels across and down one block: 4x4, or the ASTC footprint.
+    pub fn block_dims(self) -> (u32, u32) {
+        match self {
+            Format::Astc6x6 => (6, 6),
+            Format::Astc8x8 => (8, 8),
+            _ => (4, 4),
+        }
+    }
+
+    /// Bytes per block (of [`Format::block_dims`] texels).
     pub fn block_bytes(self) -> usize {
         match self {
             Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::EacR11 => 8,
             Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgba | Format::EacRg11 => 16,
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 16,
         }
+    }
+
+    /// Blocks across and down a `width`×`height` level.
+    pub fn blocks_xy(self, width: u32, height: u32) -> (u32, u32) {
+        let (bw, bh) = self.block_dims();
+        (width.div_ceil(bw), height.div_ceil(bh))
     }
 
     /// Bytes of a `width`×`height` level, or `None` when that overflows `usize` (the KTX2 and DDS
     /// readers take sizes from untrusted headers).
     pub fn level_bytes(self, width: u32, height: u32) -> Option<usize> {
-        let bw = usize::try_from(width.div_ceil(4)).ok()?;
-        let bh = usize::try_from(height.div_ceil(4)).ok()?;
-        bw.checked_mul(bh)?.checked_mul(self.block_bytes())
+        let (nx, ny) = self.blocks_xy(width, height);
+        let nx = usize::try_from(nx).ok()?;
+        let ny = usize::try_from(ny).ok()?;
+        nx.checked_mul(ny)?.checked_mul(self.block_bytes())
     }
 
     /// Whether color data in this format is normally stored sRGB-encoded.
     pub fn default_srgb(self) -> bool {
-        matches!(
-            self,
-            Format::Bc1 | Format::Bc3 | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba
-        )
+        self.supports_srgb()
     }
 
     /// Whether the format has an sRGB variant at all.
@@ -166,7 +211,7 @@ impl Format {
         matches!(
             self,
             Format::Bc1 | Format::Bc3 | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba
-        )
+        ) || self.is_astc()
     }
 
     /// Vulkan `VkFormat` value, as stored in a KTX2 header.
@@ -187,6 +232,12 @@ impl Format {
             (Format::Etc2Rgba, true) => 152,  // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
             (Format::EacR11, _) => 153,       // VK_FORMAT_EAC_R11_UNORM_BLOCK
             (Format::EacRg11, _) => 155,      // VK_FORMAT_EAC_R11G11_UNORM_BLOCK
+            (Format::Astc4x4, false) => 157,  // VK_FORMAT_ASTC_4x4_UNORM_BLOCK
+            (Format::Astc4x4, true) => 158,   // VK_FORMAT_ASTC_4x4_SRGB_BLOCK
+            (Format::Astc6x6, false) => 165,  // VK_FORMAT_ASTC_6x6_UNORM_BLOCK
+            (Format::Astc6x6, true) => 166,   // VK_FORMAT_ASTC_6x6_SRGB_BLOCK
+            (Format::Astc8x8, false) => 171,  // VK_FORMAT_ASTC_8x8_UNORM_BLOCK
+            (Format::Astc8x8, true) => 172,   // VK_FORMAT_ASTC_8x8_SRGB_BLOCK
         }
     }
 
@@ -208,6 +259,12 @@ impl Format {
             152 => (Format::Etc2Rgba, true),
             153 => (Format::EacR11, false),
             155 => (Format::EacRg11, false),
+            157 => (Format::Astc4x4, false),
+            158 => (Format::Astc4x4, true),
+            165 => (Format::Astc6x6, false),
+            166 => (Format::Astc6x6, true),
+            171 => (Format::Astc8x8, false),
+            172 => (Format::Astc8x8, true),
             _ => return None,
         })
     }
@@ -228,6 +285,7 @@ impl Format {
             Format::Etc2Rgba => [1, 1, 1, 1],
             Format::EacR11 => [1, 0, 0, 0],
             Format::EacRg11 => [1, 1, 0, 0],
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => [1, 1, 1, 1],
         }
     }
 
@@ -239,10 +297,16 @@ impl Format {
             Format::Bc5 | Format::EacRg11 => vec![0, 1],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba if has_alpha => vec![0, 1, 2, 3],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => vec![0, 1, 2],
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 if has_alpha => vec![0, 1, 2, 3],
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => vec![0, 1, 2],
         }
     }
 
-    /// Encodes one block. Only the first [`Format::block_bytes`] bytes are meaningful.
+    /// Encodes one 4x4 block. Only the first [`Format::block_bytes`] bytes are meaningful.
+    ///
+    /// # Panics
+    ///
+    /// For ASTC ([`Format::is_astc`]), which is encoded a surface at a time.
     pub fn encode_block(self, px: &Block, w: &[u32; 4], opts: impl Into<BlockOpts>) -> [u8; 16] {
         let opts = opts.into();
         let effort = opts.effort;
@@ -264,11 +328,16 @@ impl Format {
                 out[..8].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 0), effort));
                 out[8..].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 1), effort));
             }
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => panic!("{self}: {NOT_4X4}"),
         }
         out
     }
 
-    /// Decodes one block.
+    /// Decodes one 4x4 block.
+    ///
+    /// # Panics
+    ///
+    /// For ASTC ([`Format::is_astc`]), which is decoded a surface at a time.
     pub fn decode_block(self, raw: &[u8], out: &mut Block) {
         match self {
             Format::Bc1 => bc1::decode(raw, out),
@@ -281,6 +350,7 @@ impl Format {
             Format::Etc2Rgba => etc::decode_rgba(raw, out),
             Format::EacR11 => eac::decode_r11_block(raw, out),
             Format::EacRg11 => eac::decode_rg11_block(raw, out),
+            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => panic!("{self}: {NOT_4X4}"),
         }
     }
 }
@@ -297,6 +367,6 @@ impl std::str::FromStr for Format {
         Format::ALL
             .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11 or eac-rg11)"))
+            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11, astc-4x4, astc-6x6 or astc-8x8)"))
     }
 }

@@ -44,12 +44,29 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
             let (r, g) = (eac_r11(&raw[..8]), eac_r11(&raw[8..16]));
             return std::array::from_fn(|i| [r[i], g[i], 0, 255]);
         }
+        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => {
+            panic!("{format} blocks are not 4x4 texels: use reference_decode_astc")
+        }
     }
     // texture2ddecoder packs pixels as little-endian BGRA.
     buf.map(|p| {
         let [b, g, r, a] = p.to_le_bytes();
         [r, g, b, a]
     })
+}
+
+/// Decodes a `bw`×`bh` ASTC LDR block (linear, UNORM) with `texture2ddecoder`, returned as RGBA in
+/// raster order. That decoder rounds the 16-bit interpolation to 8 bits as `(v * 255 + 32768) >> 16`
+/// where the specification (and mipple) divide by 65535, so texels may differ by 1.
+pub fn reference_decode_astc(raw: &[u8], bw: u32, bh: u32) -> Vec<[u8; 4]> {
+    let mut buf = vec![0u32; (bw * bh) as usize];
+    texture2ddecoder::decode_astc_block(raw, bw as usize, bh as usize, &mut buf);
+    buf.iter()
+        .map(|p| {
+            let [b, g, r, a] = p.to_le_bytes();
+            [r, g, b, a]
+        })
+        .collect()
 }
 
 /// EAC R11 (unsigned) per the Khronos Data Format Specification, section 21.3, rounded to 8 bits
