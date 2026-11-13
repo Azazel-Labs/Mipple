@@ -2113,8 +2113,9 @@ fn optimize_chunk(
     let fast_b = defer_eps > 0.0;
     let mut pool: Vec<([u8; 16], u64)> = Vec::new();
     let mut la_js: Vec<usize> = Vec::new();
-    // The last committed block's undo record: model snapshot, its base bytes, base bits, bits.
-    let mut saved: Option<(LzUndo, [u8; 16], f32, f32)> = None;
+    // The last committed block's undo record: model snapshot, its previous bytes, base bits, bits,
+    // and whether it counted as changed.
+    let mut saved: Option<(LzUndo, [u8; 16], f32, f32, bool)> = None;
 
     let mut i = 0;
     while i < blocks.len() {
@@ -2650,12 +2651,11 @@ fn optimize_chunk(
                 let best: Best = $best;
                 let base: [u8; 16] = $base;
                 let bb: f32 = $bb;
-                saved = Some((model.snapshot(), blocks[k], bb, best.2));
+                let changed = best.1[..n] != base[..n];
+                saved = Some((model.snapshot(), blocks[k], bb, best.2, changed));
                 stats.est_bits_before += bb as f64;
                 stats.est_bits_after += best.2 as f64;
-                if best.1[..n] != base[..n] {
-                    stats.changed += 1;
-                }
+                stats.changed += usize::from(changed);
                 blocks[k] = best.1;
                 if track {
                     format.decode_block(&best.1[..n], &mut dec);
@@ -2691,13 +2691,11 @@ fn optimize_chunk(
             ($k:expr) => {{
                 let k: usize = $k;
                 debug_assert!(!dump);
-                let (mu, orig, bb, bits) = saved.take().unwrap();
+                let (mu, orig, bb, bits, changed) = saved.take().unwrap();
                 model.undo(&mu);
                 stats.est_bits_before -= bb as f64;
                 stats.est_bits_after -= bits as f64;
-                if blocks[k][..n] != orig[..n] {
-                    stats.changed -= 1;
-                }
+                stats.changed -= usize::from(changed);
                 if track7 {
                     rblocks7.pop();
                 }
