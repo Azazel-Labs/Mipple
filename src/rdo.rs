@@ -315,6 +315,9 @@ pub struct LzModel {
     off_log2: Vec<f32>,
     /// Match length cost, `1 + 2·log2(len − 1)`, for lengths up to a 16-byte block.
     len: [f32; 17],
+    /// `rem[r]`: a lower bound on the bits for any `r` bytes that don't continue the previous
+    /// block's match (see [`min_cost`](Self::min_cost)), with slack for float summation order.
+    rem: [f32; 17],
     state: LzState,
     window: usize,
     depth: usize,
@@ -326,7 +329,7 @@ pub struct LzModel {
 
 impl LzModel {
     pub fn new(window: usize, depth: usize) -> Self {
-        Self {
+        let mut m = Self {
             hist: Vec::new(),
             head: vec![-1; 1 << HASH_BITS],
             prev: Vec::new(),
@@ -336,12 +339,15 @@ impl LzModel {
             lit: Box::new([(256f32).log2(); 256]),
             off_log2: (0..=window.max(16)).map(|o| (o as f32).log2()).collect(),
             len: std::array::from_fn(|l| 1.0 + 2.0 * (l.max(1) as f32 - 1.0).log2()),
+            rem: [0.0; 17],
             state: LzState::default(),
             window,
             depth,
             frozen: false,
             hint: 0,
-        }
+        };
+        m.refresh_rem();
+        m
     }
 
     /// Fixes the literal statistics to those of `sample` (order-0, add-one smoothed) instead of
@@ -362,6 +368,23 @@ impl LzModel {
             let p = (self.counts[b] as f32 + 1.0) / (self.total as f32 + 256.0);
             self.lit[b] = (-p.log2()).min(10.0);
         }
+        self.refresh_rem();
+    }
+
+    /// Recomputes [`rem`](Self::rem) for the current literal statistics: the cheapest cover of
+    /// `r` bytes by the cheapest literal and repeat-offset matches (every other token costs more).
+    fn refresh_rem(&mut self) {
+        let p = (self.max_count as f32 + 1.0) / (self.total as f32 + 256.0);
+        let lit = (-p.log2()).min(10.0);
+        let mut lb = [0f32; 17];
+        for r in 1..=16 {
+            let mut b = lit + lb[r - 1];
+            for l in 3..=r {
+                b = b.min(3.0 + self.len_cost(l) + lb[r - l]);
+            }
+            lb[r] = b;
+        }
+        self.rem = std::array::from_fn(|r| if r == 0 { 0.0 } else { lb[r] * 0.999 - 0.01 });
     }
 
     /// Appends emitted bytes to the history and updates the match finder and statistics.
@@ -434,18 +457,7 @@ impl LzModel {
     /// the previous block's match: the cheapest cover of `len` bytes by the cheapest literal and
     /// repeat-offset matches (every other token costs more).
     pub fn min_cost(&self, len: usize) -> f32 {
-        let p = (self.max_count as f32 + 1.0) / (self.total as f32 + 256.0);
-        let lit = (-p.log2()).min(10.0);
-        let mut lb = [0f32; 17];
-        for pos in (0..len).rev() {
-            let mut b = lit + lb[pos + 1];
-            for l in 3..=len - pos {
-                b = b.min(3.0 + self.len_cost(l) + lb[pos + l]);
-            }
-            lb[pos] = b;
-        }
-        // Slack for float summation order.
-        lb[0] * 0.999 - 0.01
+        self.rem[len]
     }
 
     /// Whether `cand` could start by continuing the previous block's match (a 1-bit token),
@@ -594,7 +606,8 @@ impl LzModel {
                 pos += 1;
                 tail = false;
             }
-            if bits > stop {
+            // The rest can't cost less than `rem` (no continuation past the first token).
+            if bits + self.rem[cand.len() - pos] > stop {
                 return None;
             }
         }
