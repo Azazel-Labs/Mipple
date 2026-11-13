@@ -64,7 +64,7 @@ Shipped:
 - [x] **vs Oodle Texture 2.9.16 (Unreal Engine 5.8), true source:** `scripts/ue_oodle/` gets Oodle's real blocks
   out of a stock UE cook (bit-exact, no engine source) and scores them on Zstd-19 next to a mipple sweep
   (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −11.5% to
-  −11.0% / −7.5% to −6.7%, BC4 −15.1% to −6.6% / −5.1% to −2.1%, BC7 −3.1% to −1.7% / −3.9% to −1.5%, BC5
+  −11.0% / −7.5% to −6.7%, BC4 −15.1% to −6.6% / −5.1% to −2.1%, BC7 −3.2% to −1.7% / −3.9% to −2.0%, BC5
   −21.2% to −10.7% / −6.7% to −4.2% (rerun at 4e8547d); ahead at every λ in every format, λ 0-1 included.
 - [x] **Learned BC7 ranker** (`src/ranker/bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
   the 1024-block far search, then 16 blocks from anywhere in the 64 KiB chunk, picked by a two-key prefilter
@@ -91,8 +91,8 @@ Open for v0.9.x:
   (1.4-1.5× wall time).
 - [ ] **BC7 RDO clearly faster than Oodle** (reopened 2026-11-13): quality is ahead in every cell, but CPU is
   behind. On one pinned P-core, Oodle's share of a UE cook is about 20-22 CPU-seconds for Kodak-24 at λ 30 and
-  mipple's λ 1 is 34.2-34.6 (about 1.6×; all-thread runs put Oodle at 47 and mipple at 55-98; details in
-  [BENCHMARKS.md](BENCHMARKS.md)). Target: under Oodle's CPU at λ 1 with every table cell still ahead, then
+  mipple's λ 1 is 31.2-31.6 after the near-flat mode-6 gates on both bases (was 34.2-34.6; about 1.5×;
+  all-thread runs put Oodle at 47 and mipple at 55-98; details in [BENCHMARKS.md](BENCHMARKS.md)). Target: under Oodle's CPU at λ 1 with every table cell still ahead, then
   about half.
   Where λ 1 CPU goes (busy time, kodim05): main RDO loop 76%, of which far search 18% (half of it mode-6
   re-indexing), ranker prefilter scan 15%, near candidates 11%, refinement about 10%; the two extra bases

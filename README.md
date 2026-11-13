@@ -53,8 +53,8 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | BC5 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−6.7%** to **−4.2%** (λ 10-40) | n/a | n/a | n/a |
 | BC7 | bc7enc_rdo (bc7e) | **−31.5%** | **−29.2%** | 17.1-28.5 | 51.8-57.8 |
 | BC7 | bc7enc_rdo (-e) | **−30.5%** | **−28.6%** | 17.1-28.5 | 38.1-44.4 |
-| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−3.1%** to **−1.7%** (λ 10-40) | n/a | n/a | n/a |
-| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.9%** to **−1.5%** (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−3.2%** to **−1.7%** (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.9%** to **−2.0%** (λ 10-40) | n/a | n/a | n/a |
 | BC3 | bc7enc_rdo | **−16.0%** | **−14.4%** | n/a | n/a |
 | ETC2 RGB | Compressonator | **−25.2%** | **−24.6%** | n/a | n/a |
 | ETC2 RGBA | Compressonator | **−23.6%** | **−24.1%** | n/a | n/a |

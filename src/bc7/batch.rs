@@ -795,8 +795,13 @@ fn encode8<V: SimdF32>(blocks: &[Block; LANES], opts: BlockOpts) -> [[u8; 16]; L
         let mut busy = [false; LANES];
         let mut tops = [[[(f32::INFINITY, 0u8); 4]; LANES]; 2];
         let score_arr = best.score.to_array();
+        // The entropy-reduced base (RDO's starting point at λ >= 1) also keeps mode 6 when its
+        // weighted score is at most 512: a multi-subset winner that only shaves a little error adds
+        // bytes RDO then has to undo. On Kodak-24 this halved the base's time (on top of the alt
+        // base's busy_err 384, see rdo_alt_cfg) and no λ 10-40 cell vs Oodle moved the wrong way.
+        let rbusy: f32 = if reduce { 512.0 } else { 0.0 };
         for l in 0..LANES {
-            busy[l] = super::max_channel_energy(&blocks[l], 3) >= 16.0 * 4.0 && score_arr[l] > 0.0;
+            busy[l] = super::max_channel_energy(&blocks[l], 3) >= 16.0 * 4.0 && score_arr[l] > rbusy;
         }
         if busy.iter().any(|&b| b) {
             let mut res = [[0f32; LANES]; 64];

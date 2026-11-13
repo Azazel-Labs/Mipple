@@ -378,9 +378,9 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 | 0 | −18.9% | −9.4% | −6.5% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
 | 1 | −15.1% | −6.8% | −2.9% (12/24) | −0.9% (4/24) | −4.0% | −1.7% | −4.5% | −1.8% |
 | 10 | −11.5% | −7.5% | −1.9% | −3.9% | −6.6% | −2.1% | −10.7% | −4.2% |
-| 20 | −11.0% | −7.3% | −1.7% | −2.5% | −9.6% | −3.2% | −15.7% | −5.7% |
-| 30 | −11.3% | −6.9% | −2.3% | −1.8% | −12.6% | −4.3% | −19.0% | −6.3% |
-| 40 | −11.5% | −6.7% | −3.1% | −1.5% | −15.1% | −5.1% | −21.2% | −6.7% |
+| 20 | −11.0% | −7.3% | −1.7% | −2.8% | −9.6% | −3.2% | −15.7% | −5.7% |
+| 30 | −11.3% | −6.9% | −2.3% | −2.4% | −12.6% | −4.3% | −19.0% | −6.3% |
+| 40 | −11.5% | −6.7% | −3.2% | −2.0% | −15.1% | −5.1% | −21.2% | −6.7% |
 
 All four are rerun at 4e8547d (the near-tie deferred decision, the neighbourhood smoothness weight, BC1
 lookahead and the BC7 far-search gate; before it BC1 was −8.8% / −4.0% to −5.7% at λ 10-40 and BC7 −0.4% to
@@ -436,7 +436,14 @@ pinned P-core (core 16; UE widens its own affinity at start, so its processes we
 texture-only cooks took 51.5-55.4 CPU-seconds against 31.8-33.9 with a full DDC, which puts Oodle's share at about
 20-22 CPU-seconds (three pairs). mipple encoding the 24 images at λ 1 (`encode`, one process per image, KTX2
 output) took 34.2-34.6. On the same core, mipple's BC7 RDO costs about 1.6× Oodle's CPU for smaller files at the
-same quality.
+same quality. Both bases then kept mode 6 for near-flat blocks: the plain effort-8 base skips the multi-subset
+search and mode-6 polish when the block's mode-6 error is at most 384 (`busy_err`), and the entropy-reduced base
+when its weighted mode-6 score is at most 512. Those blocks then share one mode-6 layout that later blocks can
+copy, so files shrink and the quality table gains (λ 20-40 at SSIM −2.5%, −1.8%, −1.5% to −2.8%, −2.4%, −2.0%;
+λ 40 at RMSE −3.1% to −3.2%; λ 10 and below unchanged, since the gates only apply at λ ≥ 1). On 8 Kodak images
+at λ 1 on one pinned P-core (interleaved, per-image best of five) the bases took 1.04 s instead of 2.71 and the
+whole encode 10.48 s instead of 12.00 (−12.6%), with 2.3% smaller files. Kodak-24 at λ 1 (`encode`, one
+process per image) now takes 31.2-31.6 CPU-seconds on one pinned P-core, about 1.5× Oodle's share.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
 sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on

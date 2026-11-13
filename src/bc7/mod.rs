@@ -132,6 +132,10 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
 /// trials or polish at all) would lose 0.4%, skipping the 3-subset modes up to 1%, and polishing
 /// fewer candidates or one uber step 0.1-0.25%. The base also bounds RDO's search: building it
 /// only for blocks whose entropy-reduced base errs by at least 64 λ cost 1.9× the CPU time.
+/// Blocks whose mode-6 error is at most 384 skip the multi-subset search and mode-6 polish
+/// (`busy_err`): those near-flat blocks keep one shared mode-6 layout that later blocks can copy.
+/// With the reduced base's matching gate in batch.rs, Kodak-24's λ 20-40 cells vs Oodle each held
+/// or gained (λ 30 SSIM −1.8% → −2.4%, λ 40 −1.5% → −2.0%) and the bases took about 55% less time.
 pub fn rdo_alt_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
     let c = fast_cfg(opts)?;
     Some(if opts.effort == 8 {
@@ -143,6 +147,7 @@ pub fn rdo_alt_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
             refits: 1,
             two_refits: 1,
             mode5: false,
+            busy_err: 384.0,
             ..c
         }
     } else {
