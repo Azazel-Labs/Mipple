@@ -133,7 +133,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 | `synth [-o DIR]` | Write the procedural test set |
 | `gpu` | The GPU adapter, what it supports, and which formats it base-encodes |
 
-RDO knobs (on `encode`, `bench` and `check`): `--window`, `--max-back`, `--span-back`, `--chunk-bytes`, `--smooth-scale`, `--smooth-std`,
+RDO knobs (on `encode`, `bench` and `check`): `--window`, `--max-back`, `--span-back`, `--chunk-bytes`, `--defer`, `--smooth-scale`, `--smooth-std`, `--smooth-window-std`,
 `--max-rms-ratio`, `--min-rms`.
 
 **Alpha.** For BC7 colour textures alpha is transparency by default (`--alpha data` turns it off). The colour left under

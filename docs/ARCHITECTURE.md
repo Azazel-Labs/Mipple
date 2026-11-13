@@ -206,11 +206,24 @@ For each block in storage order:
    row by row once the error passes either bound; BC5 reuses the base block's half error for an unchanged half.
 5. Keep the lowest `J`, append it to the model's history.
 
+**Deferred decision (`defer` 0.3).** When a block's runner-up scores within 30% of its best, the choice waits
+one block: the next block is searched after each of the two (the model is rolled back with
+`LzModel::snapshot`/`undo` in between, the second pass re-pricing the first pass's candidates and searching only
+the previous block), and the pair with the lower total `J` is kept. Choices whose bytes the next block can reuse
+win more often than a greedy pass sees: −0.2% to −1.4% BD-rate at equal PSNR on every format, for about 1.05-1.3×
+the RDO time. BC1 also scores the endpoints of the next 16 blocks and of the blocks around the one below,
+re-indexed (−0.7%), so a block can establish a field its neighbours will share. BC7 skips the far search when
+the near search already brought `J` under 0.8× the base's (−12% RDO time for +0.15%).
+
 **Smooth-block protection.** Distortion is multiplied by `1 + (smooth_scale − 1) · k² / (k² + σ²)`, where σ is
 the block's largest channel standard deviation and `k = smooth_std` (4× and 12 by default), because banding on
 gradients is the most visible RDO artifact. Flat blocks get the full weight, a block at σ = k half the extra, and
 busier blocks a tail that falls off smoothly (a linear ramp to 1 at σ 14 left gradual-but-textured blocks
-unprotected and cost 2-3% at equal RMSE against Oodle Texture on BC7).
+unprotected and cost 2-3% at equal RMSE against Oodle Texture on BC7). When the row length is known (always through
+the pipeline) the term is instead the mean of `k² / (k² + σ²)` over the four 8x8-texel windows that contain the
+block, σ² the largest channel variance in each and `k = smooth_window_std` (16): the windows SSIM averages over,
+so a flat block next to an edge is protected less and a busy block in a flat area more, in the spirit of x264's
+adaptive quantization (−0.1% to −0.5% BD-rate at equal PSNR, −0.1% to −0.6% at equal SSIM, on every format).
 
 **Rate model (`LzModel`).** Greedy LZ parse over a sliding window with hash chains, plus a scan for
 matches inside the candidate itself. Literals cost order-0 entropy from the history; matches cost

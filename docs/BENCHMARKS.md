@@ -768,6 +768,7 @@ Later changes:
 | Field-swap refinement for BC7 (`--refine-back` 256, mode-6 halves scored without a decode) | PASS: BD-rate BC7 −1.13% Zstd / −0.87% Deflate, BC1/BC4/BC5 identical, total time 1.07× (synthetic; Kodak-24 −0.12%); both baselines updated |
 | Smooth weight `1 + 3 · 12² / (12² + σ²)` (was 5× ramping linearly to 1 at σ 14) | PASS: BD-rate Zstd BC1 −1.15%, BC4 −2.34%, BC5 −2.79%, BC7 −1.43% (synthetic), BC7 −3.82% (Kodak-4); same speed head-to-head on Kodak; both baselines updated |
 | BC4/BC5 RDO from an effort-8 base (`base_block_opts`) | PASS: BD-rate Zstd BC4 −0.48%, BC5 −0.49%, BC1/BC7 identical (synthetic; Kodak-24: BC4 −0.95%, BC5 −1.20%), total time 0.98× (Kodak-24 1.00×); synthetic baseline updated |
+| Deferred decision (`--defer` 0.3), neighbourhood smooth weight (`--smooth-window-std` 16), BC1 lookahead, BC7 far-search gate | PASS: BD-rate Zstd BC1 −1.67%, BC3 −1.41%, BC4 −0.18%, BC5 −1.00%, BC6H −1.00%, BC7 −1.10%, ETC2 RGB / RGBA −1.39% / −1.43%, EAC R11 / RG11 −0.21% / −0.94% (synthetic; Kodak-4 BC7 −1.47%), λ = 0 and ASTC identical, total time 1.01-1.03× (loaded machine); both baselines updated |
 
 ## How to reproduce
 

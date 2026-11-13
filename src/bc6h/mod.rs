@@ -534,9 +534,19 @@ pub fn encode_ldr(px: &crate::surface::Block, effort: u8) -> [u8; 16] {
 
 /// Encodes every block of an HDR surface, in parallel, raster order.
 pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
+    // Converted once up front (vectorized), then gathered per block as `read_block` would.
+    let half = surface.to_uf16();
+    let (w, h, bw) = (surface.width, surface.height, surface.blocks_x());
     encode_blocks(
         surface.block_count(),
-        |i| surface.read_block(i % surface.blocks_x(), i / surface.blocks_x()),
+        |i| {
+            let (bx, by) = (i % bw, i / bw);
+            std::array::from_fn(|t| {
+                let x = (bx * 4 + (t % 4) as u32).min(w - 1);
+                let y = (by * 4 + (t / 4) as u32).min(h - 1);
+                half[(y * w + x) as usize]
+            })
+        },
         effort,
     )
 }
@@ -544,14 +554,22 @@ pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
 /// Encodes blocks `0..n` (from `block`) eight at a time, in parallel, raster order.
 fn encode_blocks(n: usize, block: impl Fn(u32) -> HdrBlock + Sync, effort: u8) -> Vec<u8> {
     use rayon::prelude::*;
-    (0..n.div_ceil(crate::simd::LANES))
-        .into_par_iter()
-        .flat_map_iter(|g| {
-            let lo = g * crate::simd::LANES;
-            let blocks: Vec<HdrBlock> = (lo..n.min(lo + crate::simd::LANES)).map(|i| block(i as u32)).collect();
-            batch::encode_batch(&blocks, effort).into_iter().flatten()
-        })
-        .collect()
+    const L: usize = crate::simd::LANES;
+    let s = search(effort);
+    let mut out = vec![0u8; n * 16];
+    out.par_chunks_mut(16 * L)
+        .enumerate()
+        .with_min_len(16)
+        .for_each(|(g, dst)| {
+            let k = dst.len() / 16;
+            let mut blocks = [[[0u16; 3]; 16]; L];
+            for (j, b) in blocks.iter_mut().take(k).enumerate() {
+                *b = block((g * L + j) as u32);
+            }
+            let enc = batch::encode_lanes(&blocks[..k], s);
+            dst.copy_from_slice(enc[..k].as_flattened());
+        });
+    out
 }
 
 /// Decodes unsigned BC6H blocks (raster order) to an HDR surface.

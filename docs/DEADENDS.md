@@ -28,6 +28,13 @@ CPU times come from paired runs on the same core.
   2048 blocks gains −0.17%, at several times the time. It needs a cheap way to find patterns that
   fit before this is worth retrying.
 - **Far endpoints for BC4 without a tighter bound.** −0.38% at 1.4× the time.
+- **A 12x12 (3x3-block) window for the neighbourhood smoothness weight.** Against the four
+  overlapping 8x8 windows at the same k it loses 0.5-0.9 points of BC7 size at Oodle Texture's
+  RMSE (λ 10-20 fall behind Oodle) for no SSIM gain at λ ≥ 20. Large windows mask texels next to
+  edges that the error metric still sees.
+- **Averaging the per-channel smoothness terms** (k²/(k²+σ²) per channel instead of with the
+  largest channel's variance). BC7 moves strongly toward RMSE (−1.9% to −2.8% size at Oodle
+  Texture's RMSE) but falls behind Oodle on SSIM at λ 30-40 (+0.6% / +1.1%).
 
 ## BC7 RDO
 
@@ -55,6 +62,49 @@ CPU times come from paired runs on the same core.
 - **A deduplicated prefilter scan at low λ.** Whole blocks and index halves are only 0-10%
   repeated within the ranker's 2048-block reach at λ 1 (30-60% at λ 4+), so deduplication pays
   only at higher λ.
+- **Video-codec style fast-decision gates (skip the far search, build the plain alt lazily) as a
+  25% speedup.** The ceilings are too low (Kodak 1-6, λ 1-8). Once the far back-reference search runs
+  after the ranker's picks (same quality, −0.02% BD-rate), it improves only about 11% of blocks for
+  1.2-1.5% of the summed J, and skipping it outright saves only about 20% of RDO time at +1.6% / +2.2%
+  BD-rate (PSNR / SSIM). Single-feature gates (slack/λ, bits, ranker score) lose 22-35% of the far
+  search's gain for 30% of its time; a linear gate over eight features, fitted on Poly Haven logs, was
+  no better end to end than skipping whenever J is already below 0.8× its starting value (about −13% RDO
+  time for +0.24% / +0.11%). Dropping the plain effort-8 alternate base saves its 13% of encode time
+  but makes RDO about 10% slower, since its start bounds the search, at +1.3% BD-rate; its wins can't
+  be predicted from the entropy base's error (computing it for 39% of blocks keeps half its wins at λ 1).
+- **Rate-constrained elimination (tighter error bounds for candidates that can't continue a match).**
+  A candidate that can't take the 1-bit match continuation costs at least λ·min_bits, so its error
+  bound can drop to (best − λ·min_bits)·16/smooth in the far prefilter, the re-index and the near
+  search. Exact (byte-identical on 576 bench rows and every check encode), but paired pinned timing
+  on Kodak showed no gain (0.97-1.08× across λ 1-16, the sign flipping between runs). A continuation
+  is possible in 15-95% of blocks, and there the candidate generator's memos need the loose bound
+  (they assume the bound only shrinks); elsewhere λ·min_bits is a small part of best. The matching
+  whole-block exit (best ≤ λ·min_bits) can never fire: without a continuation every candidate,
+  the base included, costs at least the minimum.
+- **A pattern-establishment prepass (crunch / GST style).** Each chunk encoded twice; in pass 2
+  block i also tries the endpoint and index fields pass 1 chose for the next 256 blocks, with a credit
+  of C bits for fields pass 1 introduced. Best BC1 result (6 Kodak images): C = 4, −0.66% BD-rate for
+  2.4× the RDO time; C ≥ 16 loses (+1.6% to +12%), the credited fields costing more distortion than
+  their reuse saves. Offering the base encoding's future fields instead of pass 1's did better for less
+  (−0.7% to −1.0% at 1.8×), but the control with the previous 256 blocks' base fields gave −0.22%, so
+  the real establishment effect is only about 0.45 points. BC7 (mode-6 endpoint fields of future base
+  blocks): −0.35% to −0.50% BD-rate PSNR, −0.14% to −0.19% SSIM for 1.6-2× the RDO time.
+- **Carrying re-index lower bounds from the neighbouring block (Elkan / LAESA).** The carried bound
+  Σ max(0, √e_t − δ_t)² from the left or upper block's exact per-texel palette errors is valid, but
+  neighbouring blocks are usually more than 2√T apart in weighted distance, so the triangle
+  inequality rarely bites. Even as a free, ideal cache it would remove only 0.2-1.5% of BC7 RDO
+  cycles at λ ≥ 4 and 0.4-6% at λ 1, before paying for the bound and the caches.
+- **Steered re-indexing of mode-6 index bytes toward window runs ("lossy LZ" indices).** For the
+  chosen block's endpoints and the 4 lowest-error re-indexed endpoint pairs of the search, index
+  bytes were forced to equal the window's bytes at a repeat offset or 16·d back (d ≤ 16-64), the
+  other indices left nearest; a per-texel, per-index error table priced each span in O(1) and
+  survivors were costed exactly. Kodak-24: −0.11% / −0.23% BD-rate at equal PSNR (−0.88% / −1.11%
+  at equal SSIM) for 1.9× / 3.2× the RDO time; repeat offsets alone gave +0.15% PSNR, −0.54% SSIM
+  for 1.46×. Steered candidates win in 15-28% of blocks, but each saves few real Zstd bits: the
+  rate model over-values 3-4-byte matches (a minimum span of 4-5 beats 3), and an estimated-J
+  shortlist ranked too poorly to cut the pricing. Most of the gain is the endpoints plus a partial
+  index run from the same source, so a cheap retry should start there, and only if SSIM is the
+  target.
 
 ## Field split (`--prep`)
 

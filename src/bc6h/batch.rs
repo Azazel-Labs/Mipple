@@ -871,7 +871,7 @@ fn encode8<V: SimdF32>(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
         try_mode(&tg, &rg, &p, &ends, s.refits, all::<V>(), mode_vec::<V>(m), &mut best);
     }
     let mut active = zero::<V>().simd_lt(best.t.err);
-    if V::mask_any(active) {
+    if s.partitions > 0 && V::mask_any(active) {
         // Two regions: each lane ranks the partitions by estimated fit.
         let np = s.partitions.clamp(1, 32);
         let (parts, est0) = rank_partitions(&tg, &mean, &axis, np);
@@ -970,18 +970,22 @@ fn encode8_avx2(px: &[HdrBlock; LANES], s: Search) -> [[u8; 16]; LANES] {
 
 /// Encodes up to eight blocks at effort 0..=9 (shorter batches are padded with their last block).
 pub fn encode_batch(blocks: &[HdrBlock], effort: u8) -> Vec<[u8; 16]> {
+    encode_lanes(blocks, super::search(effort))[..blocks.len()].to_vec()
+}
+
+/// Encodes up to eight blocks with search settings `s`; lanes past `blocks.len()` repeat the last
+/// block.
+pub(super) fn encode_lanes(blocks: &[HdrBlock], s: Search) -> [[u8; 16]; LANES] {
     debug_assert!(!blocks.is_empty() && blocks.len() <= LANES);
-    let s = super::search(effort);
     let last = blocks[blocks.len() - 1];
     let mut lanes = [last; LANES];
     lanes[..blocks.len()].copy_from_slice(blocks);
-    let out = match crate::simd::level() {
+    match crate::simd::level() {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
         Level::Avx2 => unsafe { encode8_avx2(&lanes, s) },
         _ => encode8::<f32x8>(&lanes, s),
-    };
-    out[..blocks.len()].to_vec()
+    }
 }
 
 /// Encodes eight blocks with the portable backend (tests compare it with AVX2).

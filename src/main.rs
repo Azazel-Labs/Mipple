@@ -133,6 +133,10 @@ struct RdoArgs {
     /// searched across chunks) [default: 65536 for BC7, 16384 otherwise].
     #[arg(long)]
     chunk_bytes: Option<usize>,
+    /// Deferred decision: when a block's runner-up scores within this fraction of its best, the
+    /// next block is searched after each and the better pair kept (0 disables) [default: 0.3].
+    #[arg(long)]
+    defer: Option<f32>,
     /// Distortion multiplier for flat blocks (protects gradients).
     #[arg(long, default_value_t = 4.0)]
     smooth_scale: f32,
@@ -140,6 +144,11 @@ struct RdoArgs {
     /// approach --smooth-scale, busier ones 1.
     #[arg(long, alias = "smooth-max-std", default_value_t = 12.0)]
     smooth_std: f32,
+    /// Measure smoothness over the four 8x8 windows containing each block (the windows SSIM
+    /// uses), with this standard deviation at half weight, instead of over the block alone with
+    /// --smooth-std (0 uses the block alone).
+    #[arg(long, default_value_t = 16.0)]
+    smooth_window_std: f32,
     /// Reject candidates whose RMS error exceeds this multiple of the base encoding's.
     #[arg(long, default_value_t = 10.0)]
     max_rms_ratio: f32,
@@ -159,8 +168,10 @@ impl RdoArgs {
             far_back: self.far_back,
             local_k: self.local,
             chunk_bytes: self.chunk_bytes,
+            defer: self.defer,
             smooth_scale: self.smooth_scale,
             smooth_std: self.smooth_std,
+            smooth_window_std: self.smooth_window_std,
             max_rms_ratio: self.max_rms_ratio,
             min_rms: self.min_rms,
             ..RdoParams::default()

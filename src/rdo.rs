@@ -54,6 +54,11 @@ pub struct RdoParams {
     pub smooth_std: f32,
     /// Distortion multiplier applied to perfectly flat blocks (falling towards 1 as they get busier).
     pub smooth_scale: f32,
+    /// When positive (and `row` is known), smoothness is measured over the four 8x8 windows
+    /// (2x2 blocks) that contain the block, the windows SSIM is computed over, with this standard
+    /// deviation at half weight, instead of over the block alone with `smooth_std` (see
+    /// [`smooth_map`]). 0 uses the block alone.
+    pub smooth_window_std: f32,
     /// Reject candidates whose RMS error exceeds this multiple of the base encoding's.
     pub max_rms_ratio: f32,
     /// ... unless it is within this RMS per channel: blocks the base encodes almost exactly would
@@ -81,6 +86,10 @@ pub struct RdoParams {
     /// Blocks per row of the surface (blocks are in raster order), or 0 when unknown. The
     /// localized search also tries the blocks around the one directly above.
     pub row: usize,
+    /// Deferred decision: when a block's runner-up scores within this fraction of its best, the
+    /// next block is searched after each and the pair with the lower total kept. `None` picks a
+    /// per-format default ([`RdoParams::defer_for`]); 0 disables it.
+    pub defer: Option<f32>,
 }
 
 impl Default for RdoParams {
@@ -100,6 +109,10 @@ impl Default for RdoParams {
             // equal RMSE while staying ahead at equal SSIM; BC1/BC4 gained at equal RMSE too.
             smooth_std: 12.0,
             smooth_scale: 4.0,
+            // Neighbourhood rather than block smoothness: Kodak-24 BC7 BD-PSNR −0.68%, BD-SSIM
+            // −0.42% at λ 0.5-4, and smaller at equal RMSE and SSIM than Oodle Texture in every
+            // cell at λ 10-40 (a 12x12 window, k 12-24 and per-channel averaging all did worse).
+            smooth_window_std: 16.0,
             max_rms_ratio: 10.0,
             // 3 rather than 1.5: −5% BD-rate for BC4/BC5 on Kodak (smooth single-channel blocks
             // were stuck at their base encoding), BC1/BC7 within ±0.1%.
@@ -110,6 +123,7 @@ impl Default for RdoParams {
             reduce_entropy: false,
             local_k: None,
             row: 0,
+            defer: None,
         }
     }
 }
@@ -211,6 +225,11 @@ impl RdoParams {
         })
     }
 
+    /// Deferred-decision margin: by default 0.3 (a runner-up within 30% of the best).
+    pub fn defer_for(&self, _format: Format) -> f32 {
+        self.defer.unwrap_or(0.3)
+    }
+
     /// Bytes per independently optimized chunk: by default 64 KiB for BC7 (6 chunks per Kodak
     /// image; 128 KiB is −0.8% to −1.3% BD-rate for the same CPU time, but fewer, longer chunks
     /// leave threads idle: 1.4-1.5× the wall time at 20 threads), 16 KiB for the others (1024 BC5
@@ -269,6 +288,15 @@ pub struct LzState {
     /// The previous block ended inside a match, so a repeat match at the start of the next
     /// block simply extends it (one long match in the real compressor).
     pub tail_match: bool,
+}
+
+/// [`LzModel::snapshot`]: the model's length, parser state and literal statistics.
+#[derive(Clone, Copy, Debug)]
+pub struct LzUndo {
+    len: usize,
+    state: LzState,
+    max_count: u32,
+    total: u32,
 }
 
 /// A crude model of an LZ77 + entropy coder: greedy parse, order-0 literal costs,
@@ -358,6 +386,38 @@ impl LzModel {
         if !self.frozen {
             self.refresh_literals();
         }
+    }
+
+    /// What [`undo`](Self::undo) needs to take back the blocks pushed after this call.
+    pub fn snapshot(&self) -> LzUndo {
+        LzUndo {
+            len: self.hist.len(),
+            state: self.state,
+            max_count: self.max_count,
+            total: self.total,
+        }
+    }
+
+    /// Takes back every push since `u` was taken (the hash chains, statistics and parser
+    /// state are restored exactly).
+    pub fn undo(&mut self, u: &LzUndo) {
+        let (l, n) = (u.len, self.hist.len());
+        for q in (l.saturating_sub(2)..n.saturating_sub(2)).rev() {
+            let h = hash3(self.hist[q], self.hist[q + 1], self.hist[q + 2]);
+            self.head[h] = self.prev[q];
+            self.prev[q] = -1;
+        }
+        if !self.frozen {
+            for &b in &self.hist[l..n] {
+                self.counts[b as usize] -= 1;
+            }
+            self.total = u.total;
+            self.max_count = u.max_count;
+            self.refresh_literals();
+        }
+        self.hist.truncate(l);
+        self.prev.truncate(l);
+        self.state = u.state;
     }
 
     #[inline]
@@ -1264,6 +1324,72 @@ fn smooth_factor(src: &Block, w: &[u32; 4], p: &RdoParams) -> f32 {
     1.0 + (p.smooth_scale - 1.0) * k2 / (k2 + max_std * max_std)
 }
 
+/// Per-block distortion multipliers from neighbourhood smoothness, in the spirit of x264's
+/// adaptive quantization and SSIM-optimal RDO (d(1-SSIM)/dSSE ∝ 1/(2σ² + C2) over the windows
+/// that cover a texel): `1 + (smooth_scale - 1) * mean_win k² / (k² + σ²)` with
+/// `k = smooth_window_std`, over the four 2x2-block (8x8 texel) windows that contain the block
+/// (clipped at the surface edges), σ² the largest weighted channel's variance in the window.
+/// `None` when the setting is off or the row length unknown (each block then uses
+/// [`smooth_factor`]).
+fn smooth_map(src: &[Block], w: &[u32; 4], p: &RdoParams) -> Option<Vec<f32>> {
+    let row = p.row;
+    if p.smooth_window_std <= 0.0 || row == 0 || !src.len().is_multiple_of(row) {
+        return None;
+    }
+    let rows = src.len() / row;
+    let chans: Vec<usize> = (0..4).filter(|&c| w[c] > 0).collect();
+    // Per block and channel: sums of values and of squares (exact).
+    let sums: Vec<[[u32; 2]; 4]> = src
+        .iter()
+        .map(|b| {
+            let mut s = [[0u32; 2]; 4];
+            for t in b {
+                for c in 0..4 {
+                    s[c][0] += t[c] as u32;
+                    s[c][1] += t[c] as u32 * t[c] as u32;
+                }
+            }
+            s
+        })
+        .collect();
+    let k2 = (p.smooth_window_std as f64).powi(2);
+    // k²/(k²+σ²) of the window whose top-left block is (x, y), x in -1..row, y in -1..rows.
+    let term = |x: isize, y: isize| -> f64 {
+        let (x0, x1) = (x.max(0) as usize, ((x + 2) as usize).min(row));
+        let (y0, y1) = (y.max(0) as usize, ((y + 2) as usize).min(rows));
+        let n = (16 * (x1 - x0) * (y1 - y0)) as f64;
+        let mut maxv = 0f64;
+        for &c in &chans {
+            let (mut s1, mut s2) = (0u64, 0u64);
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    s1 += sums[yy * row + xx][c][0] as u64;
+                    s2 += sums[yy * row + xx][c][1] as u64;
+                }
+            }
+            let m = s1 as f64 / n;
+            maxv = maxv.max((s2 as f64 / n - m * m).max(0.0));
+        }
+        k2 / (k2 + maxv)
+    };
+    let wrow = row + 1;
+    let terms: Vec<f64> = (0..(rows + 1) * wrow)
+        .map(|k| term((k % wrow) as isize - 1, (k / wrow) as isize - 1))
+        .collect();
+    Some(
+        (0..src.len())
+            .map(|i| {
+                let (x, y) = (i % row, i / row);
+                let t = terms[y * wrow + x]
+                    + terms[y * wrow + x + 1]
+                    + terms[(y + 1) * wrow + x]
+                    + terms[(y + 1) * wrow + x + 1];
+                1.0 + (p.smooth_scale - 1.0) * (t / 4.0) as f32
+            })
+            .collect(),
+    )
+}
+
 /// Sum of absolute differences of the first `len` bytes (a multiple of 16).
 #[inline]
 fn sad(a: &[u8; 64], b: &[u8; 64], off: usize, len: usize) -> u32 {
@@ -1330,9 +1456,14 @@ struct FarEndpoints {
     fields: usize,
     seg: Vec<[f32; 6]>,
     latest: Vec<bool>,
-    last: std::collections::HashMap<(u8, [u8; 4]), usize>,
+    last: std::collections::HashMap<FieldKey, usize>,
     sw: [f32; 3],
+    /// Per pushed field: its key and what it displaced in `last` (position, `latest` flag).
+    log: Vec<(FieldKey, Option<(usize, bool)>)>,
 }
+
+/// A far endpoint field: its BC5 half (0 otherwise) and its bytes.
+type FieldKey = (u8, [u8; 4]);
 
 impl FarEndpoints {
     fn new(format: Format, cap: usize, w: &[u32; 4]) -> Self {
@@ -1344,6 +1475,25 @@ impl FarEndpoints {
             latest: Vec::with_capacity(cap * fields),
             last: std::collections::HashMap::with_capacity(cap * fields),
             sw: [(w[0] as f32).sqrt(), (w[1] as f32).sqrt(), (w[2] as f32).sqrt()],
+            log: Vec::new(),
+        }
+    }
+
+    /// Takes back the last [`push`](Self::push).
+    fn pop(&mut self) {
+        for h in (0..self.fields).rev() {
+            let (k, old) = self.log.pop().unwrap();
+            self.seg.pop();
+            self.latest.pop();
+            match old {
+                Some((o, lv)) => {
+                    self.last.insert(k, o);
+                    self.latest[o * self.fields + h] = lv;
+                }
+                None => {
+                    self.last.remove(&k);
+                }
+            }
         }
     }
 
@@ -1368,9 +1518,11 @@ impl FarEndpoints {
                 // 6-value blocks also have 0 and 255: likewise never tried.
                 ([e0, e1, 0, 0], e0 > e1, s)
             };
-            if let Some(o) = self.last.insert((h as u8, k), i) {
-                self.latest[o * self.fields + h] = false;
-            }
+            let old = self.last.insert((h as u8, k), i).map(|o| {
+                let lv = std::mem::replace(&mut self.latest[o * self.fields + h], false);
+                (o, lv)
+            });
+            self.log.push(((h as u8, k), old));
             self.latest.push(valid);
             self.seg.push(s);
         }
@@ -1574,6 +1726,27 @@ impl Far7Pre {
         }
     }
 
+    /// Takes back the last [`push`](Self::push) of `raw` (which no filter has entered yet).
+    fn pop(&mut self, raw: &[u8; 16]) {
+        debug_assert!(self.entered < self.prv.len());
+        self.pal6.pop();
+        let twin = self.prv.pop().unwrap();
+        if bc7::is_mode6(raw) {
+            let k = field_key(&raw[..8]);
+            if twin == u32::MAX {
+                self.last.remove(&k);
+            } else {
+                self.last.insert(k, twin);
+            }
+        }
+        self.live_at.pop();
+        for c in 0..4 {
+            self.sums[c].pop();
+            self.a[c].pop();
+            self.b[c].pop();
+        }
+    }
+
     /// The bounds for source `s` at error bound `bound` (the base's P1 is bit 64 of `base`).
     fn query(&self, s: &Block, w: &[u32; 4], base: &[u8; 16], bound: u64) -> Far7Query {
         let sums = channel_sums(s).map(|x| x as f32);
@@ -1742,7 +1915,9 @@ fn bc7_far(
     seen: &mut Seen,
     model: &mut LzModel,
     best: &mut (f64, [u8; 16], f32, LzState),
+    pool: Option<&mut Vec<([u8; 16], u64)>>,
 ) {
+    let mut pool = pool;
     let (fin, fin_sums, far_back, w, lambda) = (f7.fin, f7.fin_sums, f7.far_back, f7.w, f7.lambda);
     let (n, base) = (16, *base);
     let src_sums = channel_sums(s);
@@ -1799,6 +1974,9 @@ fn bc7_far(
             if dist >= best.0 || (dist + min_bits >= best.0 && !model.may_continue(&c[..n])) {
                 continue;
             }
+            if let Some(pl) = pool.as_deref_mut() {
+                pl.push((c, err));
+            }
             let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(best.0, dist, lambda)) else {
                 continue;
             };
@@ -1810,6 +1988,33 @@ fn bc7_far(
     }
 }
 
+/// A scored candidate: (J, bytes, bits, parser state after it).
+type Best = (f64, [u8; 16], f32, LzState);
+
+/// The near-tie deferred decision's state (see `optimize_chunk`).
+enum Phase {
+    Free,
+    /// Block i − 1 committed its best `a`; block i is being searched after it.
+    EvalA {
+        a: Best,
+        b: Best,
+        base: [u8; 16],
+        bb: f32,
+    },
+    /// Block i − 1 committed its runner-up `b`; `ra` is block i's result after `a`.
+    EvalB {
+        a: Best,
+        b: Best,
+        base: [u8; 16],
+        bb: f32,
+        ra: (Best, Best, [u8; 16], f32),
+    },
+}
+
+#[allow(
+    unused_assignments,
+    reason = "a commit that is taken back at once (the deferred pair's first choice, re-committed) leaves its undo record unread"
+)]
 fn optimize_chunk(
     format: Format,
     src: &[Block],
@@ -1817,6 +2022,7 @@ fn optimize_chunk(
     alts: &[&[[u8; 16]]],
     w: &[u32; 4],
     p: &RdoParams,
+    smooth_of: Option<&[f32]>,
 ) -> RdoStats {
     let n = format.block_bytes();
     let window = p.window_for(format);
@@ -1892,14 +2098,42 @@ fn optimize_chunk(
     let mut fin_sums: Vec<[i32; 4]> = Vec::new();
     let mut far7_pre = Far7Pre::new(w, if far7 { blocks.len() } else { 0 });
 
-    for i in 0..blocks.len() {
+    // Near-tie deferred decision (an LZ optimal parse's "arrivals", two of them): when block i's
+    // runner-up is within `defer_eps` of its best score, block i + 1 is searched after each and
+    // the pair with the lower sum is kept. The search's pruning is relaxed by the same margin so
+    // that runner-up is found (0: exact greedy search, byte-identical). Block i + 1's search after
+    // the runner-up reuses the distortions of its search after the best: it reprices those
+    // candidates and adds only the ones built from block i. Off in the training dump, which
+    // cannot be taken back.
+    let defer_eps = if dump { 0.0 } else { p.defer_for(format).max(0.0) as f64 };
+    let track1 = 1.0 + defer_eps;
+    let thr = |best: &Best, runner: &Best| best.0.max(runner.0.min(best.0 * track1));
+    let no_runner: Best = (f64::INFINITY, [0; 16], 0.0, LzState::default());
+    let mut phase = Phase::Free;
+    let fast_b = defer_eps > 0.0;
+    let mut pool: Vec<([u8; 16], u64)> = Vec::new();
+    let mut la_js: Vec<usize> = Vec::new();
+    // The last committed block's undo record: model snapshot, its base bytes, base bits, bits.
+    let mut saved: Option<(LzUndo, [u8; 16], f32, f32)> = None;
+
+    let mut i = 0;
+    while i < blocks.len() {
         let s = &src[i];
-        let smooth = smooth_factor(s, w, p) as f64;
+        let smooth = match smooth_of {
+            Some(m) => m[i],
+            None => smooth_factor(s, w, p),
+        } as f64;
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         let mut base = blocks[i];
         format.decode_block(&base[..n], &mut dec);
         let mut base_err = block_sse(s, &dec, w);
         let (mut base_bits, mut base_rep) = model.cost(&base[..n]);
+        let mut runner = no_runner;
+        let collecting = fast_b && matches!(phase, Phase::EvalA { .. });
+        let fast = fast_b && matches!(phase, Phase::EvalB { .. });
+        if collecting {
+            pool.clear();
+        }
         // Other base encodings (BC7: see `pipeline::encode`): the block starts from whichever
         // scores best.
         for a in alts.iter().map(|a| a[i]) {
@@ -1910,7 +2144,10 @@ fn optimize_chunk(
             let a_err = block_sse(s, &dec, w);
             let (a_bits, a_rep) = model.cost(&a[..n]);
             if score(a_err, a_bits) < score(base_err, base_bits) {
+                runner = (score(base_err, base_bits), base, base_bits, base_rep);
                 (base, base_err, base_bits, base_rep) = (a, a_err, a_bits, a_rep);
+            } else if score(a_err, a_bits) < runner.0 {
+                runner = (score(a_err, a_bits), a, a_bits, a_rep);
             }
         }
         let base_unpacked = unpack_final(format, &base).map(|(u, _)| u);
@@ -1920,6 +2157,7 @@ fn optimize_chunk(
         // have room to move.
         let limit = p.error_limit(base_err, channels);
         let mut best = (score(base_err, base_bits), base, base_bits, base_rep);
+        let j_start = best.0;
 
         let back = max_back.min(i);
         seen.clear();
@@ -1939,7 +2177,7 @@ fn optimize_chunk(
             };
         if dump_blk {
             extra_ds.extend(back + 1..=i);
-        } else if local_k > 0 && i > back && one {
+        } else if local_k > 0 && i > back && one && !fast {
             let rs = RankSrc1::new(s, base_err, lambda as f32, p.row);
             let picks = rs.pick(&rblocks1, i, back, LOCAL_M1, local_k, &mut pick1);
             extra_ds.extend(picks.iter().map(|&(_, d)| d));
@@ -1951,7 +2189,7 @@ fn optimize_chunk(
                 }
             }
             extra_ds.sort_unstable();
-        } else if local_k > 0 && i > back {
+        } else if local_k > 0 && i > back && !fast {
             let by = |a: &(f32, usize), b: &(f32, usize)| a.0.total_cmp(&b.0);
             let m = LOCAL_M.max(local_k);
             scored.clear();
@@ -2011,9 +2249,13 @@ fn optimize_chunk(
         let mut xi = usize::MAX;
         let mut far_done = false;
         for d in (1..=back).chain(extra_ds.iter().copied()) {
-            // BC7's far search before the picks: they get the candidates it does not try, and
-            // the training dump scores them against the near and far searches together.
-            if far7 && !far_done && d > back {
+            if fast && d != 1 {
+                far_done = true;
+                continue;
+            }
+            // The training dump runs BC7's far search before the picks, to score them against the
+            // near and far searches together; otherwise it runs after them (see below).
+            if far7 && dump && !far_done && d > back {
                 far_done = true;
                 model.hint = 0;
                 let mut f7 = Far7 {
@@ -2038,6 +2280,7 @@ fn optimize_chunk(
                     &mut seen,
                     &mut model,
                     &mut best,
+                    collecting.then_some(&mut pool),
                 );
             }
             model.hint = if d > back { d * n } else { 0 };
@@ -2074,7 +2317,7 @@ fn optimize_chunk(
                 d <= span_back,
                 d <= CROSS_BACK || d == p.row,
                 &mut fields,
-                bound(best.0),
+                bound(thr(&best, &runner)),
                 pair(base_unpacked.as_ref(), fin[i - d].as_ref()),
                 base_half,
                 &mut cands,
@@ -2085,9 +2328,10 @@ fn optimize_chunk(
                 if c[..n] == base[..n] || !seen.insert(c) {
                     continue;
                 }
+                let t = thr(&best, &runner);
                 let err = match *known {
                     UNKNOWN => {
-                        let b = bound(best.0);
+                        let b = bound(t);
                         block_err(format, &c[..n], s, w, b, (&base, base_half), &mut dec)
                     }
                     e => e,
@@ -2096,19 +2340,25 @@ fn optimize_chunk(
                     continue;
                 }
                 let dist = smooth * err as f64 / 16.0;
-                if dist >= best.0 {
+                if dist >= t {
                     continue;
                 }
                 // Even the cheapest possible coding would not beat the best.
-                if dist + min_bits >= best.0 && !model.may_continue(&c[..n]) {
+                if dist + min_bits >= t && !model.may_continue(&c[..n]) {
                     continue;
                 }
-                let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(best.0, dist, lambda)) else {
+                if collecting {
+                    pool.push((*c, err));
+                }
+                let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                     continue;
                 };
                 let j = dist + lambda * bits as f64;
                 if j < best.0 {
+                    runner = best;
                     best = (j, *c, bits, rep);
+                } else if j < runner.0 {
+                    runner = (j, *c, bits, rep);
                 }
             }
             if dump_blk && d > back {
@@ -2168,7 +2418,30 @@ fn optimize_chunk(
         // Far endpoints: earlier blocks' endpoints beyond the main search, re-indexed. Each
         // distinct pair is tried at its nearest position only, and only when a lower bound on its
         // error (the block mean's distance from the endpoints' segment) leaves it a chance.
-        if far_on && i > back {
+        if fast {
+            for k in 0..pool.len() {
+                let (c, err) = pool[k];
+                if err > limit || c[..n] == base[..n] || !seen.insert(&c) {
+                    continue;
+                }
+                let t = thr(&best, &runner);
+                let dist = smooth * err as f64 / 16.0;
+                if dist >= t || (dist + min_bits >= t && !model.may_continue(&c[..n])) {
+                    continue;
+                }
+                let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
+                    continue;
+                };
+                let j = dist + lambda * bits as f64;
+                if j < best.0 {
+                    runner = best;
+                    best = (j, c, bits, rep);
+                } else if j < runner.0 {
+                    runner = (j, c, bits, rep);
+                }
+            }
+        }
+        if far_on && i > back && !fast {
             let (m, slack) = far.mean(s);
             let px: [[f32; 16]; 2] = [0, 1].map(|c| std::array::from_fn(|t| s[t][c] as f32 * far.sw[c]));
             for d in back + 1..=far_back.min(i) {
@@ -2184,34 +2457,44 @@ fn optimize_chunk(
                         } else {
                             0.0
                         };
-                    if smooth * lb >= best.0 || (16.0 * lb) as u64 > limit {
+                    let t = thr(&best, &runner);
+                    if smooth * lb >= t || (16.0 * lb) as u64 > limit {
                         continue;
                     }
                     let c = far.candidate(&base, &blocks[j], h, s, w);
                     if c[..n] == base[..n] || !seen.insert(&c) {
                         continue;
                     }
-                    let bnd = limit.min((best.0 * 16.0 / smooth) as u64 + 2);
+                    let bnd = limit.min((t * 16.0 / smooth) as u64 + 2);
                     let err = block_err(format, &c[..n], s, w, bnd, (&base, base_half), &mut dec);
                     if err > limit {
                         continue;
                     }
                     let dist = smooth * err as f64 / 16.0;
-                    if dist >= best.0 || (dist + min_bits >= best.0 && !model.may_continue(&c[..n])) {
+                    if dist >= t || (dist + min_bits >= t && !model.may_continue(&c[..n])) {
                         continue;
                     }
-                    let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(best.0, dist, lambda)) else {
+                    if collecting {
+                        pool.push((c, err));
+                    }
+                    let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                         continue;
                     };
                     let jj = dist + lambda * bits as f64;
                     if jj < best.0 {
+                        runner = best;
                         best = (jj, c, bits, rep);
+                    } else if jj < runner.0 {
+                        runner = (jj, c, bits, rep);
                     }
                 }
             }
         }
 
-        if far7 && !far_done && i > back {
+        // BC7's far search, after the picks: it is skipped when they already cut J below
+        // `FAR7_GATE` of its start (Kodak 1-6: −13% RDO time for +0.24% BD-rate; moving it after
+        // the picks alone changes nothing, −0.02%).
+        if far7 && !far_done && i > back && !fast && (dump || best.0 >= FAR7_GATE * j_start) {
             let mut f7 = Far7 {
                 fin: &fin,
                 fin_sums: &fin_sums,
@@ -2234,12 +2517,63 @@ fn optimize_chunk(
                 &mut seen,
                 &mut model,
                 &mut best,
+                collecting.then_some(&mut pool),
             );
+        }
+
+        // Lookahead (BC1): the endpoints of upcoming blocks' base encodings (the next
+        // `LOOKAHEAD`, and the `2 * LOOKAHEAD_ROW + 1` around the block below), re-indexed. A
+        // block that adopts one leaves that block a cheap copy when its turn comes.
+        if format == Format::Bc1 && !fast {
+            la_js.clear();
+            la_js.extend(i + 1..(i + 1 + LOOKAHEAD).min(blocks.len()));
+            if p.row > 0 {
+                let c = i + p.row;
+                la_js.extend(
+                    (c.saturating_sub(LOOKAHEAD_ROW)..=c + LOOKAHEAD_ROW)
+                        .filter(|&j| j > i + LOOKAHEAD && j < blocks.len()),
+                );
+            }
+            for &j in &la_js {
+                let (r, rgb_err) = bc1::reindex_err(&blocks[j][..8], s, w);
+                let mut c = [0u8; 16];
+                c[..8].copy_from_slice(&r);
+                if c[..n] == base[..n] || !seen.insert(&c) {
+                    continue;
+                }
+                let t = thr(&best, &runner);
+                let err = if w[3] == 0 {
+                    rgb_err
+                } else {
+                    let bnd = limit.min((t * 16.0 / smooth) as u64 + 2);
+                    block_err(format, &c[..n], s, w, bnd, (&base, base_half), &mut dec)
+                };
+                if err > limit {
+                    continue;
+                }
+                let dist = smooth * err as f64 / 16.0;
+                if dist >= t || (dist + min_bits >= t && !model.may_continue(&c[..n])) {
+                    continue;
+                }
+                if collecting {
+                    pool.push((c, err));
+                }
+                let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
+                    continue;
+                };
+                let jj = dist + lambda * bits as f64;
+                if jj < best.0 {
+                    runner = best;
+                    best = (jj, c, bits, rep);
+                } else if jj < runner.0 {
+                    runner = (jj, c, bits, rep);
+                }
+            }
         }
 
         // Refinement: the search copies whole blocks, whole fields with the other refit, and
         // nearby spans; mixing one field of an earlier block into the chosen one can still win.
-        if refine_back > 0 && best.1[..n] != base[..n] {
+        if refine_back > 0 && best.1[..n] != base[..n] && !fast {
             let flds: &[(usize, usize)] = match format {
                 Format::Bc1 => &[(0, 4), (4, 8)],
                 Format::Bc3 => &[(0, 2), (2, 8), (8, 12), (12, 16)],
@@ -2279,7 +2613,8 @@ fn optimize_chunk(
                     if c[..n] == base[..n] || !seen.insert(&c) {
                         continue;
                     }
-                    let bnd = limit.min((best.0 * 16.0 / smooth) as u64 + 2);
+                    let t = thr(&best, &runner);
+                    let bnd = limit.min((t * 16.0 / smooth) as u64 + 2);
                     let err = match &m6 {
                         Some((lo, _)) if a == 8 => lo.err(half(&c, 1), bnd),
                         Some((_, hi)) if bc7::is_mode6(prev) => hi.err(half(&c, 0), s, w, bnd),
@@ -2289,52 +2624,154 @@ fn optimize_chunk(
                         continue;
                     }
                     let dist = smooth * err as f64 / 16.0;
-                    if dist >= best.0 || (dist + min_bits >= best.0 && !model.may_continue(&c[..n])) {
+                    if dist >= t || (dist + min_bits >= t && !model.may_continue(&c[..n])) {
                         continue;
                     }
-                    let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(best.0, dist, lambda)) else {
+                    if collecting {
+                        pool.push((c, err));
+                    }
+                    let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                         continue;
                     };
                     let j = dist + lambda * bits as f64;
                     if j < best.0 {
+                        runner = best;
                         best = (j, c, bits, rep);
+                    } else if j < runner.0 {
+                        runner = (j, c, bits, rep);
                     }
                 }
             }
         }
-        stats.est_bits_before += base_bits as f64;
-        stats.est_bits_after += best.2 as f64;
-        if best.1[..n] != base[..n] {
-            stats.changed += 1;
+        // Commit `$best` as block `$k` (`$base`: its base encoding, `$bb`: the base's bits).
+        macro_rules! commit {
+            ($k:expr, $best:expr, $base:expr, $bb:expr) => {{
+                let k: usize = $k;
+                let best: Best = $best;
+                let base: [u8; 16] = $base;
+                let bb: f32 = $bb;
+                saved = Some((model.snapshot(), blocks[k], bb, best.2));
+                stats.est_bits_before += bb as f64;
+                stats.est_bits_after += best.2 as f64;
+                if best.1[..n] != base[..n] {
+                    stats.changed += 1;
+                }
+                blocks[k] = best.1;
+                if track {
+                    format.decode_block(&best.1[..n], &mut dec);
+                    if !one {
+                        sigs.push(shape_sig(&dec, w));
+                    }
+                    if dump && !one {
+                        decs.push(dec);
+                    }
+                    if one {
+                        rblocks1.push(Rank1::new(&dec, &best.1[..8]));
+                    } else if local_k > 0 {
+                        rblocks.push(RankBlock::new(&dec, [0, 1]));
+                    }
+                }
+                if track7 {
+                    format.decode_block(&best.1[..n], &mut dec);
+                    rblocks7.push(RankBlock7::new(&dec, &best.1));
+                }
+                fin.push(unpack_final(format, &best.1));
+                if far7 {
+                    fin_sums.push(fin[k].as_ref().map_or([0; 4], |(_, d)| channel_sums(d)));
+                    far7_pre.push(&best.1, fin[k].as_ref().map(|(_, d)| channel_sums(d)));
+                }
+                model.push(&best.1[..n], best.3);
+                if far_on {
+                    far.push(k, &best.1);
+                }
+            }};
         }
-        blocks[i] = best.1;
-        if track {
-            format.decode_block(&best.1[..n], &mut dec);
-            if !one {
-                sigs.push(shape_sig(&dec, w));
+        // Take back the commit of block `$k` (the last one).
+        macro_rules! undo {
+            ($k:expr) => {{
+                let k: usize = $k;
+                debug_assert!(!dump);
+                let (mu, orig, bb, bits) = saved.take().unwrap();
+                model.undo(&mu);
+                stats.est_bits_before -= bb as f64;
+                stats.est_bits_after -= bits as f64;
+                if blocks[k][..n] != orig[..n] {
+                    stats.changed -= 1;
+                }
+                if track7 {
+                    rblocks7.pop();
+                }
+                if far7 {
+                    fin_sums.pop();
+                    far7_pre.pop(&blocks[k]);
+                }
+                blocks[k] = orig;
+                if track {
+                    if !one {
+                        sigs.pop();
+                    }
+                    if one {
+                        rblocks1.pop();
+                    } else if local_k > 0 {
+                        rblocks.pop();
+                    }
+                }
+                fin.pop();
+                if far_on {
+                    far.pop();
+                }
+            }};
+        }
+        // Commit the block's result, deferring the decision when its runner-up nearly ties.
+        macro_rules! decide {
+            ($res:expr) => {{
+                let (bst, run, bs, bbits): (Best, Best, [u8; 16], f32) = $res;
+                let tie = defer_eps > 0.0
+                    && i + 1 < blocks.len()
+                    && run.0.is_finite()
+                    && run.1[..n] != bst.1[..n]
+                    && run.0 <= bst.0 * (1.0 + defer_eps);
+                commit!(i, bst, bs, bbits);
+                if tie {
+                    phase = Phase::EvalA {
+                        a: bst,
+                        b: run,
+                        base: bs,
+                        bb: bbits,
+                    };
+                }
+            }};
+        }
+        {
+            let res = (best, runner, base, base_bits);
+            match std::mem::replace(&mut phase, Phase::Free) {
+                Phase::Free => decide!(res),
+                Phase::EvalA { a, b, base: pb, bb } => {
+                    // Block i scored after the best for i − 1: now after its runner-up.
+                    undo!(i - 1);
+                    commit!(i - 1, b, pb, bb);
+                    phase = Phase::EvalB {
+                        a,
+                        b,
+                        base: pb,
+                        bb,
+                        ra: res,
+                    };
+                    continue;
+                }
+                Phase::EvalB { a, b, base: pb, bb, ra } => {
+                    let chosen = if b.0 + res.0.0 < a.0 + ra.0.0 {
+                        res
+                    } else {
+                        undo!(i - 1);
+                        commit!(i - 1, a, pb, bb);
+                        ra
+                    };
+                    decide!(chosen);
+                }
             }
-            if dump && !one {
-                decs.push(dec);
-            }
-            if one {
-                rblocks1.push(Rank1::new(&dec, &best.1[..8]));
-            } else if local_k > 0 {
-                rblocks.push(RankBlock::new(&dec, [0, 1]));
-            }
         }
-        if track7 {
-            format.decode_block(&best.1[..n], &mut dec);
-            rblocks7.push(RankBlock7::new(&dec, &best.1));
-        }
-        fin.push(unpack_final(format, &best.1));
-        if far7 {
-            fin_sums.push(fin[i].as_ref().map_or([0; 4], |(_, d)| channel_sums(d)));
-            far7_pre.push(&best.1, fin[i].as_ref().map(|(_, d)| channel_sums(d)));
-        }
-        model.push(&best.1[..n], best.3);
-        if far_on {
-            far.push(i, &best.1);
-        }
+        i += 1;
     }
 
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this
@@ -2369,6 +2806,16 @@ const VERIFY_SKIP7: f64 = 0.6;
 /// most 0.065, so such a chunk is still at most 0.97 of the base's size. A level-19 compression costs
 /// about 100 level-1 compressions; this skips most of the check's 3% of BC7 RDO CPU at λ 1.
 pub(crate) const VERIFY_QUICK: f64 = 0.9;
+
+/// BC7 far search: skipped when the near search and the picks already cut J to this fraction
+/// of its start.
+const FAR7_GATE: f64 = 0.8;
+
+/// BC1 lookahead: upcoming blocks whose base endpoints are tried (6 Kodak images: BD-rate −0.42%
+/// with the blocks around the one below, within noise of the time).
+const LOOKAHEAD: usize = 16;
+/// BC1 lookahead: blocks either side of the one directly below whose base endpoints are tried.
+const LOOKAHEAD_ROW: usize = 4;
 
 /// Localized search: blocks the shape signatures pass to the ranker.
 const LOCAL_M: usize = 128;
@@ -2522,6 +2969,10 @@ pub fn optimize_with_alt(
         };
     }
     let chunk = (p.chunk_bytes_for(format) / format.block_bytes()).max(1);
+    let smooth = smooth_map(src, w, p);
+    let smooth_chunks: Vec<Option<&[f32]>> = (0..src.len().div_ceil(chunk))
+        .map(|k| smooth.as_deref().map(|m| &m[k * chunk..((k + 1) * chunk).min(m.len())]))
+        .collect();
     let alt_chunks: Vec<Vec<&[[u8; 16]]>> = (0..src.len().div_ceil(chunk))
         .map(|k| {
             alts.iter()
@@ -2532,7 +2983,8 @@ pub fn optimize_with_alt(
     src.par_chunks(chunk)
         .zip(blocks.par_chunks_mut(chunk))
         .zip(alt_chunks)
-        .map(|((s, b), a)| optimize_chunk(format, s, b, &a, w, p))
+        .zip(smooth_chunks)
+        .map(|(((s, b), a), q)| optimize_chunk(format, s, b, &a, w, p, q))
         .reduce(RdoStats::default, RdoStats::merge)
 }
 

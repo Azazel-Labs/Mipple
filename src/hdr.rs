@@ -100,6 +100,29 @@ impl HdrSurface {
         out
     }
 
+    /// Every texel as BC6H targets ([`f32_to_uf16`] of each channel), row-major. Uses F16C where
+    /// the CPU has it (eight channels per instruction; the same values).
+    pub fn to_uf16(&self) -> Vec<[u16; 3]> {
+        use rayon::prelude::*;
+        let src = self.pixels.as_flattened();
+        let mut out = vec![[0u16; 3]; self.pixels.len()];
+        out.as_flattened_mut()
+            .par_chunks_mut(1 << 14)
+            .zip(src.par_chunks(1 << 14))
+            .for_each(|(o, s)| {
+                #[cfg(target_arch = "x86_64")]
+                if f16c() {
+                    // SAFETY: the CPU reports F16C (and AVX, which it implies).
+                    unsafe { uf16_f16c(s, o) };
+                    return;
+                }
+                for (o, &s) in o.iter_mut().zip(s) {
+                    *o = f32_to_uf16(s);
+                }
+            });
+        out
+    }
+
     /// The image of decoded half-float blocks in raster order (each `block` covers 4x4 texels,
     /// cropped at the edges).
     pub fn from_blocks(width: u32, height: u32, blocks: impl IntoIterator<Item = HdrBlock>) -> Self {
@@ -164,6 +187,38 @@ impl HdrSurface {
                 .map(|p| p.map(|v| half_to_f32(f32_to_uf16(v))))
                 .collect(),
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn f16c() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        crate::simd::level() != crate::simd::Level::Generic && std::arch::is_x86_feature_detected!("f16c")
+    })
+}
+
+/// [`f32_to_uf16`] of each of `src` into `dst` (the same length). Clamping to [0, 65504] first
+/// (`max` returns its second operand, 0, for NaN; -0 also becomes 0) leaves only finite,
+/// non-negative values, which the round-to-nearest-even conversion maps as `f32_to_half` does.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,f16c")]
+unsafe fn uf16_f16c(src: &[f32], dst: &mut [u16]) {
+    use std::arch::x86_64::*;
+    let n = src.len() / 8 * 8;
+    let zero = _mm256_setzero_ps();
+    let top = _mm256_set1_ps(65504.0);
+    for i in (0..n).step_by(8) {
+        // SAFETY: i + 8 <= n <= both lengths.
+        unsafe {
+            let x = _mm256_loadu_ps(src.as_ptr().add(i));
+            let x = _mm256_min_ps(_mm256_max_ps(x, zero), top);
+            let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(x);
+            _mm_storeu_si128(dst.as_mut_ptr().add(i).cast(), h);
+        }
+    }
+    for i in n..src.len() {
+        dst[i] = f32_to_uf16(src[i]);
     }
 }
 
@@ -279,6 +334,55 @@ mod tests {
         // A uniform 5% error is log2(1.05) on one channel of three.
         let want = (1.05f64.log2().powi(2) / 3.0).sqrt();
         assert!((log_rmse(&a, &b) - want).abs() < 1e-3, "{} vs {want}", log_rmse(&a, &b));
+    }
+
+    #[test]
+    fn to_uf16_matches_scalar() {
+        let mut v = vec![
+            f32::NAN,
+            -f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            -3.0,
+            1e-30,
+            2f32.powi(-25),
+            2f32.powi(-25) * 1.01,
+            2f32.powi(-14) * 0.999,
+            1.0 + 1.0 / 2048.0,
+            1.0 + 3.0 / 2048.0,
+            65504.0,
+            65519.0,
+            65520.0,
+            1e9,
+        ];
+        // Every half's value and the midpoints either side of it, plus pseudo-random floats.
+        for h in 0..0x7c00u16 {
+            let f = half_to_f32(h);
+            v.extend([
+                f,
+                f32::from_bits(f.to_bits() + 0x1000),
+                f32::from_bits(f.to_bits().saturating_sub(0x1000)),
+            ]);
+        }
+        let mut x = 0x1234_5678u32;
+        for _ in 0..30000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            v.push(f32::from_bits(x));
+        }
+        v.truncate(v.len() / 3 * 3);
+        let s = HdrSurface {
+            width: (v.len() / 3) as u32,
+            height: 1,
+            pixels: v.chunks(3).map(|c| [c[0], c[1], c[2]]).collect(),
+        };
+        let got = s.to_uf16();
+        for (p, g) in s.pixels.iter().zip(&got) {
+            assert_eq!(p.map(f32_to_uf16), *g, "{p:?}");
+        }
     }
 
     #[test]
