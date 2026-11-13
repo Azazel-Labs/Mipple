@@ -73,8 +73,22 @@ CPU times come from paired runs on the same core.
   - skipping `texels_far` when cached;
   - an equality-mask intra scan;
   - skipping runs of eight dropped blocks in the far loop (±0);
+  - the candidate dedup table with each tag beside its key (one cache line per probe instead of two;
+    ±0 over five paired runs);
+  - building the mode-6 alternate base inside the plain effort-8 pass, which fits the same line (390/390
+    check encodes byte-identical, but that pass is only about 2% of base time: 2.51 vs 2.58 s best of five,
+    medians reversed);
+  - skipping the Zstd safety check for every BC7 chunk (8 Kodak images at λ 1: 8.71 vs 8.63 s, same bytes;
+    the rate-model skip already covers the chunks where it would cost);
   - deduplicating refinement candidates after their error test (+4-5%, since refinement
     candidates often repeat earlier ones).
+- **Exact (greedy) pruning with the deferred decision kept.** Deferring needs the search's pruning relaxed by
+  the same margin, so the runner-up is found. With exact pruning, the runner-up is whatever survives by
+  chance: on 8 Kodak images at λ 1 that keeps 31% of deferral's size gain (1,599,944 bytes against 1,590,486
+  with deferral and 1,604,292 without) for 41% of its time saved (RDO 7.79 s against 8.42 / 6.90 s).
+- **Gating refinement per block.** Refinement's wins are spread thin: no single feature predicts them (the
+  best candidate's bits, best J over the starting J, runner-up over best, J itself). The most selective cut,
+  runner-up over best above 1.3, skips only 17% of blocks while dropping 3% of refinement's gain.
 - **A deduplicated prefilter scan at low λ.** Whole blocks and index halves are only 0-10%
   repeated within the ranker's 2048-block reach at λ 1 (30-60% at λ 4+), so deduplication pays
   only at higher λ.
