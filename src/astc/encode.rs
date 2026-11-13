@@ -161,14 +161,28 @@ fn pad(n: usize) -> usize {
 /// the scalar loop would. `out` rows have stride `pad(w)` too.
 #[inline(always)]
 fn mix_rows(out: &mut [f32], nr: usize, nk: usize, w: usize, m: &[f32], c: impl Fn(usize, usize) -> f32) {
-    let sw = pad(w);
+    match pad(w) / 4 {
+        1 => mix_rows_n::<1>(out, nr, nk, m, c),
+        2 => mix_rows_n::<2>(out, nr, nk, m, c),
+        _ => mix_rows_n::<3>(out, nr, nk, m, c),
+    }
+}
+
+/// [`mix_rows`] for rows of `NV` `F32x4`s, the whole row accumulated in registers.
+#[inline(always)]
+fn mix_rows_n<const NV: usize>(out: &mut [f32], nr: usize, nk: usize, m: &[f32], c: impl Fn(usize, usize) -> f32) {
+    let sw = 4 * NV;
     for r in 0..nr {
-        for v in (0..sw).step_by(4) {
-            let mut a = F32x4::zero();
-            for k in 0..nk {
-                a = a.add(F32x4::splat(c(r, k)).mul(F32x4::load(&m[k * sw + v..])));
+        let mut a = [F32x4::zero(); NV];
+        for k in 0..nk {
+            let ck = F32x4::splat(c(r, k));
+            let mk = &m[k * sw..];
+            for (v, av) in a.iter_mut().enumerate() {
+                *av = av.add(ck.mul(F32x4::load(&mk[4 * v..])));
             }
-            a.store(&mut out[r * sw + v..]);
+        }
+        for (v, av) in a.iter().enumerate() {
+            av.store(&mut out[r * sw + 4 * v..]);
         }
     }
 }
@@ -524,6 +538,8 @@ fn tables() -> &'static Tables {
 struct Texels<'a> {
     px: &'a [Rgba],
     f: [[f32; 4]; MAX_TEXELS],
+    /// Each channel of the texels (zero past `n`), for eight-lane kernels.
+    xl: [[i16; MAX_TEXELS]; 4],
     n: usize,
     ch: usize,
 }
@@ -532,44 +548,49 @@ struct Texels<'a> {
 const NO_CCS: usize = 4;
 
 impl Texels<'_> {
-    /// The decoded block's squared error for each partition's endpoints (0..=255), texel labels
-    /// and texel weights (0..=64: `w`, and `w2` in channel `ccs`), stopping once past `limit`.
+    /// The decoded block's squared error for the endpoints (0..=255) of partitions 0..`count`,
+    /// texel labels `lab` (as lanes: -1 past `n`) and texel weights (0..=64: `w`, and `w2` in
+    /// channel `ccs`), eight texels at a time. A texel decodes to `(64 e0 + 32 + w (e1 - e0)) >> 6`
+    /// in either color space (the sRGB path's `((e << 8 | 0x80) interpolated + 32) >> 14` is the
+    /// same), every term of which fits in i16. Once past `limit`, it stops at the end of the
+    /// channel, so it is only exact below `limit`.
+    #[allow(clippy::too_many_arguments, reason = "one call site, all of it per candidate")]
     fn error(
         &self,
         eps: &[([i32; 4], [i32; 4]); 3],
-        labels: &[u8],
-        w: &[u8],
-        w2: &[u8],
+        lab: &[i16; MAX_TEXELS],
+        count: usize,
+        w: &[u8; MAX_TEXELS],
+        w2: &[u8; MAX_TEXELS],
         ccs: usize,
         limit: u32,
     ) -> u32 {
+        let nl = self.n.next_multiple_of(8);
         let mut err = 0u32;
-        for i in 0..self.n {
-            let (e0, e1) = eps[labels[i] as usize];
-            for c in 0..self.ch {
-                let wc = if c == ccs { w2[i] } else { w[i] };
-                err += self.channel_error(i, c, e0[c], e1[c], wc);
+        for c in 0..self.ch {
+            let w = if c == ccs { w2 } else { w };
+            let bp: [I16x8; 3] = std::array::from_fn(|p| I16x8::splat((64 * eps[p].0[c] + 32) as i16));
+            let sp: [I16x8; 3] = std::array::from_fn(|p| I16x8::splat((eps[p].1[c] - eps[p].0[c]) as i16));
+            let mut acc = I32x4::zero();
+            for k in (0..nl).step_by(8) {
+                // Lanes past `n` match no partition, so decode to zero like their texels.
+                let l = I16x8::load(&lab[k..]);
+                let (mut b, mut s) = (I16x8::splat(0), I16x8::splat(0));
+                for p in 0..count {
+                    let m = l.eq(I16x8::splat(p as i16));
+                    b = b.add(bp[p].and(m));
+                    s = s.add(sp[p].and(m));
+                }
+                let y = b.add(I16x8::load_u8(&w[k..]).mul(s)).shr::<6>();
+                acc = acc.add(y.sub(I16x8::load(&self.xl[c][k..])).sq_pairs());
             }
+            err += acc.sum() as u32;
             if err > limit {
                 return err;
             }
         }
         err
     }
-
-    /// Texel `i`'s squared error in channel `c` for endpoint values `e0`, `e1` and weight `w`.
-    #[inline]
-    fn channel_error(&self, i: usize, c: usize, e0: i32, e1: i32, w: u8) -> u32 {
-        let x = lerp8(e0, e1, w as i32) - self.px[i][c] as i32;
-        (x * x) as u32
-    }
-}
-
-/// The decoded value of eight-bit endpoints `e0`, `e1` at weight `w` (0..=64), in either color
-/// space: the sRGB path's `((e << 8 | 0x80) interpolated + 32) >> 14` is the linear one.
-#[inline]
-fn lerp8(e0: i32, e1: i32, w: i32) -> i32 {
-    (64 * e0 + 32 + w * (e1 - e0)) >> 6
 }
 
 /// One texel's weight from plane `pl` of grid weights `g` (0..=64, `planes` interleaved), as the
@@ -677,11 +698,19 @@ fn quantize_decimated(grid: &Grid, q: usize, planes: usize, g: &[[f32; 64]; 2], 
 }
 
 /// Least-squares endpoints for texel weights (0..=64: `w`, and `w2` in channel `ccs`) for each
-/// of partitions 0..`count` by `labels`.
-fn refit(t: &Texels, w: &[u8], w2: &[u8], ccs: usize, labels: &[u8], count: u8) -> [([f32; 4], [f32; 4]); 3] {
+/// of partitions 0..`count` by labels `lab` (as lanes: -1 past the texels).
+fn refit(
+    t: &Texels,
+    w: &[u8; MAX_TEXELS],
+    w2: &[u8; MAX_TEXELS],
+    ccs: usize,
+    lab: &[i16; MAX_TEXELS],
+    count: u8,
+) -> [([f32; 4], [f32; 4]); 3] {
     // Per partition, in sixty-fourths: the normal equations' matrix for each plane (sums of
     // (64-w)^2, w(64-w), w^2), the right-hand sides, the channel sums and the texel count. As
     // floats these sums would be exact too (under 2^24 units), so integers give the same values.
+    // They all follow from the sums of w, w^2, v and wv, taken eight texels at a time.
     #[derive(Clone, Copy, Default)]
     struct Sums {
         abc: [[u32; 3]; 2],
@@ -692,22 +721,39 @@ fn refit(t: &Texels, w: &[u8], w2: &[u8], ccs: usize, labels: &[u8], count: u8) 
     }
     let mut sums = [Sums::default(); 3];
     let planes = 1 + (ccs < NO_CCS) as usize;
-    for i in 0..t.n {
-        let s = &mut sums[labels[i] as usize];
-        let f = [w[i] as u32, w2[i] as u32];
-        for pl in 0..planes {
-            let (x, y) = (f[pl], 64 - f[pl]);
-            s.abc[pl][0] += y * y;
-            s.abc[pl][1] += x * y;
-            s.abc[pl][2] += x * x;
+    let nl = t.n.next_multiple_of(8);
+    let ones = I16x8::splat(1);
+    for (p, s) in sums.iter_mut().enumerate().take(count as usize) {
+        let pm = I16x8::splat(p as i16);
+        let mut cnt = I32x4::zero();
+        let mut sw = [I32x4::zero(); 2];
+        let mut sww = [I32x4::zero(); 2];
+        let mut sv = [I32x4::zero(); 4];
+        let mut swv = [I32x4::zero(); 4];
+        for k in (0..nl).step_by(8) {
+            let m = I16x8::load(&lab[k..]).eq(pm);
+            cnt = cnt.add(m.sq_pairs());
+            let wp = [I16x8::load_u8(&w[k..]).and(m), I16x8::load_u8(&w2[k..]).and(m)];
+            for pl in 0..planes {
+                sw[pl] = sw[pl].add(wp[pl].madd(ones));
+                sww[pl] = sww[pl].add(wp[pl].sq_pairs());
+            }
+            for ch in 0..4 {
+                let x = I16x8::load(&t.xl[ch][k..]);
+                sv[ch] = sv[ch].add(x.and(m).madd(ones));
+                swv[ch] = swv[ch].add(wp[(ch == ccs) as usize].madd(x));
+            }
         }
-        s.n += 1;
+        s.n = cnt.sum() as u32;
+        for pl in 0..planes {
+            let (x, xx) = (sw[pl].sum() as u32, sww[pl].sum() as u32);
+            s.abc[pl] = [4096 * s.n + xx - 128 * x, 64 * x - xx, xx];
+        }
         for ch in 0..4 {
-            let x = f[(ch == ccs) as usize];
-            let v = t.px[i][ch] as u32;
-            s.r0[ch] += (64 - x) * v;
-            s.r1[ch] += x * v;
-            s.sum[ch] += v;
+            let (v, wv) = (sv[ch].sum() as u32, swv[ch].sum() as u32);
+            s.r0[ch] = 64 * v - wv;
+            s.r1[ch] = wv;
+            s.sum[ch] = v;
         }
     }
     let mut out = [([0f32; 4], [0f32; 4]); 3];
@@ -971,6 +1017,8 @@ struct Layout {
     count: u8,
     seed: u16,
     labels: [u8; MAX_TEXELS],
+    /// `labels` as lanes, -1 past the texels.
+    lab16: [i16; MAX_TEXELS],
     /// The channel the second weight plane drives, or `NO_CCS`.
     ccs: usize,
     /// Ideal weights (0..=64): each texel's position along its partition's principal axis
@@ -1006,6 +1054,7 @@ impl Layout {
             count,
             seed,
             labels: [0; MAX_TEXELS],
+            lab16: [-1; MAX_TEXELS],
             ccs,
             u: [0.0; MAX_TEXELS],
             scale: [0.0; MAX_TEXELS],
@@ -1014,6 +1063,9 @@ impl Layout {
             orth: 0.0,
         };
         l.labels[..n].copy_from_slice(&labels[..n]);
+        for (o, &x) in l.lab16.iter_mut().zip(&labels[..n]) {
+            *o = x as i16;
+        }
         let mut axes = [[0f32; 4]; 3];
         let mut means = [[0f32; 4]; 3];
         for p in 0..count as usize {
@@ -1167,7 +1219,7 @@ fn try_candidate(
     let cu = &COLOR_UNQUANT[cq as usize];
     let mut cc = [([0u8; 4], [0u8; 4]); 3];
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    let fits = refit(t, &w[0][..t.n], &w[1][..t.n], ccs, &lay.labels, lay.count);
+    let fits = refit(t, &w[0], &w[1], ccs, &lay.lab16, lay.count);
     for (p, &(f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
         let mut c0: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f0[ch])]);
         let mut c1: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f1[ch])]);
@@ -1204,7 +1256,7 @@ fn try_candidate(
         cc[p] = (c0, c1);
         eps[p] = (e0, e1);
     }
-    let err = t.error(&eps, &lay.labels, &w[0][..t.n], &w[1][..t.n], ccs, best.err);
+    let err = t.error(&eps, &lay.lab16, lay.count as usize, &w[0], &w[1], ccs, best.err);
     if err < best.err {
         let mut colors = [0u8; 18];
         let nv = if cem == 12 { 4 } else { 3 };
@@ -1506,7 +1558,7 @@ fn effort_settings(effort: u8) -> Effort {
 }
 
 /// Encodes one block of `fp`'s footprint (row-major texels). `srgb` changes nothing: eight-bit
-/// endpoints decode to the same values either way (see `lerp8`).
+/// endpoints decode to the same values either way (see `Texels::error`).
 pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8; 16] {
     let _ = srgb;
     let n = fp.texels();
@@ -1518,11 +1570,15 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let mut t = Texels {
         px,
         f: [[0.0; 4]; MAX_TEXELS],
+        xl: [[0; MAX_TEXELS]; 4],
         n,
         ch: if alpha { 4 } else { 3 },
     };
-    for (f, p) in t.f.iter_mut().zip(px) {
-        *f = p.map(|x| x as f32);
+    for (i, p) in px.iter().enumerate() {
+        t.f[i] = p.map(|x| x as f32);
+        for c in 0..4 {
+            t.xl[c][i] = p[c] as i16;
+        }
     }
     let cem = if alpha { 12u8 } else { 8 };
     let ce = alpha as usize;
@@ -1531,7 +1587,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let ms1 = Moments::of(&t, &[0; MAX_TEXELS], 1);
     let (mean1, cov) = ms1[0].mean_cov();
     let axis1 = dominant(&cov);
-    let mut layouts = vec![Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS, &ms1, Some(axis1))];
+    let mut layouts = Vec::with_capacity(1 + es.dual + es.patterns.iter().sum::<usize>());
+    layouts.push(Layout::new(&t, 1, 0, &[0; MAX_TEXELS], NO_CCS, &ms1, Some(axis1)));
     // The texels' mean squared distance from their line, per channel.
     let off_line = layouts[0].orth / (n * t.ch) as f32;
     if es.dual > 0 {
@@ -1624,10 +1681,15 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 if score >= thr {
                     continue;
                 }
-                let at = cands.partition_point(|c| c.0 <= score);
-                cands.insert(at, (score, rest, li as u16, gi as u16, e.mi));
-                if cands.len() > short {
+                // Insert after any equal scores; when full, the last (above `score`) drops out.
+                if cands.len() == short {
                     cands.pop();
+                }
+                cands.push((score, rest, li as u16, gi as u16, e.mi));
+                let mut at = cands.len() - 1;
+                while at > 0 && cands[at - 1].0 > score {
+                    cands.swap(at, at - 1);
+                    at -= 1;
                 }
                 if cands.len() == short {
                     thr = cands[short - 1].0;

@@ -526,19 +526,24 @@ pub fn block_mode(m: u32) -> Option<BlockMode> {
 
 /// The first block mode field value that decodes to `bm`, if any.
 pub fn block_mode_bits(bm: BlockMode) -> Option<u32> {
-    static TABLE: std::sync::OnceLock<Vec<(BlockMode, u32)>> = std::sync::OnceLock::new();
+    // Indexed by grid size, weight range and dual plane; u16::MAX where no field value decodes to
+    // the mode.
+    fn key(bm: BlockMode) -> Option<usize> {
+        (bm.gx < 16 && bm.gy < 16 && bm.quant < 12)
+            .then(|| ((bm.gx as usize * 16 + bm.gy as usize) * 12 + bm.quant as usize) * 2 + bm.dual as usize)
+    }
+    static TABLE: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
     let t = TABLE.get_or_init(|| {
-        let mut t: Vec<(BlockMode, u32)> = Vec::new();
-        for m in 0..2048 {
-            if let Some(b) = block_mode(m)
-                && !t.iter().any(|e| e.0 == b)
-            {
-                t.push((b, m));
+        let mut t = vec![u16::MAX; 16 * 16 * 12 * 2];
+        for m in (0..2048u16).rev() {
+            if let Some(k) = block_mode(m as u32).and_then(key) {
+                t[k] = m;
             }
         }
         t
     });
-    t.iter().find(|e| e.0 == bm).map(|e| e.1)
+    let m = t[key(bm)?];
+    (m != u16::MAX).then_some(m as u32)
 }
 
 fn hash52(mut p: u32) -> u32 {

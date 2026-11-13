@@ -35,6 +35,20 @@ mod imp {
             Self::from_array(*v)
         }
 
+        /// The first eight values of `v`, widened.
+        #[inline]
+        pub fn load_u8(v: &[u8]) -> Self {
+            let v: &[u8; 8] = v[..8].try_into().unwrap();
+            // SAFETY: 8 bytes, unaligned load.
+            Self(unsafe { _mm_unpacklo_epi8(_mm_loadl_epi64(v.as_ptr().cast()), _mm_setzero_si128()) })
+        }
+
+        /// All ones in the lanes equal to `o`'s, zero elsewhere.
+        #[inline]
+        pub fn eq(self, o: Self) -> Self {
+            Self(unsafe { _mm_cmpeq_epi16(self.0, o.0) })
+        }
+
         #[inline]
         pub fn add(self, o: Self) -> Self {
             Self(unsafe { _mm_add_epi16(self.0, o.0) })
@@ -66,6 +80,12 @@ mod imp {
         pub fn sq_pairs(self) -> I32x4 {
             I32x4(unsafe { _mm_madd_epi16(self.0, self.0) })
         }
+
+        /// The products with `o`, summed in adjacent pairs.
+        #[inline]
+        pub fn madd(self, o: Self) -> I32x4 {
+            I32x4(unsafe { _mm_madd_epi16(self.0, o.0) })
+        }
     }
 
     impl I32x4 {
@@ -77,6 +97,13 @@ mod imp {
         #[inline]
         pub fn add(self, o: Self) -> Self {
             Self(unsafe { _mm_add_epi32(self.0, o.0) })
+        }
+
+        /// The lanes' (wrapping) sum.
+        #[inline]
+        pub fn sum(self) -> i32 {
+            let a = self.to_array();
+            a[0].wrapping_add(a[1]).wrapping_add(a[2]).wrapping_add(a[3])
         }
 
         #[inline]
@@ -161,6 +188,18 @@ mod imp {
             Self(v[..8].try_into().unwrap())
         }
 
+        /// The first eight values of `v`, widened.
+        #[inline]
+        pub fn load_u8(v: &[u8]) -> Self {
+            Self(std::array::from_fn(|l| v[l] as i16))
+        }
+
+        /// All ones in the lanes equal to `o`'s, zero elsewhere.
+        #[inline]
+        pub fn eq(self, o: Self) -> Self {
+            Self(std::array::from_fn(|l| -((self.0[l] == o.0[l]) as i16)))
+        }
+
         #[inline]
         pub fn add(self, o: Self) -> Self {
             Self(std::array::from_fn(|l| self.0[l].wrapping_add(o.0[l])))
@@ -190,7 +229,13 @@ mod imp {
         /// The squares, summed in adjacent pairs.
         #[inline]
         pub fn sq_pairs(self) -> I32x4 {
-            let s = |k: usize| self.0[k] as i32 * self.0[k] as i32;
+            self.madd(self)
+        }
+
+        /// The products with `o`, summed in adjacent pairs.
+        #[inline]
+        pub fn madd(self, o: Self) -> I32x4 {
+            let s = |k: usize| self.0[k] as i32 * o.0[k] as i32;
             I32x4(std::array::from_fn(|l| s(2 * l).wrapping_add(s(2 * l + 1))))
         }
     }
@@ -204,6 +249,13 @@ mod imp {
         #[inline]
         pub fn add(self, o: Self) -> Self {
             Self(std::array::from_fn(|l| self.0[l].wrapping_add(o.0[l])))
+        }
+
+        /// The lanes' (wrapping) sum.
+        #[inline]
+        pub fn sum(self) -> i32 {
+            let a = self.0;
+            a[0].wrapping_add(a[1]).wrapping_add(a[2]).wrapping_add(a[3])
         }
 
         #[inline]
