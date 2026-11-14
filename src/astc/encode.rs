@@ -1700,6 +1700,15 @@ fn try_candidate(
         (false, false) => &tries[..0],
     };
     for &alt in tries {
+        // Base+offset holds offsets of -32..=31 only; past 34 in any channel of any partition it
+        // seldom wins. Kodak at effort 0: 5% / 6% less time at 4x4 / 6x6 for 0.001 dB.
+        if alt == cem + 1
+            && fits[..parts]
+                .iter()
+                .any(|(f0, f1)| (0..nv).any(|c| (f1[c] - f0[c]).abs() > 34.0))
+        {
+            continue;
+        }
         let Some(acq) = color_range(bm, lay.count, &[alt; 4]) else {
             continue;
         };
