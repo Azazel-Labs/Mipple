@@ -32,7 +32,7 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 
 <img src="docs/img/oodle.svg" alt="Bits per texel vs Oodle Texture 2.9.16 on Kodak, per Oodle lambda" width="100%">
 
-<img src="docs/img/formats.svg" alt="Quality vs single-thread encode time for BC6H, ETC2 and ASTC: mipple vs ISPC, texconv and Compressonator" width="100%">
+<img src="docs/img/formats.svg" alt="Quality vs single-thread encode time for BC6H, ETC2 and ASTC: mipple vs ISPC, astcenc, texconv and Compressonator" width="100%">
 
 <img src="docs/img/rd-curves.svg" alt="Rate-distortion curves per format: mipple vs bc7enc_rdo" width="100%">
 
@@ -58,9 +58,9 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | BC3 | bc7enc_rdo | **−16.0%** | **−14.4%** | n/a | n/a |
 | ETC2 RGB | Compressonator | **−25.2%** | **−24.6%** | n/a | n/a |
 | ETC2 RGBA | Compressonator | **−23.6%** | **−24.1%** | n/a | n/a |
-| ASTC 4x4 | ISPC fast | **−17.3%** | **−16.4%** | n/a | n/a |
-| ASTC 6x6 | ISPC fast | **−15.5%** | **−15.0%** | n/a | n/a |
-| ASTC 8x8 | ISPC fast | **−27.9%** | **−27.2%** | n/a | n/a |
+| ASTC 4x4 | ISPC fast | **−17.7%** | **−17.1%** | n/a | n/a |
+| ASTC 6x6 | ISPC fast | **−17.6%** | **−17.0%** | n/a | n/a |
+| ASTC 8x8 | ISPC fast | **−29.8%** | **−29.2%** | n/a | n/a |
 
 Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads `bench-results/compete-kodak24-rdo/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites this block and `docs/img/*.svg`).
 
@@ -164,8 +164,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
   Compressonator. CPU only.
 - ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint) encoders and
   a decoder for every 2D footprint, to KTX2 or `.astc`, encoded for sRGB or linear decoding;
-  `scripts/compete_astc.py` grades them against Intel ISPC, whose fast profile effort 0 beats in PSNR at all
-  three footprints on the 24 Kodak images. CPU only; its RDO pass reads the surface itself (blocks are
+  `scripts/compete_astc.py` grades them against Intel ISPC and Arm's astcenc (effort 0 beats ISPC fast in
+  PSNR and SSIM at all three footprints on the 24 Kodak images). CPU only; its RDO pass reads the surface itself (blocks are
   not 4x4).
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.

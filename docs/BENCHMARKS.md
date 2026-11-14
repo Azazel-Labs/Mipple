@@ -654,99 +654,89 @@ R11 from the red channel and RG11 from red and green, PSNR over those channels:
 
 ## ASTC vs ISPC and astcenc
 
-ASTC LDR on all 24 Kodak images, one thread for both encoders, top level only, `python scripts/compete_astc.py
-test-images/kodak --runs 3 --efforts 0,2 --cpu 16`. Intel's ISPC Texture Compressor (`ispc_astc:<W>x<H>` in
-`bcn_harness`, its fast profile, the only ASTC profile it has for opaque images); Arm's astcenc is in the next
-section. Both encode for linear decoding and are scored by
-`mipple score --astc-linear`: PSNR over RGB, luma SSIM, bits/texel after Zstd-19, and time as the sum over the
-images of each image's best of three runs (mipple's encode loop, the harness's block loop). The script pins
-everything to one P-core of the Core Ultra 7 155H (logical CPU 16) and runs the encoders in turn on each
-image. Earlier tables here were unpinned, so encodes landed on P- or E-cores (E-cores run ISPC about 1.8×
-slower), and their times are not comparable with these:
+ASTC LDR on all 24 Kodak images, top level only, on a throwaway GitHub Actions runner (AMD EPYC 9V45, 4
+logical CPUs) with every encoder on one thread pinned to CPU 1: `gh workflow run bench.yml -f head=<sha>
+-f efforts=0,1,2,5 -f runs=2` (`.github/workflows/bench.yml`, which runs `scripts/compete_astc.py`). The
+encoders are mipple 8631eda; Intel's ISPC Texture Compressor 79ddbc9 built with ISPC 1.32.0 (`ispc_astc:<W>x<H>`
+in `bcn_harness`, its fast profile, the only ASTC profile it has for opaque images); and Arm's astcenc 5.7.1
+(the prebuilt AVX2 release, `-cl`, presets fast / medium / thorough). All encode for linear decoding and are
+scored by `mipple score --astc-linear`: PSNR over RGB, luma SSIM, and bits/texel after Zstd-19 and Deflate-9.
+Time is the sum over the images of each image's best of two runs: mipple's encode loop, the harness's block
+loop, astcenc's own "Coding time" line (none include loading or writing files). Runner CPUs differ from run to
+run, so times compare only within one run; this table is one run:
 
-| footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 4x4 | ISPC fast | 43.789 | 0.99677 | 7.286 | 1.47 |
-| 4x4 | mipple effort 0 | 44.414 | 0.99741 | 6.926 | 1.14 |
-| 4x4 | mipple effort 2 | 44.744 | 0.99753 | 7.148 | 3.48 |
-| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 1.09 |
-| 6x6 | mipple effort 0 | 37.649 | 0.98392 | 3.277 | 1.09 |
-| 6x6 | mipple effort 2 | 37.876 | 0.98463 | 3.287 | 2.64 |
-| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.00 |
-| 8x8 | mipple effort 0 | 33.833 | 0.95966 | 1.859 | 0.91 |
-| 8x8 | mipple effort 2 | 34.086 | 0.96129 | 1.873 | 2.26 |
+| footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 4x4 | ISPC fast | 43.790 | 0.99677 | 7.286 | 7.431 | 1.29 |
+| 4x4 | astcenc fast | 44.580 | 0.99722 | 7.216 | 7.362 | 1.96 |
+| 4x4 | astcenc medium | 45.223 | 0.99750 | 7.363 | 7.483 | 8.69 |
+| 4x4 | astcenc thorough | 45.472 | 0.99759 | 7.453 | 7.560 | 22.82 |
+| 4x4 | mipple effort 0 | 44.555 | 0.99746 | 7.092 | 7.262 | 1.29 |
+| 4x4 | mipple effort 1 | 45.041 | 0.99760 | 7.290 | 7.432 | 4.15 |
+| 4x4 | mipple effort 2 | 45.122 | 0.99763 | 7.302 | 7.440 | 5.38 |
+| 4x4 | mipple effort 5 | 45.312 | 0.99764 | 7.349 | 7.474 | 18.68 |
+| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 3.368 | 0.95 |
+| 6x6 | astcenc fast | 37.657 | 0.98337 | 3.205 | 3.262 | 1.53 |
+| 6x6 | astcenc medium | 38.218 | 0.98561 | 3.298 | 3.340 | 5.19 |
+| 6x6 | astcenc thorough | 38.451 | 0.98664 | 3.384 | 3.407 | 23.04 |
+| 6x6 | mipple effort 0 | 37.690 | 0.98536 | 3.290 | 3.336 | 1.01 |
+| 6x6 | mipple effort 1 | 37.999 | 0.98574 | 3.338 | 3.372 | 2.52 |
+| 6x6 | mipple effort 2 | 38.084 | 0.98590 | 3.344 | 3.377 | 3.25 |
+| 6x6 | mipple effort 5 | 38.252 | 0.98619 | 3.359 | 3.387 | 10.58 |
+| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.896 | 0.85 |
+| 8x8 | astcenc fast | 33.682 | 0.95448 | 1.742 | 1.770 | 1.71 |
+| 8x8 | astcenc medium | 34.404 | 0.96329 | 1.843 | 1.863 | 6.20 |
+| 8x8 | astcenc thorough | 34.635 | 0.96589 | 1.917 | 1.926 | 23.05 |
+| 8x8 | mipple effort 0 | 33.932 | 0.96256 | 1.881 | 1.898 | 0.89 |
+| 8x8 | mipple effort 1 | 34.170 | 0.96339 | 1.901 | 1.914 | 1.99 |
+| 8x8 | mipple effort 2 | 34.248 | 0.96374 | 1.903 | 1.916 | 2.64 |
+| 8x8 | mipple effort 5 | 34.413 | 0.96452 | 1.910 | 1.921 | 7.87 |
 
-Effort 0 leads ISPC fast in PSNR, SSIM and size at every footprint, 0.63 / 0.09 / 0.18 dB ahead and 4.9% /
-1.7% / 1.2% smaller after Zstd at 4x4 / 6x6 / 8x8. It is 22% and 9% faster at 4x4 and 8x8 and takes the same
-time at 6x6 (ISPC's 6x6 time moved between 1.09 and 1.26 s across pinned runs, and effort 0 stayed at or under
-it). At 25-63 texels (6x6 among them), effort 0 encodes two candidates with two polish passes instead of one
-with three; at 4x4 and 8x8 the one candidate is already well ahead. Effort 2 leads further in quality (0.96 /
-0.31 / 0.44 dB) at 2.3-2.4× ISPC's time.
+Against ISPC fast, effort 0 is 0.77 / 0.13 / 0.28 dB ahead at 4x4 / 6x6 / 8x8 with higher SSIM. It takes the
+same time at 4x4 and 6% / 5% more at 6x6 / 8x8. Its files are 2.7% / 1.3% smaller after Zstd at 4x4 / 6x6
+and the same size at 8x8. Above 16 texels, effort 0 encodes one candidate with two polish passes and skips
+base+offset and base+scale endpoints for the candidate's weights: on the tiled Kodak image, that is 16% / 7%
+less time than the previous settings at 6x6 / 8x8 for 0.10 / 0.03 dB.
 
-### vs astcenc
-
-Arm's astcenc 5.7.1 (the prebuilt AVX2 release, `-cl`, `-j 1`, presets fast / medium / thorough) on the same
-24 images, `python scripts/compete_astc.py test-images/kodak --runs 1 --efforts 0,2,5`. Its time is its own
-"Coding time" line, which leaves out loading and writing. This run was not pinned and the laptop was on
-battery, so times compare only within this table (mipple effort 0 took about twice its pinned time above):
-
-| footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | time s |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 4x4 | astcenc fast | 44.580 | 0.99722 | 7.216 | 3.63 |
-| 4x4 | astcenc medium | 45.223 | 0.99750 | 7.363 | 15.78 |
-| 4x4 | astcenc thorough | 45.472 | 0.99759 | 7.453 | 43.13 |
-| 4x4 | mipple effort 0 | 44.414 | 0.99741 | 6.926 | 2.43 |
-| 4x4 | mipple effort 2 | 44.744 | 0.99753 | 7.148 | 6.92 |
-| 4x4 | mipple effort 5 | 44.956 | 0.99745 | 7.185 | 28.69 |
-| 6x6 | astcenc fast | 37.657 | 0.98337 | 3.205 | 2.49 |
-| 6x6 | astcenc medium | 38.218 | 0.98561 | 3.298 | 9.16 |
-| 6x6 | astcenc thorough | 38.451 | 0.98664 | 3.384 | 41.36 |
-| 6x6 | mipple effort 0 | 37.649 | 0.98392 | 3.277 | 2.02 |
-| 6x6 | mipple effort 2 | 37.876 | 0.98463 | 3.287 | 5.01 |
-| 6x6 | mipple effort 5 | 38.010 | 0.98481 | 3.292 | 16.96 |
-| 8x8 | astcenc fast | 33.682 | 0.95448 | 1.742 | 5.63 |
-| 8x8 | astcenc medium | 34.404 | 0.96329 | 1.843 | 17.53 |
-| 8x8 | astcenc thorough | 34.635 | 0.96589 | 1.917 | 75.80 |
-| 8x8 | mipple effort 0 | 33.833 | 0.95966 | 1.859 | 2.59 |
-| 8x8 | mipple effort 2 | 34.086 | 0.96129 | 1.873 | 6.66 |
-| 8x8 | mipple effort 5 | 34.217 | 0.96202 | 1.875 | 20.58 |
-
-astcenc leads at the top. Medium is 0.48 / 0.34 / 0.32 dB ahead of effort 2 in PSNR at 4x4 / 6x6 / 8x8, in 2.3×
-/ 1.8× / 2.6× its time, and ahead of effort 5 (0.27 / 0.21 / 0.19 dB) in less time. At 4x4 effort 2 keeps
-SSIM (0.99753 vs 0.99750) and 3% smaller files. Against fast, effort 0 is faster at every footprint and leads
-in SSIM; at 4x4 it is 0.17 dB behind in PSNR with files 4% smaller, at 6x6 level in PSNR with files 2% larger,
-and at 8x8 0.15 dB ahead with files 6% larger. astcenc uses formats mipple's encoder does not yet emit:
-base+offset RGB (CEM 9), base+scale RGB (CEM 6), and different CEMs per partition. On kodim01 at 4x4 medium,
-14% of its blocks are one-partition CEM 9 and 5% one-partition CEM 6; mipple uses direct RGB (CEM 8) or RGBA
-(CEM 12) only.
+Against astcenc fast, effort 0 takes 66% / 66% / 52% of its time and leads in SSIM at every footprint. It is
+0.025 dB behind in PSNR at 4x4 with files 1.7% smaller, and 0.03 / 0.25 dB ahead at 6x6 / 8x8 with files 2.7%
+/ 8.0% larger. Effort 1 beats astcenc fast by 0.46 / 0.34 / 0.49 dB in 2.1× / 1.6× / 1.2× its time. astcenc
+medium leads effort 2 by 0.10 / 0.13 / 0.16 dB in 1.6× / 1.6× / 2.3× effort 2's time; effort 5 is 0.09 / 0.03
+/ 0.01 dB ahead of medium in 2.1× / 2.0× / 1.3× medium's time. astcenc thorough has the highest PSNR at every
+footprint, 0.16 / 0.20 / 0.22 dB above effort 5 in 1.2× / 2.2× / 2.9× effort 5's time, and the highest SSIM at
+6x6 and 8x8; at 4x4, efforts 1-5 have higher SSIM than every astcenc preset. At 4x4, effort 2's files are 0.8%
+/ 2.0% smaller than medium's / thorough's; at 6x6 and 8x8, efforts 2 and 5 are 1.4-3.6% larger than medium's
+and 0.4-1.2% smaller than thorough's.
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.
 
-RDO at effort 0 on the same images, one thread pinned to the same P-core, `mipple bench test-images/kodak -f
-astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4 -e 0` with `RAYON_NUM_THREADS=1`. Each cell is PSNR dB / SSIM /
-Zstd-19 bpt; the RDO pass's time is its total over the 24 images:
+RDO at effort 0 on the same images, run locally on one thread pinned to one P-core of the Core Ultra 7 155H
+(logical CPU 16), `mipple bench test-images/kodak -f astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4,8 -e 0` with
+`RAYON_NUM_THREADS=1` (mipple 8631eda). Each cell is PSNR dB / SSIM / Zstd-19 bpt; the RDO pass's time is its
+total over the 24 images. The λ 0 rows match the cloud table's effort-0 encodes:
 
 | λ | 4x4 | 6x6 | 8x8 |
 | --- | --- | --- | --- |
-| 0 | 44.414 / 0.99741 / 6.926 | 37.649 / 0.98392 / 3.277 | 33.833 / 0.95966 / 1.859 |
-| 0.5 | 42.995 / 0.99361 / 5.042 (53 s) | 37.608 / 0.98288 / 2.884 (44 s) | 33.894 / 0.95981 / 1.715 (39 s) |
-| 1 | 41.536 / 0.98697 / 4.214 (49 s) | 37.413 / 0.98033 / 2.605 (43 s) | 33.860 / 0.95870 / 1.610 (38 s) |
-| 2 | 39.765 / 0.97663 / 3.535 (45 s) | 36.956 / 0.97365 / 2.228 (39 s) | 33.760 / 0.95548 / 1.448 (35 s) |
-| 4 | 37.604 / 0.95982 / 2.936 (43 s) | 36.219 / 0.96392 / 1.906 (36 s) | 33.561 / 0.94975 / 1.285 (33 s) |
-| ISPC fast | 43.789 / 0.99677 / 7.286 | 37.563 / 0.98365 / 3.332 | 33.650 / 0.95837 / 1.881 |
+| 0 | 44.555 / 0.99746 / 7.092 | 37.690 / 0.98536 / 3.290 | 33.932 / 0.96256 / 1.881 |
+| 0.5 | 43.072 / 0.99357 / 5.120 (59 s) | 37.699 / 0.98449 / 2.945 (45 s) | 34.010 / 0.96264 / 1.756 (42 s) |
+| 1 | 41.566 / 0.98672 / 4.264 (53 s) | 37.511 / 0.98192 / 2.674 (45 s) | 33.975 / 0.96156 / 1.658 (42 s) |
+| 2 | 39.760 / 0.97635 / 3.569 (49 s) | 37.045 / 0.97477 / 2.284 (40 s) | 33.877 / 0.95837 / 1.499 (38 s) |
+| 4 | 37.558 / 0.95934 / 2.954 (47 s) | 36.308 / 0.96480 / 1.960 (38 s) | 33.665 / 0.95201 / 1.326 (36 s) |
+| 8 | 34.853 / 0.92573 / 2.275 (45 s) | 35.078 / 0.94633 / 1.642 (37 s) | 33.249 / 0.94127 / 1.160 (35 s) |
+| ISPC fast | 43.790 / 0.99677 / 7.286 | 37.563 / 0.98365 / 3.332 | 33.650 / 0.95837 / 1.881 |
 
-At ISPC fast's PSNR (interpolated along each λ curve in log rate), mipple's files are 17.3% / 15.5% / 27.9%
-smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 16.4% / 15.0% / 27.2% smaller after Deflate-9 (ISPC fast: 7.431 /
-3.368 / 1.896 bpt; mipple λ 0: 7.117 / 3.324 / 1.877; λ 1: 4.398 / 2.654 / 1.632). The 6x6 figure is the
-least certain: the curve is nearly flat between λ 0 and 0.5, near ISPC's PSNR, so a small change in either
-PSNR moves it by several tenths of a percent. At 8x8, light RDO raises PSNR (0.06 dB at λ 0.5): a polished re-weight or refit of an earlier block is
-sometimes closer to the source than effort 0's own encode of the block. The candidates are whole copies of the previous 256 blocks, an earlier
-block's head (mode, partition, endpoints) with the weights re-chosen, and an earlier block's weights with the
-endpoints refitted, each polished once; exact error lower bounds skip most of them without changing the
-output. The pass runs on whole surfaces (blocks are not 4x4) and costs 1.4-2.2 s per Kodak image on one thread,
-33-47× the effort-0 encode; it parallelizes across 16 KiB chunks like the other formats' passes.
+At ISPC fast's PSNR (interpolated along each λ curve in log rate), mipple's files are 17.7% / 17.6% / 29.8%
+smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 17.1% / 17.0% / 29.2% smaller after Deflate-9 (ISPC fast: 7.431 /
+3.368 / 1.896 bpt; mipple λ 0: 7.262 / 3.336 / 1.898; λ 1: 4.434 / 2.723 / 1.679). At 6x6 and 8x8, light RDO
+raises PSNR (0.01 / 0.08 dB at λ 0.5): a polished re-weight or refit of an earlier block is sometimes closer
+to the source than effort 0's own encode of the block. The candidates are whole copies of the previous 256
+blocks, an earlier block's head (mode, partition, endpoints) with the weights re-chosen, and an earlier
+block's weights with the endpoints refitted, each polished once; exact error lower bounds skip most of them
+without changing the output. The pass runs on whole surfaces (blocks are not 4x4) and costs 0.9-3.3 s per
+Kodak image on one thread, 16-57× the effort-0 encode; it parallelizes across 16 KiB chunks like the other
+formats' passes.
 
 ## Lossless field split (`--prep`)
 

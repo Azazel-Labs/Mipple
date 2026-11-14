@@ -554,7 +554,7 @@ def readme_block(comps, oodle, nimg, threads, extra=()):
              "",
              '<img src="docs/img/oodle.svg" alt="Bits per texel vs Oodle Texture 2.9.16 on Kodak, per Oodle lambda" width="100%">',
              "",
-             '<img src="docs/img/formats.svg" alt="Quality vs single-thread encode time for BC6H, ETC2 and ASTC: mipple vs ISPC, texconv and Compressonator" width="100%">',
+             '<img src="docs/img/formats.svg" alt="Quality vs single-thread encode time for BC6H, ETC2 and ASTC: mipple vs ISPC, astcenc, texconv and Compressonator" width="100%">',
              "",
              '<img src="docs/img/rd-curves.svg" alt="Rate-distortion curves per format: mipple vs bc7enc_rdo" width="100%">',
              "",
