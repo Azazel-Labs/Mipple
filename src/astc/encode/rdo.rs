@@ -91,12 +91,16 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
 }
 
 /// `bytes`' fields, labels and grid, if the candidates can build on them: up to three partitions,
-/// one CEM for every partition: direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the
-/// encoder writes.
+/// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
+/// writes.
 fn prev_sym(fp: &Footprint, bytes: [u8; 16]) -> Option<Box<(Symbolic, Layout, usize)>> {
     let sym = Symbolic::read(u128::from_le_bytes(bytes), fp.bw, fp.bh)?;
     let p = sym.partitions as usize;
-    if p > 3 || !matches!(sym.cems[0], 6 | 8 | 9 | 10 | 12 | 13) || sym.cems[..p].iter().any(|&c| c != sym.cems[0]) {
+    if p > 3
+        || sym.cems[..p]
+            .iter()
+            .any(|&c| !matches!(c, 0 | 6 | 8 | 9 | 10 | 12 | 13))
+    {
         return None;
     }
     let gi = fp
@@ -203,9 +207,14 @@ fn refit_to(
         infill(grid, &g, planes, pl, wp);
     }
     // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, RGBA (CEM 12) for the rest.
-    let cem = if matches!(sym.cems[0], 6 | 8 | 9) { 8 } else { 12 };
+    let p = sym.partitions as usize;
+    let cem = if sym.cems[..p].iter().all(|c| matches!(c, 0 | 6 | 8 | 9)) {
+        8
+    } else {
+        12
+    };
     let mut out = sym.clone();
-    if cem != sym.cems[0] {
+    if sym.cems[..p].iter().any(|&c| c != cem) {
         out.cems = [cem; 4];
         out.color_quant = color_range(sym.mode, sym.partitions, &out.cems)?;
     }
@@ -252,20 +261,36 @@ fn refit_to(
         return None;
     }
     let fits = refit(t, &w[0], &w[1], lay.ccs, &lay.lab16, lay.count);
-    for (p, &(f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
-        let mut c0: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f0[ch])]);
-        let mut c1: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f1[ch])]);
-        let sum = |c: &[u8; 4]| (0..3).map(|ch| cu[c[ch] as usize] as i32).sum::<i32>();
-        // A lower second sum would decode with blue contraction; swapping would invert the
-        // weights this candidate keeps, so take the partition's mean color instead.
-        if sum(&c1) < sum(&c0) {
-            c0 = std::array::from_fn(|ch| cqt[round_pos((f0[ch] + f1[ch]) * 0.5)]);
-            c1 = c0;
+    // Each partition's endpoints direct, or blue-contracted: stored as (2r - b, 2g - b, b) and
+    // swapped, which the decoder halves back. Whichever the decoder reads as meant and fits closer;
+    // if neither, the partition's mean color.
+    let at = |x: f32| cqt[round_pos(x.clamp(0.0, 255.0))];
+    let inv = |f: &[f32; 4]| [2.0 * f[0] - f[2], 2.0 * f[1] - f[2], f[2], f[3]];
+    let sum = |c: &[u8; 8], odd: usize| (0..3).map(|ch| cu[c[2 * ch + odd] as usize] as i32).sum::<i32>();
+    for (p, (f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
+        let (i0, i1) = (inv(f0), inv(f1));
+        let direct: [u8; 8] = std::array::from_fn(|i| at(if i % 2 == 0 { f0 } else { f1 }[i / 2 % 4]));
+        let contracted: [u8; 8] = std::array::from_fn(|i| at(if i % 2 == 0 { i1 } else { i0 }[i / 2 % 4]));
+        let mut pick: Option<(u32, [u8; 8])> = None;
+        for (o, ok) in [
+            (direct, sum(&direct, 1) >= sum(&direct, 0)),
+            (contracted, sum(&contracted, 1) < sum(&contracted, 0)),
+        ] {
+            if !ok {
+                continue;
+            }
+            let v: [i32; 8] = std::array::from_fn(|i| cu[o[i] as usize] as i32);
+            let e = crate::astc::decode::endpoints(cem, &v[..2 * nv]).expect("LDR mode");
+            let err = t.part_error(&e, &lay.lab16, p, &w[0], &w[1], lay.ccs);
+            if pick.is_none_or(|(b, _)| err < b) {
+                pick = Some((err, o));
+            }
         }
-        for ch in 0..nv {
-            out.colors[2 * nv * p + 2 * ch] = c0[ch];
-            out.colors[2 * nv * p + 2 * ch + 1] = c1[ch];
-        }
+        let o = pick.map_or_else(
+            || std::array::from_fn(|i| at((f0[i / 2 % 4] + f1[i / 2 % 4]) * 0.5)),
+            |(_, o)| o,
+        );
+        out.colors[2 * nv * p..2 * nv * (p + 1)].copy_from_slice(&o[..2 * nv]);
     }
     let err = polish_parts::<false, true>(t, lay, grid, &mut out, PASSES);
     Some((out, err))

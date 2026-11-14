@@ -650,6 +650,32 @@ impl Texels<'_> {
         }
         err
     }
+
+    /// Partition `p`'s squared error for its endpoints `e`, as [`Texels::error`] decodes it.
+    fn part_error(
+        &self,
+        e: &([i32; 4], [i32; 4]),
+        lab: &[i16; MAX_TEXELS],
+        p: usize,
+        w: &[u8; MAX_TEXELS],
+        w2: &[u8; MAX_TEXELS],
+        ccs: usize,
+    ) -> u32 {
+        let nl = self.n.next_multiple_of(8);
+        let pm = I16x8::splat(p as i16);
+        let mut acc = I32x4::zero();
+        for c in 0..self.ch {
+            let w = if c == ccs { w2 } else { w };
+            let b = I16x8::splat((64 * e.0[c] + 32) as i16);
+            let s = I16x8::splat((e.1[c] - e.0[c]) as i16);
+            for k in (0..nl).step_by(8) {
+                let m = I16x8::load(&lab[k..]).eq(pm);
+                let y = b.add(I16x8::load_u8(&w[k..]).mul(s)).shr::<6>();
+                acc = acc.add(y.sub(I16x8::load(&self.xl[c][k..])).and(m).sq_pairs());
+            }
+        }
+        acc.sum() as u32
+    }
 }
 
 /// One texel's weight from plane `pl` of grid weights `g` (0..=64, `planes` interleaved), as the
@@ -877,24 +903,23 @@ fn quant_offset(f0: &[f32; 4], f1: &[f32; 4], nv: usize, cq: usize, out: &mut [u
     let (cqt, cnb, cu) = (&tb.cq[cq], &tb.cnb[cq], &COLOR_UNQUANT[cq]);
     for c in 0..nv {
         let mut best = (f32::MAX, 0u8, 0u8);
-        let lo = f0[c].floor().clamp(0.0, 255.0) as i32;
-        for b in [lo, (lo + 1).min(255)] {
-            let d = (f1[c] - b as f32).round().clamp(-32.0, 31.0) as i32;
-            let n0 = cqt[((b & 0x7f) << 1) as usize];
-            let n1 = cqt[((b & 0x80) | ((d & 0x3f) << 1)) as usize];
-            for x0 in [n0, cnb[0][n0 as usize], cnb[1][n0 as usize]] {
-                for x1 in [n1, cnb[0][n1 as usize], cnb[1][n1 as usize]] {
-                    let (u0, u1) = (cu[x0 as usize] as i32, cu[x1 as usize] as i32);
-                    let base = (u0 >> 1) | (u1 & 0x80);
-                    let mut off = (u1 >> 1) & 0x3f;
-                    if off & 0x20 != 0 {
-                        off -= 0x40;
-                    }
-                    let e1 = (base + off).clamp(0, 255);
-                    let cost = (base as f32 - f0[c]).powi(2) + (e1 as f32 - f1[c]).powi(2);
-                    if cost < best.0 {
-                        best = (cost, x0, x1);
-                    }
+        // The base nearest the first endpoint (also trying the one above it gains nothing on Kodak).
+        let b = f0[c].round().clamp(0.0, 255.0) as i32;
+        let d = (f1[c] - b as f32).round().clamp(-32.0, 31.0) as i32;
+        let n0 = cqt[((b & 0x7f) << 1) as usize];
+        let n1 = cqt[((b & 0x80) | ((d & 0x3f) << 1)) as usize];
+        for x0 in [n0, cnb[0][n0 as usize], cnb[1][n0 as usize]] {
+            for x1 in [n1, cnb[0][n1 as usize], cnb[1][n1 as usize]] {
+                let (u0, u1) = (cu[x0 as usize] as i32, cu[x1 as usize] as i32);
+                let base = (u0 >> 1) | (u1 & 0x80);
+                let mut off = (u1 >> 1) & 0x3f;
+                if off & 0x20 != 0 {
+                    off -= 0x40;
+                }
+                let e1 = (base + off).clamp(0, 255);
+                let cost = (base as f32 - f0[c]).powi(2) + (e1 as f32 - f1[c]).powi(2);
+                if cost < best.0 {
+                    best = (cost, x0, x1);
                 }
             }
         }
@@ -1054,7 +1079,12 @@ fn polish_parts<const W: bool, const E: bool>(
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
     // Direct endpoints (CEM 8 / 12) step one channel of one endpoint per code; other modes step
     // whatever their codes decode to.
-    let direct = sym.cems[..parts].iter().all(|&c| c == 8 || c == 12);
+    let direct = (0..parts).all(|p| {
+        let (at, k) = value_span(sym, p);
+        let v = |i: usize| cu[sym.colors[at + i] as usize] as i32;
+        // Not blue-contracted: the second endpoint's sum at least the first's.
+        matches!(sym.cems[p], 8 | 12) && k >= 6 && v(1) + v(3) + v(5) >= v(0) + v(2) + v(4)
+    });
     let spans: [(usize, usize); 3] = std::array::from_fn(|p| if p < parts { value_span(sym, p) } else { (0, 0) });
     let nvals: usize = spans.iter().map(|s| s.1).sum();
     // Steps tried since the last one taken. Each try depends only on the block's current state, so
@@ -1575,11 +1605,143 @@ fn mode_of(lay: &Layout, grid: &Grid, mi: usize, ce: usize) -> (BlockMode, u8) {
     }
 }
 
+/// RGB endpoint modes chosen per partition: each luminance (CEM 0), base+scale (6), direct (8) or
+/// base+offset (9), in any mix the CEM field spells (classes at most one apart), at the endpoint
+/// range the mix leaves, for weights `w` (grid codes `codes`) and each partition's least-squares
+/// endpoints `fits`. Direct and base+offset are also tried blue-contracted. Keeps the best in
+/// `best`.
+#[expect(clippy::too_many_arguments, reason = "one candidate's fields")]
+fn try_mixed_cems(
+    t: &Texels,
+    lay: &Layout,
+    bm: BlockMode,
+    fits: &[([f32; 4], [f32; 4]); 3],
+    w: &[[u8; MAX_TEXELS]; 2],
+    ccs: usize,
+    codes: &[u8],
+    best: &mut Best,
+) {
+    const CEMS: [u8; 4] = [0, 6, 8, 9];
+    const CLASS: [u8; 4] = [0, 1, 2, 2];
+    let tb = tables();
+    let parts = lay.count as usize;
+    // Per partition, CEM and range: the error (`u32::MAX` until measured) and the codes.
+    let mut memo = [[[u32::MAX; 21]; 4]; 3];
+    let mut vals = [[[[0u8; 6]; 21]; 4]; 3];
+    let mut part = |p: usize, ci: usize, cq: usize| -> u32 {
+        if memo[p][ci][cq] == u32::MAX {
+            let (f0, f1) = &fits[p];
+            let (cqt, cu) = (&tb.cq[cq], &COLOR_UNQUANT[cq]);
+            let cem = CEMS[ci];
+            let at = |x: f32| cqt[round_pos(x.clamp(0.0, 255.0))];
+            // Direct and base+offset endpoints are also tried blue-contracted: stored as
+            // (2r - b, 2g - b, b) and swapped, which the decoder halves back, a finer step in red
+            // and green.
+            let inv = |f: &[f32; 4]| [2.0 * f[0] - f[2], 2.0 * f[1] - f[2], f[2], f[3]];
+            let (i0, i1) = (inv(f0), inv(f1));
+            let mut tries = [[0u8; 6]; 2];
+            let nt = match cem {
+                0 => {
+                    tries[0][0] = at((f0[0] + f0[1] + f0[2]) / 3.0);
+                    tries[0][1] = at((f1[0] + f1[1] + f1[2]) / 3.0);
+                    1
+                }
+                6 => {
+                    quant_scale(f0, f1, false, cq, &mut tries[0][..4]);
+                    1
+                }
+                8 => {
+                    for c in 0..3 {
+                        tries[0][2 * c] = at(f0[c]);
+                        tries[0][2 * c + 1] = at(f1[c]);
+                        tries[1][2 * c] = at(i1[c]);
+                        tries[1][2 * c + 1] = at(i0[c]);
+                    }
+                    2
+                }
+                _ => {
+                    // As in `try_candidate`: past 34 apart in any channel, base+offset seldom wins.
+                    let near = |a: &[f32; 4], b: &[f32; 4]| (0..3).all(|c| (a[c] - b[c]).abs() <= 34.0);
+                    let mut nt = 0;
+                    for (a, b) in [(f0, f1), (&i1, &i0)] {
+                        if near(a, b) {
+                            quant_offset(a, b, 3, cq, &mut tries[nt]);
+                            nt += 1;
+                        }
+                    }
+                    if nt == 0 {
+                        memo[p][ci][cq] = u32::MAX - 1;
+                    }
+                    nt
+                }
+            };
+            let k = cem_values(cem);
+            for o in &tries[..nt] {
+                let v: [i32; 6] = std::array::from_fn(|i| cu[o[i] as usize] as i32);
+                let e = super::decode::endpoints(cem, &v[..k]).expect("LDR mode");
+                let err = t.part_error(&e, &lay.lab16, p, &w[0], &w[1], ccs);
+                if err < memo[p][ci][cq] {
+                    memo[p][ci][cq] = err;
+                    vals[p][ci][cq] = *o;
+                }
+            }
+        }
+        memo[p][ci][cq]
+    };
+    let mut found: Option<(u32, [usize; 3], u8)> = None;
+    'combos: for combo in 0..4usize.pow(parts as u32) {
+        let ci: [usize; 3] = std::array::from_fn(|p| if p < parts { combo >> (2 * p) & 3 } else { 0 });
+        let (lo, hi) = ci[..parts]
+            .iter()
+            .fold((u8::MAX, 0), |(lo, hi), &c| (lo.min(CLASS[c]), hi.max(CLASS[c])));
+        if hi - lo > 1 {
+            continue;
+        }
+        let cems: [u8; 4] = std::array::from_fn(|p| if p < parts { CEMS[ci[p]] } else { 0 });
+        let Some(cq) = color_range(bm, lay.count, &cems) else {
+            continue;
+        };
+        let bound = found.map_or(best.err, |f| f.0);
+        let mut err = 0u32;
+        for p in 0..parts {
+            err = err.saturating_add(part(p, ci[p], cq as usize));
+            if err >= bound {
+                continue 'combos;
+            }
+        }
+        found = Some((err, ci, cq));
+    }
+    let Some((err, ci, cq)) = found else { return };
+    let mut colors = [0u8; 18];
+    let mut cems = [0u8; 4];
+    let mut at = 0;
+    for p in 0..parts {
+        cems[p] = CEMS[ci[p]];
+        let k = cem_values(cems[p]);
+        colors[at..at + k].copy_from_slice(&vals[p][ci[p]][cq as usize][..k]);
+        at += k;
+    }
+    let kk = codes.len();
+    let mut weights = [0u8; 64];
+    weights[..kk].copy_from_slice(codes);
+    best.err = err;
+    best.sym = Some(Symbolic {
+        mode: bm,
+        partitions: lay.count,
+        seed: lay.seed,
+        cems,
+        ccs: if bm.dual { lay.ccs as u8 } else { 0 },
+        colors,
+        color_quant: cq,
+        weights,
+    });
+}
+
 /// Encodes one candidate exactly: quantized grid weights `codes` (planes interleaved) on `grid`
 /// with mode `bm`, CEM `cem` in every partition of `lay` at endpoint range `cq`; refits endpoints,
 /// quantizes them, and keeps it if it beats `best`. Returns each partition's endpoints
 /// (unquantized values). With partitions in `scale` (a mask), `cq` is the range for those
-/// base+scale and the rest direct, and only that is tried.
+/// base+scale and the rest direct, and only that is tried. `alts` as [`Effort::alts`].
 #[expect(clippy::too_many_arguments, reason = "one candidate's fields")]
 fn try_candidate(
     t: &Texels,
@@ -1591,7 +1753,7 @@ fn try_candidate(
     cq: u8,
     codes: &mut [u8],
     best: &mut Best,
-    alts: bool,
+    alts: u8,
 ) -> [([i32; 4], [i32; 4]); 3] {
     let tb = tables();
     let q = bm.quant as usize;
@@ -1701,6 +1863,9 @@ fn try_candidate(
             }
         }
         keep(&aeps, cems, cq, &ac, best);
+        if alts > 1 && cem == 8 {
+            try_mixed_cems(t, lay, bm, &fits, &w, ccs, &codes[..kk], best);
+        }
         return aeps;
     }
     let mut out = if scale != 0 {
@@ -1709,10 +1874,10 @@ fn try_candidate(
         (keep(&eps, [cem; 4], cq, &colors, best), eps)
     };
     // The same weights with base+offset endpoints (same range: as many values) and base+scale
-    // endpoints (a finer range: fewer values), if `alts`; all base+scale is the candidate itself.
+    // endpoints (a finer range: fewer values), if `alts` is set; all base+scale is the candidate itself.
     let scale_cem = if cem == 12 { 10 } else { 6 };
     let tries = [cem + 1, scale_cem];
-    let tries = match (scale != 0, alts) {
+    let tries = match (scale != 0, alts > 0) {
         (true, _) => &tries[1..],
         (false, true) => &tries[..],
         (false, false) => &tries[..0],
@@ -1749,6 +1914,9 @@ fn try_candidate(
         if err < out.0 {
             out = (err, aeps);
         }
+    }
+    if alts > 1 && cem == 8 {
+        try_mixed_cems(t, lay, bm, &fits, &w, ccs, &codes[..kk], best);
     }
     out.1
 }
@@ -1986,8 +2154,12 @@ struct Effort {
     /// The patterns ranked best by agreement with k-means, if more than are tried, re-ranked by how
     /// far their texels lie from their partitions' lines before the best are tried.
     rerank: usize,
-    /// Base+offset and base+scale endpoints tried for each candidate's final weights.
-    alts: bool,
+    /// Other endpoint modes tried for each candidate's final weights: 0 none, 1 base+offset and
+    /// base+scale in every partition, 2 also each partition's mode chosen apart
+    /// ([`try_mixed_cems`], with blue contraction). On the Kodak tile (one thread), 2 against 1:
+    /// 0.15 / 0.12 / 0.07 dB at 4x4 / 6x6 / 8x8 at effort 2 for 13-20% more time, 0.20 / 0.14 /
+    /// 0.08 dB at effort 5 for 12-25%; at effort 0 (4x4) 0.09 dB for 20%, so not there.
+    alts: u8,
 }
 
 /// The settings for `effort` on a footprint of `texels` texels.
@@ -2027,7 +2199,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
                 dual: u(5),
                 line: [v[6] as f32, v[7] as f32, v[8] as f32],
                 rerank: u(10),
-                alts: true,
+                alts: 2,
             }
         });
     }
@@ -2045,7 +2217,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 1,
             line: [16.0, 16.0, 8.0],
             rerank: 0,
-            alts: false,
+            alts: 0,
         },
         0 => Effort {
             patterns: [1, 0],
@@ -2056,7 +2228,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 1,
             line: [8.0, 16.0, 2.0],
             rerank: 0,
-            alts: true,
+            alts: 1,
         },
         1 => Effort {
             patterns: [2, 0],
@@ -2067,7 +2239,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 1,
             line: [2.0, 16.0, 0.0],
             rerank: 64,
-            alts: true,
+            alts: 2,
         },
         2 => Effort {
             patterns: [2, 1],
@@ -2078,7 +2250,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 2,
             line: [2.0, 16.0, 0.0],
             rerank: 64,
-            alts: true,
+            alts: 2,
         },
         3 => Effort {
             patterns: [3, 1],
@@ -2089,7 +2261,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 2,
             line: [1.0, 8.0, 0.0],
             rerank: 64,
-            alts: true,
+            alts: 2,
         },
         4 => Effort {
             patterns: [4, 2],
@@ -2100,7 +2272,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [1.0, 8.0, 0.0],
             rerank: 64,
-            alts: true,
+            alts: 2,
         },
         5 => Effort {
             patterns: [6, 3],
@@ -2111,7 +2283,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.5, 4.0, 0.0],
             rerank: 64,
-            alts: true,
+            alts: 2,
         },
         6 => Effort {
             patterns: [8, 4],
@@ -2122,7 +2294,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.5, 4.0, 0.0],
             rerank: 64,
-            alts: true,
+            alts: 2,
         },
         7 => Effort {
             patterns: [12, 6],
@@ -2133,7 +2305,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.25, 2.0, 0.0],
             rerank: 128,
-            alts: true,
+            alts: 2,
         },
         8 => Effort {
             patterns: [16, 8],
@@ -2144,7 +2316,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.25, 2.0, 0.0],
             rerank: 128,
-            alts: true,
+            alts: 2,
         },
         _ => Effort {
             patterns: [32, 16],
@@ -2155,7 +2327,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.0, 0.0, 0.0],
             rerank: 256,
-            alts: true,
+            alts: 2,
         },
     }
 }
@@ -2420,7 +2592,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             cq,
             &mut codes,
             &mut best,
-            es.alts && es.refine == 0,
+            if es.refine == 0 { es.alts } else { 0 },
         );
         for r in 0..es.refine {
             // Re-derive ideal weights from the quantized endpoints, then decimate and re-encode.
@@ -2457,7 +2629,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 cq,
                 &mut codes,
                 &mut best,
-                es.alts && r + 1 == es.refine,
+                if r + 1 == es.refine { es.alts } else { 0 },
             );
         }
         if best.err < before {
