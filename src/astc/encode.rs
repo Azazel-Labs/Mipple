@@ -2238,15 +2238,30 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             rerank: 0,
             alts: 1,
         },
-        1 => Effort {
-            patterns: [2, 0],
-            candidates: 3,
+        // Effort 0's search with the line-fit rerank, every alternative endpoint mode for the
+        // weights and, above 16 texels, a second candidate. On the Kodak tile (one thread, CPU
+        // time against effort 0): +0.26 / +0.29 / +0.21 dB at 4x4 / 6x6 / 8x8 for 1.27× / 1.39× /
+        // 1.33×.
+        1 if texels > 16 => Effort {
+            patterns: [1, 0],
+            candidates: 2,
             shortlist: 0,
-            refine: 1,
-            polish: 1,
+            refine: 0,
+            polish: 2,
             dual: 1,
-            line: [2.0, 16.0, 0.0],
-            rerank: 64,
+            line: [16.0, 16.0, 8.0],
+            rerank: 32,
+            alts: 2,
+        },
+        1 => Effort {
+            patterns: [1, 0],
+            candidates: 1,
+            shortlist: 0,
+            refine: 0,
+            polish: 3,
+            dual: 1,
+            line: [8.0, 16.0, 2.0],
+            rerank: 16,
             alts: 2,
         },
         2 => Effort {

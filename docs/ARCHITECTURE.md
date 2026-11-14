@@ -108,7 +108,7 @@ pass, below). Each block is fitted
 with a line in color space, the texels' positions on it become ideal weights, and those are decimated to
 every weight grid the footprint allows by exact least squares (the infill taken as separable). Every (grid,
 weight range, partitioning) candidate is ranked by an estimate of weight and endpoint quantization noise from
-per-footprint mode tables; the best few (at effort 0, 1 at 4x4 and 8x8 and 2 at 6x6; more with effort) are
+per-footprint mode tables; the best few (one at effort 0, one at 4x4 and two above at effort 1; more with effort) are
 encoded exactly, with weights
 re-derived from the quantized endpoints and a coordinate-descent polish over the final block. Each candidate's
 weights are tried with direct endpoints (CEM 8 / 12), base+offset (CEM 9 / 13, the same number of values, more
@@ -118,7 +118,7 @@ through black, so modes whose weights leave too few bits for six endpoint values
 multi-partition layouts with some partitions base+scale and the rest direct (per-partition CEMs, those
 whose lines pass closest to black first). Two- and three-partition patterns and dual-plane layouts are
 tried when the block is far enough from one line: the patterns that best agree with a k-means clustering
-(a counting sort over per-pattern mismatches), from effort 1 the best 64 of those (32 above 16 texels)
+(a counting sort over per-pattern mismatches), from effort 1 the best 16 of those (from effort 2, 64, or 32 above 16 texels)
 re-ranked by how far their texels lie from their partitions' lines. At 4x4 the estimates for two and
 three partitions and a second plane are scaled down to match their measured exact errors. ASTC decodes differently in sRGB and linear mode, so the encoder is
 told which (`BlockOpts::srgb`, on by default for color as with BC7). Output goes to KTX2 (vkFormat 157/158,
