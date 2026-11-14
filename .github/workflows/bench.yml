@@ -71,7 +71,7 @@ jobs:
           key: kodak-24
       - name: Fetch Kodak and astcenc 5.7.1
         run: |
-          head/scripts/fetch-kodak.sh
+          bash head/scripts/fetch-kodak.sh
           if [ -n "$PRESETS" ]; then
             zip=astcenc-5.7.1-linux-x64.zip
             curl -fsSL -o $zip https://github.com/ARM-software/astc-encoder/releases/download/5.7.1/$zip
