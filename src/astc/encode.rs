@@ -1573,6 +1573,7 @@ fn try_candidate(
     cq: u8,
     codes: &mut [u8],
     best: &mut Best,
+    alts: bool,
 ) -> [([i32; 4], [i32; 4]); 3] {
     let tb = tables();
     let q = bm.quant as usize;
@@ -1690,10 +1691,15 @@ fn try_candidate(
         (keep(&eps, [cem; 4], cq, &colors, best), eps)
     };
     // The same weights with base+offset endpoints (same range: as many values) and base+scale
-    // endpoints (a finer range: fewer values).
+    // endpoints (a finer range: fewer values), if `alts`; all base+scale is the candidate itself.
     let scale_cem = if cem == 12 { 10 } else { 6 };
-    let alts = [cem + 1, scale_cem];
-    for &alt in &alts[(scale != 0) as usize..] {
+    let tries = [cem + 1, scale_cem];
+    let tries = match (scale != 0, alts) {
+        (true, _) => &tries[1..],
+        (false, true) => &tries[..],
+        (false, false) => &tries[..0],
+    };
+    for &alt in tries {
         let Some(acq) = color_range(bm, lay.count, &[alt; 4]) else {
             continue;
         };
@@ -2324,6 +2330,10 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         at: (0, 0),
     };
     let mut codes = [0u8; 64];
+    // Base+offset and base+scale endpoints for the same weights are tried on each candidate's last
+    // refinement only: on Kodak at effort 2, against every refinement, 12% / 3% / 3% less time at
+    // 4x4 / 6x6 / 8x8 for 0.014 dB at 4x4 and none above. On the winner alone, 4x4 loses 0.039
+    // dB, and 8x8 at effort 5 1.6% in BD-rate (`mipple check`).
     for &(_, _, li, gi, mi, v) in &cands {
         let lay = &layouts[li as usize];
         let grid = &fp.grids[gi as usize];
@@ -2337,8 +2347,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let at = measured.iter().position(|m| m.0 == li && m.1 == gi).expect("measured");
         quantize_decimated(grid, q, planes, &decimated[at], &mut codes);
         let before = best.err;
-        let mut eps = try_candidate(&t, lay, grid, bm, cem, scale, cq, &mut codes, &mut best);
-        for _ in 0..es.refine {
+        let mut eps = try_candidate(&t, lay, grid, bm, cem, scale, cq, &mut codes, &mut best, es.refine == 0);
+        for r in 0..es.refine {
             // Re-derive ideal weights from the quantized endpoints, then decimate and re-encode.
             let mut uu = [0f32; MAX_TEXELS];
             let mut uu2 = [0f32; MAX_TEXELS];
@@ -2363,7 +2373,18 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 }
             }
             quantize(grid, q, planes, &uu[..n], &uu2[..n], &mut codes);
-            eps = try_candidate(&t, lay, grid, bm, cem, scale, cq, &mut codes, &mut best);
+            eps = try_candidate(
+                &t,
+                lay,
+                grid,
+                bm,
+                cem,
+                scale,
+                cq,
+                &mut codes,
+                &mut best,
+                r + 1 == es.refine,
+            );
         }
         if best.err < before {
             best.at = (li as usize, gi as usize);
