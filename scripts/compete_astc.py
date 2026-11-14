@@ -6,7 +6,9 @@ luma SSIM, and Zstd-19 and Deflate-9 size. ISPC encodes for linear decoding and 
 mipple runs with `--linear` too (an sRGB encode would be graded against a different decoder).
 
 Encoders (each skipped if not found):
-  --mipple     target/release/mipple (efforts from --efforts)
+  --mipple     target/release/mipple (efforts from --efforts); it also grades every encode
+  --mipple-base  a second mipple build (say the commit before), run at the same efforts as
+               "base mipple" rows, taking its turn per image like the rest
   --harness    tools/competitors bcn_harness built with ISPC (`ispc_astc:<W>x<H>`, fast profile)
   --astcenc    Arm's prebuilt astcenc release (third_party/dl/astcenc, the AVX2 build; presets from
                --astcenc-presets, `-j` set to --threads)
@@ -44,6 +46,7 @@ def main():
     ap.add_argument("images", type=Path)
     ap.add_argument("--out", type=Path, default=ROOT / "bench-results" / "astc")
     ap.add_argument("--mipple", type=Path, default=ROOT / "target" / "release" / "mipple.exe")
+    ap.add_argument("--mipple-base", type=Path, default=None)
     ap.add_argument("--harness", type=Path, default=ROOT / "third_party" / "build-harness" / "Release" / "bcn_harness.exe")
     ap.add_argument("--astcenc", type=Path,
                     default=ROOT / "third_party" / "dl" / "astcenc" / "x64" / "bin" / "astcenc-avx2.exe")
@@ -92,11 +95,14 @@ def main():
                                  lambda s, d, fp=fp, pr=pr: [str(a.astcenc), "-cl", str(s), str(d), fp, f"-{pr}",
                                                              "-j", str(a.threads)],
                                  lambda out: float(re.search(r"Coding time:\s+([0-9.]+)", out).group(1))))
-        if a.mipple.exists():
+        builds = [("mipple", a.mipple), ("base mipple", a.mipple_base)]
+        for label, exe in builds:
+            if exe is None or not exe.exists():
+                continue
             for e in a.efforts.split(","):
-                encoders.append((f"{fp} mipple effort {e}",
-                                 lambda s, d, fp=fp, e=e: [str(a.mipple), "encode", str(s), "-o", str(d), "-f",
-                                                           f"astc-{fp}", "-e", e, "--no-mips", "--linear"],
+                encoders.append((f"{fp} {label} effort {e}",
+                                 lambda s, d, fp=fp, e=e, exe=exe: [str(exe), "encode", str(s), "-o", str(d), "-f",
+                                                                    f"astc-{fp}", "-e", e, "--no-mips", "--linear"],
                                  lambda out: float(re.search(r"time: base ([0-9.]+)s", out).group(1))))
         totals = {name: [0.0] * 6 for name, _, _ in encoders}  # secs, psnr, ssim, zstd, deflate bytes, texels
         for img in imgs:

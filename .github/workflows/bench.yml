@@ -1,0 +1,101 @@
+# ASTC benchmark on a fresh GitHub-hosted VM: mipple (and optionally a base build) against Arm's
+# astcenc on the Kodak images, one pinned core, the encoders taking turns per image.
+#
+# Absolute times depend on whatever CPU the runner lands on (the summary names it); compare rows
+# within one run. Running with base = head measures the run's own noise.
+#
+# gh workflow run bench.yml -f head=main -f base=<sha> -f efforts=0,2
+name: Bench
+on:
+  workflow_dispatch:
+    inputs:
+      head:
+        description: Ref to measure
+        default: main
+      base:
+        description: Ref to compare against (blank for none)
+        default: ""
+      footprints:
+        default: 4x4,6x6,8x8
+      efforts:
+        default: 0,2,5
+      astcenc:
+        description: astcenc presets (blank to skip astcenc)
+        default: fast,medium,thorough
+      images:
+        description: Kodak images (first N of 24)
+        default: "24"
+      runs:
+        description: Best of N timings per image
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  astc:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
+    env:
+      HEAD: ${{ inputs.head }}
+      BASE: ${{ inputs.base }}
+      FOOTPRINTS: ${{ inputs.footprints }}
+      EFFORTS: ${{ inputs.efforts }}
+      PRESETS: ${{ inputs.astcenc }}
+      IMAGES: ${{ inputs.images }}
+      RUNS: ${{ inputs.runs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.head }}
+          path: head
+      - uses: actions/checkout@v7
+        if: inputs.base != ''
+        with:
+          ref: ${{ inputs.base }}
+          path: base
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: head
+      - name: Build
+        run: |
+          mkdir bin
+          (cd head && cargo build --release --locked) && cp head/target/release/mipple bin/mipple-head
+          if [ -n "$BASE" ]; then
+            (cd base && cargo build --release --locked) && cp base/target/release/mipple bin/mipple-base
+          fi
+      - uses: actions/cache@v6
+        with:
+          path: head/test-images/kodak
+          key: kodak-24
+      - name: Fetch Kodak and astcenc 5.7.1
+        run: |
+          head/scripts/fetch-kodak.sh
+          if [ -n "$PRESETS" ]; then
+            zip=astcenc-5.7.1-linux-x64.zip
+            curl -fsSL -o $zip https://github.com/ARM-software/astc-encoder/releases/download/5.7.1/$zip
+            echo "f1d576f0801e7701548da78d782f4bf70dfde3673a238d1a2ac0ebd3511b2f37  $zip" | sha256sum -c
+            unzip -j $zip bin/astcenc-avx2 -d bin
+          fi
+      - name: Run
+        run: |
+          args=(--limit "$IMAGES" --runs "$RUNS" --efforts "$EFFORTS" --footprints "$FOOTPRINTS"
+                --mipple bin/mipple-head --harness none --out out --cpu 1)
+          [ -n "$BASE" ] && args+=(--mipple-base bin/mipple-base)
+          if [ -n "$PRESETS" ]; then args+=(--astcenc bin/astcenc-avx2 --astcenc-presets "$PRESETS")
+          else args+=(--astcenc none); fi
+          {
+            echo "## ASTC: Kodak (first $IMAGES), one thread pinned to CPU 1"
+            echo
+            echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) logical CPUs"
+            echo "- mipple: \`$HEAD\` ($(git -C head rev-parse --short HEAD))"
+            [ -n "$BASE" ] && echo "- base mipple: \`$BASE\` ($(git -C base rev-parse --short HEAD))"
+            echo
+          } > summary.md
+          python3 head/scripts/compete_astc.py head/test-images/kodak "${args[@]}" | tee -a summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-astc
+          path: summary.md
