@@ -49,6 +49,19 @@ struct Grid {
     /// The modes for each kind of layout (`est_kind`, then `SCALE_KIND` for base+scale RGB), by
     /// increasing weight noise.
     est: [Vec<Est>; 14],
+    /// `est`'s noise terms as lanes, for scoring a kind's modes at once.
+    lanes: [EstLanes; 14],
+}
+
+/// The most modes of one kind on one grid (one per weight range).
+const EST_LANES: usize = 12;
+
+/// One kind's `Est::wnoise` and `Est::cnoise`, in order, zero past `len`.
+#[derive(Clone, Copy, Default)]
+struct EstLanes {
+    wnoise: [f32; EST_LANES],
+    cnoise: [f32; EST_LANES],
+    len: usize,
 }
 
 /// Separable infill and decimation matrices of a grid (see `Grid::sep`).
@@ -202,8 +215,6 @@ struct Est {
     wnoise: f32,
     /// The expected squared endpoint error per channel and texel (`CNOISE` of its range).
     cnoise: f32,
-    /// The least `cnoise` of this mode and those after it.
-    cnoise_after: f32,
     mi: u16,
 }
 
@@ -404,7 +415,6 @@ impl Footprint {
                             .map(|(mi, m)| Est {
                                 wnoise: wn(&m.0),
                                 cnoise: CNOISE[m.1[ce] as usize],
-                                cnoise_after: 0.0,
                                 mi: mi as u16,
                             })
                             .collect()
@@ -420,18 +430,25 @@ impl Footprint {
                             .map(|(mi, m)| Est {
                                 wnoise: wn(&m.0),
                                 cnoise: CNOISE[m.1[p][ce] as usize],
-                                cnoise_after: 0.0,
                                 mi: mi as u16,
                             })
                             .collect()
                     };
                     v.sort_by(|a, b| a.wnoise.total_cmp(&b.wnoise));
-                    let mut least = f32::MAX;
-                    for e in v.iter_mut().rev() {
-                        least = least.min(e.cnoise);
-                        e.cnoise_after = least;
-                    }
                     v
+                });
+                let lanes = std::array::from_fn(|kind| {
+                    let v: &Vec<Est> = &est[kind];
+                    assert!(v.len() <= EST_LANES);
+                    let mut l = EstLanes {
+                        len: v.len(),
+                        ..Default::default()
+                    };
+                    for (i, e) in v.iter().enumerate() {
+                        l.wnoise[i] = e.wnoise;
+                        l.cnoise[i] = e.cnoise;
+                    }
+                    l
                 });
                 grids.push(Grid {
                     gx: gx as u8,
@@ -443,6 +460,7 @@ impl Footprint {
                     modes,
                     dual,
                     est,
+                    lanes,
                 });
             }
         }
@@ -2016,7 +2034,8 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
     match effort {
         // Above 16 texels, two polish passes and no alternative endpoint modes for the candidate's
         // weights: on Kodak (tiled, one thread), 16% / 6% less time at 6x6 / 8x8 for 0.10 / 0.03 dB,
-        // files 1.3% / 0.3% smaller (SSIM up at 6x6).
+        // files 1.3% / 0.3% smaller (SSIM up at 6x6). Two partitions and the dual plane only off a
+        // line by 16 and 8: 0.025 / 0.015 dB at 6x6 / 8x8 for about 6% of the time.
         0 if texels > 16 => Effort {
             patterns: [1, 0],
             candidates: 1,
@@ -2024,7 +2043,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             refine: 0,
             polish: 2,
             dual: 1,
-            line: [8.0, 16.0, 2.0],
+            line: [16.0, 16.0, 8.0],
             rerank: 0,
             alts: false,
         },
@@ -2279,14 +2298,34 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                     _ => (variant_kind(lay.count, v).0, lay.scaled[v - 1].0),
                 };
                 let flag = (v as u64) << 14;
-                for (ei, e) in grid.est[kind].iter().enumerate() {
-                    // No later mode has less weight noise or less endpoint noise than this bound.
-                    if ord(calib[v] * (derr + (span * e.wnoise + per_texel * e.cnoise_after + orth))) > thr {
-                        break;
-                    }
-                    let rest = span * e.wnoise + per_texel * e.cnoise + orth;
-                    let score = calib[v] * (derr + rest);
-                    let mut x = (ord(score) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64 | flag;
+                // Every mode's score at once; those within the bound go in, in order (the bound
+                // only falls, so no other could).
+                let el = &grid.lanes[kind];
+                let (c4, d4, s4, p4, o4) = (
+                    F32x4::splat(calib[v]),
+                    F32x4::splat(derr),
+                    F32x4::splat(span),
+                    F32x4::splat(per_texel),
+                    F32x4::splat(orth),
+                );
+                let bound = F32x4::splat(unord(thr));
+                let mut scores = [0f32; EST_LANES];
+                let mut hits = 0u32;
+                for q in (0..el.len).step_by(4) {
+                    let rest = s4
+                        .mul(F32x4::load(&el.wnoise[q..]))
+                        .add(p4.mul(F32x4::load(&el.cnoise[q..])))
+                        .add(o4);
+                    let score = c4.mul(d4.add(rest));
+                    score.store(&mut scores[q..]);
+                    hits |= score.le_mask(bound) << q;
+                }
+                hits &= (1 << el.len) - 1;
+                while hits != 0 {
+                    let ei = hits.trailing_zeros() as usize;
+                    hits &= hits - 1;
+                    let mut x =
+                        (ord(scores[ei]) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64 | flag;
                     if x >= top[short - 1] {
                         continue;
                     }

@@ -158,6 +158,12 @@ mod imp {
         pub fn mul(self, o: Self) -> Self {
             Self(unsafe { _mm_mul_ps(self.0, o.0) })
         }
+
+        /// A bit per lane (lane 0 lowest) where `self` is at most `o`.
+        #[inline]
+        pub fn le_mask(self, o: Self) -> u32 {
+            unsafe { _mm_movemask_ps(_mm_cmple_ps(self.0, o.0)) as u32 }
+        }
     }
 }
 
@@ -304,6 +310,12 @@ mod imp {
         #[inline]
         pub fn mul(self, o: Self) -> Self {
             Self(std::array::from_fn(|l| self.0[l] * o.0[l]))
+        }
+
+        /// A bit per lane (lane 0 lowest) where `self` is at most `o`.
+        #[inline]
+        pub fn le_mask(self, o: Self) -> u32 {
+            (0..4).map(|l| ((self.0[l] <= o.0[l]) as u32) << l).sum()
         }
     }
 }
