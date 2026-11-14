@@ -659,7 +659,12 @@ fn extra_cem_bits(partitions: u8, cems: &[u8]) -> usize {
 /// The endpoint range a block with this mode, partition count and CEMs uses: the largest that
 /// fits the bits left, or `None` if the block is invalid.
 pub fn color_range(mode: BlockMode, partitions: u8, cems: &[u8]) -> Option<u8> {
-    color_range_with(mode, partitions, cems, extra_cem_bits(partitions, &cems[..partitions as usize]))
+    color_range_with(
+        mode,
+        partitions,
+        cems,
+        extra_cem_bits(partitions, &cems[..partitions as usize]),
+    )
 }
 
 /// [`color_range`] for a block whose mode field takes `extra` bits below the weights. A block may

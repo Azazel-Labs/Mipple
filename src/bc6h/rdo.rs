@@ -18,8 +18,8 @@
 //! Like the other formats, a chunk that real Zstd does not shrink goes back to its base encoding.
 
 use super::{
-    Bc6hBlock, HdrBlock, MODES, W3, W4, decode, decode_block, endpoints, finish, interp, pack, region_anchors, region_of,
-    sse, unpack, unquantize,
+    Bc6hBlock, HdrBlock, MODES, W3, W4, decode, decode_block, endpoints, finish, interp, pack, region_anchors,
+    region_of, sse, unpack, unquantize,
 };
 use crate::format::Format;
 use crate::hdr::HdrSurface;

@@ -548,7 +548,11 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
         .fold(RdoStats::default(), RdoStats::merge);
     let report = EncodeReport {
         base_secs,
-        rdo_secs: if opts.rdo.enabled() { t1.elapsed().as_secs_f64() } else { 0.0 },
+        rdo_secs: if opts.rdo.enabled() {
+            t1.elapsed().as_secs_f64()
+        } else {
+            0.0
+        },
         rdo,
         ..Default::default()
     };

@@ -646,7 +646,10 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let encode_secs = t.elapsed().as_secs_f64();
     let is_dds = a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds"));
     let zstd = (a.zstd > 0).then_some(a.zstd);
-    let sc_params = format!("--format bc6h --effort {} --lambda {} --zstd {}", a.effort, a.lambda, a.zstd);
+    let sc_params = format!(
+        "--format bc6h --effort {} --lambda {} --zstd {}",
+        a.effort, a.lambda, a.zstd
+    );
     let bytes = if is_dds {
         dds::write(&tex)?
     } else {
@@ -684,7 +687,10 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     if opts.rdo.enabled() {
         println!(
             "  rdo: {} of {} blocks changed, {} chunk(s) reverted, est. {:.0} -> {:.0} bits",
-            report.rdo.changed, report.rdo.blocks, report.rdo.reverted_chunks, report.rdo.est_bits_before,
+            report.rdo.changed,
+            report.rdo.blocks,
+            report.rdo.reverted_chunks,
+            report.rdo.est_bits_before,
             report.rdo.est_bits_after
         );
     }
