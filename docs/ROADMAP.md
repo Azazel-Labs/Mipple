@@ -122,9 +122,6 @@ Open for v0.9.x:
   across threads; no faster on a 155H, since per-block joins wait for the slowest core.
 - [ ] Add **Basis UASTC + RDO + Zstd** and **XUBC7** to the head-to-head (`basisu -unpack` to DDS, then score).
   Add **bc7g** to `scripts/compete.py` when released. NVTT 3 needs a manual download.
-
-## v1.0: more formats
-
 - [x] BC3: a BC4 alpha half and a 4-color BC1 color half, both halves through the same RDO pass (each
   half's copy, re-index and refit, like BC5), alpha as transparency like BC7; −15.7% BD-rate against
   bc7enc_rdo at a fifth of its time (BENCHMARKS.md). No GPU kernel yet.
@@ -164,7 +161,7 @@ Open for v0.9.x:
   - [ ] Punch-through alpha (ETC2 RGB A1, vkFormat 149/150), signed EAC, a SIMD batch encoder (eight blocks
     per call, as BC1/BC6H), a GPU kernel, and a cheaper RDO candidate error than a full decode.
 
-## v1.1: perception and speed
+## v1.0+: perception and speed
 
 - [ ] **Perceptual distortion:** per-block masking (activity-weighted SSE) and λ normalized across texture
   types, as Oodle does; an NVIDIA FLIP metric in `bench`.

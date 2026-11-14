@@ -16,5 +16,6 @@
   },
   "files.watcherExclude": {
     "**/target/**": true
-  }
+  },
+  "cmake.sourceDirectory": "${workspaceFolder}/tools/competitors"
 }
