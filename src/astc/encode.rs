@@ -1506,98 +1506,145 @@ fn off_lines(ms: &[Moments; 3], count: usize, ch: usize) -> f32 {
     off
 }
 
-/// [`off_lines`] for RGB texels by labels `lab` (as lanes) into `count` partitions, whose moments
-/// all together are `total`: the last partition's are what the others leave. Each partition's
-/// line is found by `LINE_STEPS` power steps from the block's dominant `axis`: on 8 Kodak images,
-/// 3 rank as well as 8 (and 1 nearly so).
+/// Each run of four texels' RGB moments (count, three sums, six products) for every subset of the
+/// run, so a texel mask's moments take one lookup per four texels instead of a pass over the
+/// texels. Built once per block for [`off_lines_rgb`].
+struct QuadSums {
+    tab: [[[u32; 10]; 16]; MAX_TEXELS / 4],
+    groups: usize,
+}
+
+impl QuadSums {
+    fn new(t: &Texels) -> Self {
+        let mut q = QuadSums {
+            tab: [[[0; 10]; 16]; MAX_TEXELS / 4],
+            groups: t.n.div_ceil(4),
+        };
+        for g in 0..q.groups {
+            let v: [[u32; 10]; 4] = std::array::from_fn(|j| {
+                let i = 4 * g + j;
+                let [r, gr, b] = [0, 1, 2].map(|c| t.xl[c][i] as u32);
+                [(i < t.n) as u32, r, gr, b, r * r, r * gr, r * b, gr * gr, gr * b, b * b]
+            });
+            for m in 1..16usize {
+                let (low, rest) = (m.trailing_zeros() as usize, m & (m - 1));
+                q.tab[g][m] = std::array::from_fn(|x| q.tab[g][rest][x] + v[low][x]);
+            }
+        }
+        q
+    }
+
+    /// The moments of the texels in `mask` (one bit per texel).
+    #[inline]
+    fn of(&self, mask: &[u64]) -> [u32; 10] {
+        let mut acc = [0u32; 10];
+        for g in 0..self.groups {
+            let nib = (mask[g / 16] >> (4 * (g % 16)) & 15) as usize;
+            for x in 0..10 {
+                acc[x] += self.tab[g][nib][x];
+            }
+        }
+        acc
+    }
+}
+
+/// [`off_lines`] for RGB texels split by `masks` (as in [`Footprint::pmasks`], `nw` words per
+/// partition) into `count` partitions, whose moments all together are `total`: the last
+/// partition's are what the others leave. Each partition's line is found by `LINE_STEPS` power
+/// steps from the block's dominant `axis`: on 8 Kodak images, 3 rank as well as 8 (and 1 nearly
+/// so).
 ///
 /// Each partition also scores `beta` times its scatter along its line, for the weights' coarse
 /// quantization (spread texels lose more to it): a partitioning that splits a long line into two
 /// short ones wins over one that leaves it whole. On the Kodak tile (one thread), 0.008 at 4x4
 /// and 0.03 above gain 0.045 / 0.045 dB at 4x4 / 6x6 at effort 1, 0.053 / 0.047 / 0.042 dB at
 /// 4x4 / 6x6 / 8x8 at effort 2 and 0.02 / 0.037 / 0.035 dB at effort 5, in the same time.
-fn off_lines_rgb(t: &Texels, lab: &[i16; MAX_TEXELS], count: usize, total: &Moments, axis: &[f32; 4]) -> f32 {
+fn off_lines_rgb(
+    t: &Texels,
+    q: &QuadSums,
+    masks: [&[u64]; RR_LANES],
+    nw: usize,
+    count: usize,
+    total: &Moments,
+    axis: &[f32; 4],
+) -> [f32; RR_LANES] {
+    const L: usize = RR_LANES;
     let beta = if t.n <= 16 { 0.008 } else { 0.03 };
-    let line = |n: u32, s: [u32; 3], ss: [u32; 6]| -> f32 {
-        if n == 0 {
-            return 0.0;
-        }
-        let k = 1.0 / n as f32;
-        let s = s.map(|x| x as f32);
-        let ss = ss.map(|x| x as f32);
-        let c = [
-            ss[0] - s[0] * s[0] * k,
-            ss[1] - s[0] * s[1] * k,
-            ss[2] - s[0] * s[2] * k,
-            ss[3] - s[1] * s[1] * k,
-            ss[4] - s[1] * s[2] * k,
-            ss[5] - s[2] * s[2] * k,
-        ];
-        let mul = |a: &[f32; 6], v: [f32; 3]| {
-            [
-                a[0] * v[0] + a[1] * v[1] + a[2] * v[2],
-                a[1] * v[0] + a[3] * v[1] + a[4] * v[2],
-                a[2] * v[0] + a[4] * v[1] + a[5] * v[2],
-            ]
-        };
-        let tr = c[0] + c[3] + c[5];
-        if tr < 1e-3 {
-            return 0.0;
-        }
-        // Power steps scaled by the trace, from the block's dominant axis.
-        let a = c.map(|x| x / tr);
-        let mut v = [axis[0], axis[1], axis[2]];
-        for _ in 0..LINE_STEPS {
-            v = mul(&a, v);
-        }
-        let vv = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-        if vv < 1e-30 {
-            // No direction found (the start was orthogonal): rank it as off every line.
-            return tr;
-        }
-        let cv = mul(&c, v);
-        let along = (v[0] * cv[0] + v[1] * cv[1] + v[2] * cv[2]) / vv;
-        (tr - along).max(0.0) + beta * along
-    };
-    let nl = t.n.next_multiple_of(8);
-    let ones = I16x8::splat(1);
-    let mut rn = total.n;
-    let mut rs = [total.s[0], total.s[1], total.s[2]];
+    let mut rn = [total.n; L];
     let tss = &total.ss;
-    let mut rss = [tss[0][0], tss[0][1], tss[0][2], tss[1][1], tss[1][2], tss[2][2]];
-    let mut off = 0.0;
+    let mut rs = [total.s[0], total.s[1], total.s[2]].map(|x| [x; L]);
+    let mut rss = [tss[0][0], tss[0][1], tss[0][2], tss[1][1], tss[1][2], tss[2][2]].map(|x| [x; L]);
+    let mut off = [0.0f32; L];
     for p in 0..count - 1 {
-        let pm = I16x8::splat(p as i16);
-        let mut nn = I32x4::zero();
-        let mut sv = [I32x4::zero(); 3];
-        let mut ssv = [I32x4::zero(); 6];
-        for k in (0..nl).step_by(8) {
-            let msk = I16x8::load(&lab[k..]).eq(pm);
-            nn = nn.add(msk.sq_pairs());
-            let x: [I16x8; 3] = std::array::from_fn(|c| I16x8::load(&t.xl[c][k..]).and(msk));
+        let m: [[u32; 10]; L] = std::array::from_fn(|l| q.of(&masks[l][p * nw..(p + 1) * nw]));
+        let n: [u32; L] = std::array::from_fn(|l| m[l][0]);
+        let s: [[u32; L]; 3] = std::array::from_fn(|c| std::array::from_fn(|l| m[l][1 + c]));
+        let ss: [[u32; L]; 6] = std::array::from_fn(|j| std::array::from_fn(|l| m[l][4 + j]));
+        let o = lines_rgb(&n, &s, &ss, axis, beta);
+        for l in 0..L {
+            off[l] += o[l];
+            rn[l] -= n[l];
             for c in 0..3 {
-                sv[c] = sv[c].add(x[c].madd(ones));
+                rs[c][l] -= s[c][l];
             }
-            ssv[0] = ssv[0].add(x[0].madd(x[0]));
-            ssv[1] = ssv[1].add(x[0].madd(x[1]));
-            ssv[2] = ssv[2].add(x[0].madd(x[2]));
-            ssv[3] = ssv[3].add(x[1].madd(x[1]));
-            ssv[4] = ssv[4].add(x[1].madd(x[2]));
-            ssv[5] = ssv[5].add(x[2].madd(x[2]));
-        }
-        let n = nn.sum() as u32;
-        let s = sv.map(|v| v.sum() as u32);
-        let ss = ssv.map(|v| v.sum() as u32);
-        off += line(n, s, ss);
-        rn -= n;
-        for c in 0..3 {
-            rs[c] -= s[c];
-        }
-        for j in 0..6 {
-            rss[j] -= ss[j];
+            for j in 0..6 {
+                rss[j][l] -= ss[j][l];
+            }
         }
     }
-    off + line(rn, rs, rss)
+    let o = lines_rgb(&rn, &rs, &rss, axis, beta);
+    std::array::from_fn(|l| off[l] + o[l])
+}
+
+/// Patterns [`off_lines_rgb`] scores at once, lane by lane.
+const RR_LANES: usize = 8;
+
+/// For each of [`RR_LANES`] partitions (`n` texels, sums `s`, products `ss`), the texels' squared
+/// distance from the line found by `LINE_STEPS` power steps from `axis`, plus `beta` times their
+/// scatter along it (0 for no texels or no scatter).
+#[inline]
+fn lines_rgb(
+    n: &[u32; RR_LANES],
+    s: &[[u32; RR_LANES]; 3],
+    ss: &[[u32; RR_LANES]; 6],
+    axis: &[f32; 4],
+    beta: f32,
+) -> [f32; RR_LANES] {
+    const L: usize = RR_LANES;
+    let k: [f32; L] = std::array::from_fn(|l| 1.0 / n[l] as f32);
+    let s = s.map(|a| a.map(|x| x as f32));
+    let ss = ss.map(|a| a.map(|x| x as f32));
+    const PAIRS: [(usize, usize); 6] = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
+    // The centered products, as rows 00 01 02 11 12 22 of the symmetric covariance.
+    let c: [[f32; L]; 6] = std::array::from_fn(|j| {
+        let (a, b) = PAIRS[j];
+        std::array::from_fn(|l| ss[j][l] - s[a][l] * s[b][l] * k[l])
+    });
+    let mul = |a: &[[f32; L]; 6], v: &[[f32; L]; 3]| -> [[f32; L]; 3] {
+        let row =
+            |r: [usize; 3]| std::array::from_fn(|l| a[r[0]][l] * v[0][l] + a[r[1]][l] * v[1][l] + a[r[2]][l] * v[2][l]);
+        [row([0, 1, 2]), row([1, 3, 4]), row([2, 4, 5])]
+    };
+    let tr: [f32; L] = std::array::from_fn(|l| c[0][l] + c[3][l] + c[5][l]);
+    // Power steps scaled by the trace, from the block's dominant axis.
+    let a = c.map(|r| std::array::from_fn(|l| r[l] / tr[l]));
+    let mut v = [axis[0], axis[1], axis[2]].map(|x| [x; L]);
+    for _ in 0..LINE_STEPS {
+        v = mul(&a, &v);
+    }
+    let vv: [f32; L] = std::array::from_fn(|l| v[0][l] * v[0][l] + v[1][l] * v[1][l] + v[2][l] * v[2][l]);
+    let cv = mul(&c, &v);
+    std::array::from_fn(|l| {
+        let along = (v[0][l] * cv[0][l] + v[1][l] * cv[1][l] + v[2][l] * cv[2][l]) / vv[l];
+        if n[l] == 0 || tr[l] < 1e-3 {
+            0.0
+        } else if vv[l] < 1e-30 {
+            // No direction found (the start was orthogonal): rank it as off every line.
+            tr[l]
+        } else {
+            (tr[l] - along).max(0.0) + beta * along
+        }
+    })
 }
 
 /// The block mode and endpoint range of mode `mi` of `grid` for layout `lay`, with RGB endpoints
@@ -2286,6 +2333,11 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             rerank: 64,
             alts: 2,
         },
+        // From effort 4 at 4x4 and effort 5 above, every pattern is re-ranked (half of them above
+        // 16 texels): with the patterns scored by `QuadSums` lookups, that gains more than the next
+        // effort for less time. On the Kodak tile (one thread): effort 5 +0.090 / +0.052 / +0.032
+        // dB at 4x4 / 6x6 / 8x8, effort 6 +0.056 / +0.034 dB at 6x6 / 8x8 for 27% / 28% more time,
+        // and effort 4 at 4x4 +0.078 dB (above effort 5, in less time).
         4 => Effort {
             patterns: [4, 2],
             candidates: 8,
@@ -2294,7 +2346,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 3,
             dual: 4,
             line: [1.0, 8.0, 0.0],
-            rerank: 64,
+            rerank: if texels > 16 { 64 } else { 1024 },
             alts: 2,
         },
         5 => Effort {
@@ -2305,7 +2357,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 4,
             dual: 4,
             line: [0.5, 4.0, 0.0],
-            rerank: 64,
+            rerank: 1024,
             alts: 2,
         },
         6 => Effort {
@@ -2316,7 +2368,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 4,
             dual: 4,
             line: [0.5, 4.0, 0.0],
-            rerank: 64,
+            rerank: 1024,
             alts: 2,
         },
         7 => Effort {
@@ -2327,7 +2379,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 6,
             dual: 4,
             line: [0.25, 2.0, 0.0],
-            rerank: 128,
+            rerank: 1024,
             alts: 2,
         },
         8 => Effort {
@@ -2338,7 +2390,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 6,
             dual: 4,
             line: [0.25, 2.0, 0.0],
-            rerank: 128,
+            rerank: 1024,
             alts: 2,
         },
         _ => Effort {
@@ -2349,7 +2401,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 8,
             dual: 4,
             line: [0.0, 0.0, 0.0],
-            rerank: 256,
+            rerank: 1024,
             alts: 2,
         },
     }
@@ -2412,6 +2464,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             layouts.push(Layout::new(&t, 1, 0, &lab1, c, &ms1, Some(v)));
         }
     }
+    let mut quad: Option<QuadSums> = None;
     for (pi, &want) in es.patterns.iter().enumerate() {
         let k = pi + 2;
         let pats = &fp.patterns[pi];
@@ -2421,13 +2474,36 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let km = kmeans(&t, k, &axis1, &mean1);
         let mut ranked = rank_patterns(fp, k, &km, n as u32, want.max(es.rerank));
         if es.rerank > want {
-            let off = |i: usize| match t.ch {
-                3 => off_lines_rgb(&t, &pats[i].lab, k, &ms1[0], &axis1),
-                _ => off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch),
-            };
-            let mut by: Vec<(f32, usize)> = ranked.iter().map(|&i| (off(i), i)).collect();
-            by.sort_by(|a, b| a.0.total_cmp(&b.0));
-            ranked = by.into_iter().map(|e| e.1).collect();
+            // Each pattern's score, place in `ranked` and index: only the best `want` are kept,
+            // in order (ties to the earlier place).
+            let mut by: Vec<(f32, usize, usize)> = Vec::with_capacity(ranked.len());
+            if t.ch == 3 {
+                let q = quad.get_or_insert_with(|| QuadSums::new(&t));
+                let (nw, stride) = (fp.nw, fp.nw * (pi + 1));
+                for chunk in ranked.chunks(RR_LANES) {
+                    let masks = std::array::from_fn(|l| {
+                        let i = chunk[l.min(chunk.len() - 1)];
+                        &fp.pmasks[pi][i * stride..(i + 1) * stride]
+                    });
+                    let o = off_lines_rgb(&t, q, masks, nw, k, &ms1[0], &axis1);
+                    let r = by.len();
+                    by.extend(chunk.iter().zip(o).enumerate().map(|(j, (&i, o))| (o, r + j, i)));
+                }
+            } else {
+                by.extend(
+                    ranked
+                        .iter()
+                        .enumerate()
+                        .map(|(r, &i)| (off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch), r, i)),
+                );
+            }
+            let cmp = |a: &(f32, usize, usize), b: &(f32, usize, usize)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+            if want < by.len() {
+                by.select_nth_unstable_by(want, cmp);
+                by.truncate(want);
+            }
+            by.sort_unstable_by(cmp);
+            ranked = by.into_iter().map(|e| e.2).collect();
         }
         for &i in ranked.iter().take(want) {
             let ms = Moments::of(&t, &pats[i].lab, k as u8);

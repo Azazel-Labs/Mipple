@@ -118,8 +118,9 @@ through black, so modes whose weights leave too few bits for six endpoint values
 multi-partition layouts with some partitions base+scale and the rest direct (per-partition CEMs, those
 whose lines pass closest to black first). Two- and three-partition patterns and dual-plane layouts are
 tried when the block is far enough from one line: the patterns that best agree with a k-means clustering
-(a counting sort over per-pattern mismatches), from effort 1 the best 16 of those (from effort 2, 64, or 32 above 16 texels)
-re-ranked by how far their texels lie from their partitions' lines. At 4x4 the estimates for two and
+(a counting sort over per-pattern mismatches), from effort 1 the best 16 of those (from effort 2, 64; from effort 5, and effort 4 at 4x4, every
+pattern; half as many above 16 texels) re-ranked by how far their texels lie from their partitions'
+lines, each pattern's moments summed from a per-block table of every four-texel subset's. At 4x4 the estimates for two and
 three partitions and a second plane are scaled down to match their measured exact errors. ASTC decodes differently in sRGB and linear mode, so the encoder is
 told which (`BlockOpts::srgb`, on by default for color as with BC7). Output goes to KTX2 (vkFormat 157/158,
 165/166, 171/172, DFD color model ASTC) or, one level only, a `.astc` file; DDS refuses it. No GPU kernel
