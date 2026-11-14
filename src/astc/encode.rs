@@ -1968,6 +1968,8 @@ struct Effort {
     /// The patterns ranked best by agreement with k-means, if more than are tried, re-ranked by how
     /// far their texels lie from their partitions' lines before the best are tried.
     rerank: usize,
+    /// Base+offset and base+scale endpoints tried for each candidate's final weights.
+    alts: bool,
 }
 
 /// The settings for `effort` on a footprint of `texels` texels.
@@ -2007,21 +2009,24 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
                 dual: u(5),
                 line: [v[6] as f32, v[7] as f32, v[8] as f32],
                 rerank: u(10),
+                alts: true,
             }
         });
     }
     match effort {
-        // From 25 to 63 texels (6x6 among them), a second candidate and a longer shortlist: on
-        // Kodak at 6x6, +0.07 dB for about 10% more time (one thread).
-        0 if (25..64).contains(&texels) => Effort {
+        // Above 16 texels, two polish passes and no alternative endpoint modes for the candidate's
+        // weights: on Kodak (tiled, one thread), 16% / 6% less time at 6x6 / 8x8 for 0.10 / 0.03 dB,
+        // files 1.3% / 0.3% smaller (SSIM up at 6x6).
+        0 if texels > 16 => Effort {
             patterns: [1, 0],
-            candidates: 2,
-            shortlist: 5,
+            candidates: 1,
+            shortlist: 0,
             refine: 0,
             polish: 2,
             dual: 1,
             line: [8.0, 16.0, 2.0],
             rerank: 0,
+            alts: false,
         },
         0 => Effort {
             patterns: [1, 0],
@@ -2032,6 +2037,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 1,
             line: [8.0, 16.0, 2.0],
             rerank: 0,
+            alts: true,
         },
         1 => Effort {
             patterns: [2, 0],
@@ -2042,6 +2048,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 1,
             line: [2.0, 16.0, 0.0],
             rerank: 64,
+            alts: true,
         },
         2 => Effort {
             patterns: [2, 1],
@@ -2052,6 +2059,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 2,
             line: [2.0, 16.0, 0.0],
             rerank: 64,
+            alts: true,
         },
         3 => Effort {
             patterns: [3, 1],
@@ -2062,6 +2070,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 2,
             line: [1.0, 8.0, 0.0],
             rerank: 64,
+            alts: true,
         },
         4 => Effort {
             patterns: [4, 2],
@@ -2072,6 +2081,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [1.0, 8.0, 0.0],
             rerank: 64,
+            alts: true,
         },
         5 => Effort {
             patterns: [6, 3],
@@ -2082,6 +2092,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.5, 4.0, 0.0],
             rerank: 64,
+            alts: true,
         },
         6 => Effort {
             patterns: [8, 4],
@@ -2092,6 +2103,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.5, 4.0, 0.0],
             rerank: 64,
+            alts: true,
         },
         7 => Effort {
             patterns: [12, 6],
@@ -2102,6 +2114,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.25, 2.0, 0.0],
             rerank: 128,
+            alts: true,
         },
         8 => Effort {
             patterns: [16, 8],
@@ -2112,6 +2125,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.25, 2.0, 0.0],
             rerank: 128,
+            alts: true,
         },
         _ => Effort {
             patterns: [32, 16],
@@ -2122,6 +2136,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             dual: 4,
             line: [0.0, 0.0, 0.0],
             rerank: 256,
+            alts: true,
         },
     }
 }
@@ -2356,7 +2371,18 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let at = measured.iter().position(|m| m.0 == li && m.1 == gi).expect("measured");
         quantize_decimated(grid, q, planes, &decimated[at], &mut codes);
         let before = best.err;
-        let mut eps = try_candidate(&t, lay, grid, bm, cem, scale, cq, &mut codes, &mut best, es.refine == 0);
+        let mut eps = try_candidate(
+            &t,
+            lay,
+            grid,
+            bm,
+            cem,
+            scale,
+            cq,
+            &mut codes,
+            &mut best,
+            es.alts && es.refine == 0,
+        );
         for r in 0..es.refine {
             // Re-derive ideal weights from the quantized endpoints, then decimate and re-encode.
             let mut uu = [0f32; MAX_TEXELS];
@@ -2392,7 +2418,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 cq,
                 &mut codes,
                 &mut best,
-                r + 1 == es.refine,
+                es.alts && r + 1 == es.refine,
             );
         }
         if best.err < before {
