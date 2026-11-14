@@ -1510,7 +1510,14 @@ fn off_lines(ms: &[Moments; 3], count: usize, ch: usize) -> f32 {
 /// all together are `total`: the last partition's are what the others leave. Each partition's
 /// line is found by `LINE_STEPS` power steps from the block's dominant `axis`: on 8 Kodak images,
 /// 3 rank as well as 8 (and 1 nearly so).
+///
+/// Each partition also scores `beta` times its scatter along its line, for the weights' coarse
+/// quantization (spread texels lose more to it): a partitioning that splits a long line into two
+/// short ones wins over one that leaves it whole. On the Kodak tile (one thread), 0.008 at 4x4
+/// and 0.03 above gain 0.045 / 0.045 dB at 4x4 / 6x6 at effort 1, 0.053 / 0.047 / 0.042 dB at
+/// 4x4 / 6x6 / 8x8 at effort 2 and 0.02 / 0.037 / 0.035 dB at effort 5, in the same time.
 fn off_lines_rgb(t: &Texels, lab: &[i16; MAX_TEXELS], count: usize, total: &Moments, axis: &[f32; 4]) -> f32 {
+    let beta = if t.n <= 16 { 0.008 } else { 0.03 };
     let line = |n: u32, s: [u32; 3], ss: [u32; 6]| -> f32 {
         if n == 0 {
             return 0.0;
@@ -1526,13 +1533,6 @@ fn off_lines_rgb(t: &Texels, lab: &[i16; MAX_TEXELS], count: usize, total: &Mome
             ss[4] - s[1] * s[2] * k,
             ss[5] - s[2] * s[2] * k,
         ];
-        let tr = c[0] + c[3] + c[5];
-        if tr < 1e-3 {
-            return 0.0;
-        }
-        // Power steps scaled by the trace, from the block's dominant axis.
-        let a = c.map(|x| x / tr);
-        let mut v = [axis[0], axis[1], axis[2]];
         let mul = |a: &[f32; 6], v: [f32; 3]| {
             [
                 a[0] * v[0] + a[1] * v[1] + a[2] * v[2],
@@ -1540,6 +1540,13 @@ fn off_lines_rgb(t: &Texels, lab: &[i16; MAX_TEXELS], count: usize, total: &Mome
                 a[2] * v[0] + a[4] * v[1] + a[5] * v[2],
             ]
         };
+        let tr = c[0] + c[3] + c[5];
+        if tr < 1e-3 {
+            return 0.0;
+        }
+        // Power steps scaled by the trace, from the block's dominant axis.
+        let a = c.map(|x| x / tr);
+        let mut v = [axis[0], axis[1], axis[2]];
         for _ in 0..LINE_STEPS {
             v = mul(&a, v);
         }
@@ -1549,7 +1556,8 @@ fn off_lines_rgb(t: &Texels, lab: &[i16; MAX_TEXELS], count: usize, total: &Mome
             return tr;
         }
         let cv = mul(&c, v);
-        (tr - (v[0] * cv[0] + v[1] * cv[1] + v[2] * cv[2]) / vv).max(0.0)
+        let along = (v[0] * cv[0] + v[1] * cv[1] + v[2] * cv[2]) / vv;
+        (tr - along).max(0.0) + beta * along
     };
     let nl = t.n.next_multiple_of(8);
     let ones = I16x8::splat(1);
