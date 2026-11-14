@@ -110,9 +110,17 @@ every weight grid the footprint allows by exact least squares (the infill taken 
 weight range, partitioning) candidate is ranked by an estimate of weight and endpoint quantization noise from
 per-footprint mode tables; the best few (at effort 0, 1 at 4x4 and 8x8 and 2 at 6x6; more with effort) are
 encoded exactly, with weights
-re-derived from the quantized endpoints and a coordinate-descent polish over the final block. Two- and
-three-partition patterns (the ones closest to a k-means clustering) and dual-plane layouts are tried when
-the block is far enough from one line. ASTC decodes differently in sRGB and linear mode, so the encoder is
+re-derived from the quantized endpoints and a coordinate-descent polish over the final block. Each candidate's
+weights are tried with direct endpoints (CEM 8 / 12), base+offset (CEM 9 / 13, the same number of values, more
+precise for short segments) and base+scale (CEM 6 / 10: a line through black in four values, so a finer
+endpoint range). Opaque layouts are also ranked as base+scale on their own, with the error off the best line
+through black, so modes whose weights leave too few bits for six endpoint values still compete, and
+multi-partition layouts with some partitions base+scale and the rest direct (per-partition CEMs, those
+whose lines pass closest to black first). Two- and three-partition patterns and dual-plane layouts are
+tried when the block is far enough from one line: the patterns that best agree with a k-means clustering
+(a counting sort over per-pattern mismatches), from effort 1 the best 64 of those (32 above 16 texels)
+re-ranked by how far their texels lie from their partitions' lines. At 4x4 the estimates for two and
+three partitions and a second plane are scaled down to match their measured exact errors. ASTC decodes differently in sRGB and linear mode, so the encoder is
 told which (`BlockOpts::srgb`, on by default for color as with BC7). Output goes to KTX2 (vkFormat 157/158,
 165/166, 171/172, DFD color model ASTC) or, one level only, a `.astc` file; DDS refuses it. No GPU kernel
 yet.
@@ -247,9 +255,10 @@ texels from the surface instead of 4x4 `Block`s, with the same `J` (SSE over all
 means the same SSE per bit at every footprint), `LzModel`, error cap, 16 KiB chunks (1024 blocks) and Zstd
 check. The base is the plain encode at the requested effort. A block's mode, partitioning and endpoints sit in
 its low bits and its weights in its high bits, so the candidates are: an earlier block copied whole (the last
-`max_back`, 256); and, from the last `REFIT_BACK` (256) blocks with at most three partitions and CEM 8 or 12,
+`max_back`, 256); and, from the last `REFIT_BACK` (256) blocks with at most three partitions sharing one CEM,
 the earlier block's head with weights re-chosen for this block, and its weights (with mode, partitioning and
-second-plane channel) with endpoints refitted by least squares, each polished once with the other half held.
+second-plane channel) with endpoints refitted by least squares (written direct), each polished once with the
+other half held.
 Heads and weight sets already tried are skipped. Before building either, a lower bound on its error must
 beat the best `J`'s distortion: for a re-weight, each texel's distance to its partition's segment (a decoded
 texel is within 0.5 per channel of a point on it); for a refit, the unclamped least-squares residual with the

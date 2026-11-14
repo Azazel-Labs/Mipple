@@ -20,7 +20,7 @@ use super::{
     Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, infill, polish_parts, quantize, read_block, refit, round_pos,
     sym_endpoints, tables,
 };
-use crate::astc::{COLOR_UNQUANT, Symbolic, WEIGHT_UNQUANT, decode_block, partition_of};
+use crate::astc::{COLOR_UNQUANT, Symbolic, WEIGHT_UNQUANT, color_range, decode_block, partition_of};
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
 use crate::surface::{Rgba, Surface};
@@ -74,6 +74,7 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
         u2: [0.0; MAX_TEXELS],
         scale2: 0.0,
         orth: 0.0,
+        scaled: [(f32::MAX, 0); 3],
     };
     for i in 0..n {
         let l = partition_of(
@@ -90,11 +91,12 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
 }
 
 /// `bytes`' fields, labels and grid, if the candidates can build on them: up to three partitions,
-/// all RGB (CEM 8) or all RGBA (CEM 12), as the encoder writes.
+/// one CEM for every partition: direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the
+/// encoder writes.
 fn prev_sym(fp: &Footprint, bytes: [u8; 16]) -> Option<Box<(Symbolic, Layout, usize)>> {
     let sym = Symbolic::read(u128::from_le_bytes(bytes), fp.bw, fp.bh)?;
     let p = sym.partitions as usize;
-    if p > 3 || !matches!(sym.cems[0], 8 | 12) || sym.cems[..p].iter().any(|&c| c != sym.cems[0]) {
+    if p > 3 || !matches!(sym.cems[0], 6 | 8 | 9 | 10 | 12 | 13) || sym.cems[..p].iter().any(|&c| c != sym.cems[0]) {
         return None;
     }
     let gi = fp
@@ -200,9 +202,15 @@ fn refit_to(
     for (pl, wp) in w.iter_mut().enumerate().take(planes) {
         infill(grid, &g, planes, pl, wp);
     }
-    let cq = sym.color_quant as usize;
+    // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, RGBA (CEM 12) for the rest.
+    let cem = if matches!(sym.cems[0], 6 | 8 | 9) { 8 } else { 12 };
+    let mut out = sym.clone();
+    if cem != sym.cems[0] {
+        out.cems = [cem; 4];
+        out.color_quant = color_range(sym.mode, sym.partitions, &out.cems)?;
+    }
+    let cq = out.color_quant as usize;
     let (cqt, cu) = (&tb.cq[cq], &COLOR_UNQUANT[cq]);
-    let cem = sym.cems[0];
     let nv = if cem == 12 { 4 } else { 3 };
     // With the weights held, no endpoints fit better than each channel's least-squares line (not
     // clamped to the color range), and decoding moves each texel at most 0.5 per channel from its
@@ -243,7 +251,6 @@ fn refit_to(
     if (res.sqrt() - (t.n as f64).sqrt()).max(0.0).powi(2) > max_err as f64 {
         return None;
     }
-    let mut out = sym.clone();
     let fits = refit(t, &w[0], &w[1], lay.ccs, &lay.lab16, lay.count);
     for (p, &(f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
         let mut c0: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f0[ch])]);

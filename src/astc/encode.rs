@@ -8,7 +8,9 @@
 
 use super::decode::ERROR;
 use super::lanes::{F32x4, I16x8, I32x4};
-use super::{BlockMode, COLOR_UNQUANT, RANGES, Symbolic, WEIGHT_RANGES, WEIGHT_UNQUANT, block_mode, color_range};
+use super::{
+    BlockMode, COLOR_UNQUANT, RANGES, Symbolic, WEIGHT_RANGES, WEIGHT_UNQUANT, block_mode, cem_values, color_range,
+};
 use crate::surface::{Rgba, Surface};
 
 pub mod rdo;
@@ -38,13 +40,15 @@ struct Grid {
     /// with zeros to whole `F32x4`s.
     sep: Sep,
     /// Single-plane block modes on this grid, with the endpoint range for one to three
-    /// partitions of RGB (CEM 8) and RGBA (CEM 12); `u8::MAX` where the mode leaves too few bits.
-    modes: Vec<(BlockMode, [[u8; 2]; 3])>,
+    /// partitions of RGB (CEM 8), RGBA (CEM 12), RGB base+scale (CEM 6), and RGB with one or two
+    /// partitions base+scale and the rest direct; `u8::MAX` where the mode leaves too few bits.
+    modes: Vec<(BlockMode, [[u8; 5]; 3])>,
     /// Dual-plane block modes on this grid, with the endpoint range for one partition of RGB and
     /// RGBA.
     dual: Vec<(BlockMode, [u8; 2])>,
-    /// The modes for each kind of layout (`est_kind`), by increasing weight noise.
-    est: [Vec<Est>; 8],
+    /// The modes for each kind of layout (`est_kind`, then `SCALE_KIND` for base+scale RGB), by
+    /// increasing weight noise.
+    est: [Vec<Est>; 14],
 }
 
 /// Separable infill and decimation matrices of a grid (see `Grid::sep`).
@@ -209,6 +213,21 @@ fn est_kind(count: u8, dual: bool, ce: usize) -> usize {
     if dual { 6 + ce } else { (count as usize - 1) * 2 + ce }
 }
 
+/// The index into `Grid::est` for one partition of base+scale RGB (CEM 6); `count` partitions
+/// add `count - 1`.
+const SCALE_KIND: usize = 8;
+
+/// The index into `Grid::est` and the endpoint kind (the column of `Grid::modes`) for variant
+/// `v` of a layout of `count` partitions: base+scale RGB in every partition (1), or in one (2) or
+/// two (3) of them.
+fn variant_kind(count: u8, v: usize) -> (usize, usize) {
+    match v {
+        1 => (SCALE_KIND + count as usize - 1, 2),
+        2 => (SCALE_KIND + 3 + count as usize - 2, 3),
+        _ => (SCALE_KIND + 5, 4),
+    }
+}
+
 /// Expected squared endpoint error per channel and texel for each color range: a uniform error
 /// over one quantization step, reduced by interpolation (about 1/18 of the step squared).
 static CNOISE: std::sync::LazyLock<[f32; 21]> = std::sync::LazyLock::new(|| {
@@ -290,7 +309,7 @@ impl Footprint {
         let mut grids = Vec::new();
         for gy in 2..=bh {
             for gx in 2..=bw {
-                let mut modes: Vec<(BlockMode, [[u8; 2]; 3])> = Vec::new();
+                let mut modes: Vec<(BlockMode, [[u8; 5]; 3])> = Vec::new();
                 let mut dual: Vec<(BlockMode, [u8; 2])> = Vec::new();
                 for m in 0..2048 {
                     let Some(bm) = block_mode(m) else { continue };
@@ -298,12 +317,26 @@ impl Footprint {
                         continue;
                     }
                     let cq = |p: u8, cem: u8| color_range(bm, p, &[cem; 4]).unwrap_or(u8::MAX);
+                    // `k` partitions base+scale, the rest direct RGB.
+                    let mixed = |p: u8, k: u8| {
+                        if k >= p {
+                            return u8::MAX;
+                        }
+                        let cems: [u8; 4] = std::array::from_fn(|i| if i < k as usize { 6 } else { 8 });
+                        color_range(bm, p, &cems).unwrap_or(u8::MAX)
+                    };
                     if bm.dual {
                         if !dual.iter().any(|e| e.0 == bm) && cq(1, 8) != u8::MAX {
                             dual.push((bm, [cq(1, 8), cq(1, 12)]));
                         }
                     } else if !modes.iter().any(|e| e.0 == bm) {
-                        modes.push((bm, std::array::from_fn(|p| [cq(p as u8 + 1, 8), cq(p as u8 + 1, 12)])));
+                        modes.push((
+                            bm,
+                            std::array::from_fn(|p| {
+                                let p = p as u8 + 1;
+                                [cq(p, 8), cq(p, 12), cq(p, 6), mixed(p, 1), mixed(p, 2)]
+                            }),
+                        ));
                     }
                 }
                 if modes.is_empty() {
@@ -364,7 +397,7 @@ impl Footprint {
                     noise * wstep * wstep / 12.0 + round
                 };
                 let est = std::array::from_fn(|kind| {
-                    let mut v: Vec<Est> = if kind >= 6 {
+                    let mut v: Vec<Est> = if (6..SCALE_KIND).contains(&kind) {
                         let ce = kind - 6;
                         (dual.iter().enumerate())
                             .filter(|(_, m)| m.1[ce] != u8::MAX)
@@ -376,7 +409,12 @@ impl Footprint {
                             })
                             .collect()
                     } else {
-                        let (p, ce) = (kind / 2, kind % 2);
+                        let (p, ce) = match kind {
+                            0..SCALE_KIND => (kind / 2, kind % 2),
+                            8..11 => (kind - SCALE_KIND, 2),
+                            11 | 12 => (kind - 10, 3),
+                            _ => (2, 4),
+                        };
                         (modes.iter().enumerate())
                             .filter(|(_, m)| m.1[p][ce] != u8::MAX)
                             .map(|(mi, m)| Est {
@@ -795,17 +833,89 @@ struct Best {
     at: (usize, usize),
 }
 
-/// The endpoints (0..=255) block `sym` gives partition `p`.
+/// Where partition `p`'s endpoint values start in `sym.colors`, and how many it has.
+fn value_span(sym: &Symbolic, p: usize) -> (usize, usize) {
+    let at = sym.cems[..p].iter().map(|&c| cem_values(c)).sum();
+    (at, cem_values(sym.cems[p]))
+}
+
+/// The endpoints (0..=255) block `sym` gives partition `p`, as decoded.
 fn sym_endpoints(sym: &Symbolic, p: usize) -> ([i32; 4], [i32; 4]) {
-    let cem = sym.cems[p];
-    let nv = if cem == 12 { 4 } else { 3 };
     let cu = &COLOR_UNQUANT[sym.color_quant as usize];
-    let mut e = ([0i32, 0, 0, 255], [0i32, 0, 0, 255]);
-    for ch in 0..nv {
-        e.0[ch] = cu[sym.colors[2 * nv * p + 2 * ch] as usize] as i32;
-        e.1[ch] = cu[sym.colors[2 * nv * p + 2 * ch + 1] as usize] as i32;
+    let (at, k) = value_span(sym, p);
+    let mut v = [0i32; 8];
+    for (o, &c) in v.iter_mut().zip(&sym.colors[at..at + k]) {
+        *o = cu[c as usize] as i32;
     }
-    e
+    super::decode::endpoints(sym.cems[p], &v[..k]).expect("LDR mode")
+}
+
+/// Codes at endpoint range `cq` for base+offset endpoints (CEM 9, or 13 with alpha, in channels
+/// 0..`nv`) nearest the endpoints `f0`, `f1`. Per channel the decoder reads the first value's top
+/// seven bits as the base's low seven, and the second's top bit as the base's top bit and its bits
+/// 1..=6 as a signed offset; a few codes near each target are tried.
+fn quant_offset(f0: &[f32; 4], f1: &[f32; 4], nv: usize, cq: usize, out: &mut [u8]) {
+    let tb = tables();
+    let (cqt, cnb, cu) = (&tb.cq[cq], &tb.cnb[cq], &COLOR_UNQUANT[cq]);
+    for c in 0..nv {
+        let mut best = (f32::MAX, 0u8, 0u8);
+        let lo = f0[c].floor().clamp(0.0, 255.0) as i32;
+        for b in [lo, (lo + 1).min(255)] {
+            let d = (f1[c] - b as f32).round().clamp(-32.0, 31.0) as i32;
+            let n0 = cqt[((b & 0x7f) << 1) as usize];
+            let n1 = cqt[((b & 0x80) | ((d & 0x3f) << 1)) as usize];
+            for x0 in [n0, cnb[0][n0 as usize], cnb[1][n0 as usize]] {
+                for x1 in [n1, cnb[0][n1 as usize], cnb[1][n1 as usize]] {
+                    let (u0, u1) = (cu[x0 as usize] as i32, cu[x1 as usize] as i32);
+                    let base = (u0 >> 1) | (u1 & 0x80);
+                    let mut off = (u1 >> 1) & 0x3f;
+                    if off & 0x20 != 0 {
+                        off -= 0x40;
+                    }
+                    let e1 = (base + off).clamp(0, 255);
+                    let cost = (base as f32 - f0[c]).powi(2) + (e1 as f32 - f1[c]).powi(2);
+                    if cost < best.0 {
+                        best = (cost, x0, x1);
+                    }
+                }
+            }
+        }
+        out[2 * c] = best.1;
+        out[2 * c + 1] = best.2;
+    }
+}
+
+/// Codes at endpoint range `cq` for base+scale endpoints (CEM 6, or 10 with alpha) near the
+/// endpoints `f0`, `f1`: the second endpoint's RGB, then the scale (in 256ths) that takes it
+/// nearest the first, then (CEM 10) both alphas.
+fn quant_scale(f0: &[f32; 4], f1: &[f32; 4], alpha: bool, cq: usize, out: &mut [u8]) {
+    let tb = tables();
+    let (cqt, cnb, cu) = (&tb.cq[cq], &tb.cnb[cq], &COLOR_UNQUANT[cq]);
+    let mut u = [0i32; 3];
+    for c in 0..3 {
+        out[c] = cqt[round_pos(f1[c].clamp(0.0, 255.0))];
+        u[c] = cu[out[c] as usize] as i32;
+    }
+    let uu: i32 = u.iter().map(|x| x * x).sum();
+    let fu: f32 = (0..3).map(|c| f0[c] * u[c] as f32).sum();
+    let st = if uu > 0 {
+        (256.0 * fu / uu as f32).clamp(0.0, 255.0)
+    } else {
+        0.0
+    };
+    let n = cqt[round_pos(st)];
+    let cost = |x: u8| -> f32 {
+        let s = cu[x as usize] as i32;
+        (0..3).map(|c| (((u[c] * s) >> 8) as f32 - f0[c]).powi(2)).sum()
+    };
+    out[3] = [n, cnb[0][n as usize], cnb[1][n as usize]]
+        .into_iter()
+        .min_by(|&a, &b| cost(a).total_cmp(&cost(b)))
+        .unwrap();
+    if alpha {
+        out[4] = cqt[round_pos(f0[3].clamp(0.0, 255.0))];
+        out[5] = cqt[round_pos(f1[3].clamp(0.0, 255.0))];
+    }
 }
 
 /// Coordinate descent on a finished block: steps each weight and endpoint code to its neighbor
@@ -924,10 +1034,15 @@ fn polish_parts<const W: bool, const E: bool>(
         }
     }
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
+    // Direct endpoints (CEM 8 / 12) step one channel of one endpoint per code; other modes step
+    // whatever their codes decode to.
+    let direct = sym.cems[..parts].iter().all(|&c| c == 8 || c == 12);
+    let spans: [(usize, usize); 3] = std::array::from_fn(|p| if p < parts { value_span(sym, p) } else { (0, 0) });
+    let nvals: usize = spans.iter().map(|s| s.1).sum();
     // Steps tried since the last one taken. Each try depends only on the block's current state, so
     // once every weight and endpoint code has been tried in a row without a step, the rest of the
     // passes would only repeat those tries: stop there, mid-pass, with the same result.
-    let steps = if W { kk } else { 0 } + if E { parts * 2 * nv } else { 0 };
+    let steps = if W { kk } else { 0 } + if E { nvals } else { 0 };
     let mut idle = 0;
     'passes: for _ in 0..passes {
         for j in 0..if W { kk } else { 0 } {
@@ -970,11 +1085,65 @@ fn polish_parts<const W: bool, const E: bool>(
             idle = 0;
         }
         for p in 0..if E { parts } else { 0 } {
-            for v in 0..2 * nv {
+            for v in 0..spans[p].1 {
                 if idle >= steps {
                     break 'passes;
                 }
                 idle += 1;
+                if !direct {
+                    // Partition `p`'s error over every channel with endpoints `e`.
+                    let part_err = |e: &([i32; 4], [i32; 4])| -> i32 {
+                        let mut acc = I32x4::zero();
+                        for c in 0..ch {
+                            let pl = plane_of(c);
+                            let (b, s) = (
+                                I16x8::splat((64 * e.0[c] + 32) as i16),
+                                I16x8::splat((e.1[c] - e.0[c]) as i16),
+                            );
+                            for k in (seg[p]..seg[p + 1]).step_by(8) {
+                                let w = I16x8::load(&wl[pl][k..]);
+                                let y = b.add(w.mul(s)).shr::<6>();
+                                let d = y.sub(I16x8::load(&xl[c][k..])).and(I16x8::load(&live[k..]));
+                                acc = acc.add(d.sq_pairs());
+                            }
+                        }
+                        acc.sum()
+                    };
+                    let (at, k) = spans[p];
+                    let slot = at + v;
+                    let old = sym.colors[slot];
+                    let mut vals = [0i32; 8];
+                    for i in 0..k {
+                        vals[i] = cu[sym.colors[at + i] as usize] as i32;
+                    }
+                    let cur = part_err(&eps[p]);
+                    let mut take = None;
+                    for dir in 0..2 {
+                        let nc = tb.cnb[cq][dir][old as usize];
+                        if nc == old {
+                            continue;
+                        }
+                        vals[v] = cu[nc as usize] as i32;
+                        let e = super::decode::endpoints(sym.cems[p], &vals[..k]).expect("LDR mode");
+                        if part_err(&e) < cur {
+                            take = Some((nc, e));
+                            break;
+                        }
+                    }
+                    let Some((nc, e)) = take else { continue };
+                    sym.colors[slot] = nc;
+                    eps[p] = e;
+                    (base[p], slope[p]) = lanes_of(&e);
+                    for i in 0..n {
+                        if lay.labels[i] as usize == p {
+                            for pl in 0..planes {
+                                errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
+                            }
+                        }
+                    }
+                    idle = 0;
+                    continue;
+                }
                 let c = v / 2;
                 let pl = plane_of(c);
                 let slot = 2 * nv * p + v;
@@ -1060,6 +1229,11 @@ struct Layout {
     /// The texels' squared distance from their partitions' lines, which no weight grid or range
     /// can remove.
     orth: f32,
+    /// As `orth` with base+scale endpoints (lines through black) in some partitions, and the mask
+    /// of those partitions: all of them, then (two or three partitions) the one or two whose lines
+    /// pass nearest black. `f32::MAX` where they do not apply (alpha, a second plane, too few
+    /// partitions).
+    scaled: [(f32, u8); 3],
 }
 
 impl Layout {
@@ -1087,7 +1261,11 @@ impl Layout {
             u2: [0.0; MAX_TEXELS],
             scale2: 0.0,
             orth: 0.0,
+            scaled: [(f32::MAX, 0); 3],
         };
+        let rgb = t.ch == 3 && ccs == NO_CCS;
+        // Per partition, the squared distance from its line and from its line through black.
+        let mut off = [(0f32, 0f32); 3];
         for (o, &x) in l.labels[..n].iter_mut().zip(lab) {
             *o = x as u8;
         }
@@ -1115,9 +1293,40 @@ impl Layout {
                 .map(|a| axis[a] * (0..4).map(|b| cov[a][b] * axis[b]).sum::<f32>())
                 .sum();
             let total: f32 = (0..t.ch).map(|c| cov[c][c]).sum();
-            l.orth += (total - along).max(0.0);
+            off[p].0 = (total - along).max(0.0);
+            l.orth += off[p].0;
+            if rgb {
+                // The same about the line through black: the uncentered scatter.
+                let mut raw = [[0f32; 4]; 4];
+                for a in 0..3 {
+                    for b in 0..3 {
+                        raw[a][b] = ms[p].ss[a.min(b)][a.max(b)] as f32;
+                    }
+                }
+                let ax = dominant(&raw);
+                let along: f32 = (0..3)
+                    .map(|a| ax[a] * (0..3).map(|b| raw[a][b] * ax[b]).sum::<f32>())
+                    .sum();
+                off[p].1 = (raw[0][0] + raw[1][1] + raw[2][2] - along).max(0.0);
+            }
             axes[p] = axis;
             means[p] = mean;
+        }
+        if rgb {
+            let parts = count as usize;
+            let all = (1u8 << count) - 1;
+            l.scaled[0] = (off[..parts].iter().map(|o| o.1).sum(), all);
+            // The partitions by what base+scale endpoints add to their distance, least first.
+            let mut by: [usize; 3] = [0, 1, 2];
+            by[..parts].sort_by(|&a, &b| (off[a].1 - off[a].0).total_cmp(&(off[b].1 - off[b].0)));
+            let mut mask = 0u8;
+            for k in 1..parts {
+                mask |= 1 << by[k - 1];
+                let orth = (0..parts)
+                    .map(|p| if mask >> p & 1 != 0 { off[p].1 } else { off[p].0 })
+                    .sum();
+                l.scaled[k] = (orth, mask);
+            }
         }
         let mut u = [0f32; MAX_TEXELS];
         for i in 0..n {
@@ -1231,8 +1440,113 @@ impl Moments {
     }
 }
 
-/// The block mode and endpoint range of mode `mi` of `grid` for layout `lay`, with RGBA endpoints
-/// if `ce` is 1.
+/// Power steps toward a partition's line in [`off_lines_rgb`].
+const LINE_STEPS: usize = 3;
+
+/// The texels' squared distance from the lines through partitions 0..`count` (by moments `ms`), in
+/// channels 0..`ch`.
+fn off_lines(ms: &[Moments; 3], count: usize, ch: usize) -> f32 {
+    let mut off = 0.0;
+    for m in &ms[..count] {
+        let (_, cov) = m.mean_cov();
+        let a = dominant(&cov);
+        let along: f32 = (0..4)
+            .map(|i| a[i] * (0..4).map(|j| cov[i][j] * a[j]).sum::<f32>())
+            .sum();
+        off += ((0..ch).map(|c| cov[c][c]).sum::<f32>() - along).max(0.0);
+    }
+    off
+}
+
+/// [`off_lines`] for RGB texels by labels `lab` (as lanes) into `count` partitions, whose moments
+/// all together are `total`: the last partition's are what the others leave. Each partition's
+/// line is found by `LINE_STEPS` power steps from the block's dominant `axis`: on 8 Kodak images,
+/// 3 rank as well as 8 (and 1 nearly so).
+fn off_lines_rgb(t: &Texels, lab: &[i16; MAX_TEXELS], count: usize, total: &Moments, axis: &[f32; 4]) -> f32 {
+    let line = |n: u32, s: [u32; 3], ss: [u32; 6]| -> f32 {
+        if n == 0 {
+            return 0.0;
+        }
+        let k = 1.0 / n as f32;
+        let s = s.map(|x| x as f32);
+        let ss = ss.map(|x| x as f32);
+        let c = [
+            ss[0] - s[0] * s[0] * k,
+            ss[1] - s[0] * s[1] * k,
+            ss[2] - s[0] * s[2] * k,
+            ss[3] - s[1] * s[1] * k,
+            ss[4] - s[1] * s[2] * k,
+            ss[5] - s[2] * s[2] * k,
+        ];
+        let tr = c[0] + c[3] + c[5];
+        if tr < 1e-3 {
+            return 0.0;
+        }
+        // Power steps scaled by the trace, from the block's dominant axis.
+        let a = c.map(|x| x / tr);
+        let mut v = [axis[0], axis[1], axis[2]];
+        let mul = |a: &[f32; 6], v: [f32; 3]| {
+            [
+                a[0] * v[0] + a[1] * v[1] + a[2] * v[2],
+                a[1] * v[0] + a[3] * v[1] + a[4] * v[2],
+                a[2] * v[0] + a[4] * v[1] + a[5] * v[2],
+            ]
+        };
+        for _ in 0..LINE_STEPS {
+            v = mul(&a, v);
+        }
+        let vv = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        if vv < 1e-30 {
+            // No direction found (the start was orthogonal): rank it as off every line.
+            return tr;
+        }
+        let cv = mul(&c, v);
+        (tr - (v[0] * cv[0] + v[1] * cv[1] + v[2] * cv[2]) / vv).max(0.0)
+    };
+    let nl = t.n.next_multiple_of(8);
+    let ones = I16x8::splat(1);
+    let mut rn = total.n;
+    let mut rs = [total.s[0], total.s[1], total.s[2]];
+    let tss = &total.ss;
+    let mut rss = [tss[0][0], tss[0][1], tss[0][2], tss[1][1], tss[1][2], tss[2][2]];
+    let mut off = 0.0;
+    for p in 0..count - 1 {
+        let pm = I16x8::splat(p as i16);
+        let mut nn = I32x4::zero();
+        let mut sv = [I32x4::zero(); 3];
+        let mut ssv = [I32x4::zero(); 6];
+        for k in (0..nl).step_by(8) {
+            let msk = I16x8::load(&lab[k..]).eq(pm);
+            nn = nn.add(msk.sq_pairs());
+            let x: [I16x8; 3] = std::array::from_fn(|c| I16x8::load(&t.xl[c][k..]).and(msk));
+            for c in 0..3 {
+                sv[c] = sv[c].add(x[c].madd(ones));
+            }
+            ssv[0] = ssv[0].add(x[0].madd(x[0]));
+            ssv[1] = ssv[1].add(x[0].madd(x[1]));
+            ssv[2] = ssv[2].add(x[0].madd(x[2]));
+            ssv[3] = ssv[3].add(x[1].madd(x[1]));
+            ssv[4] = ssv[4].add(x[1].madd(x[2]));
+            ssv[5] = ssv[5].add(x[2].madd(x[2]));
+        }
+        let n = nn.sum() as u32;
+        let s = sv.map(|v| v.sum() as u32);
+        let ss = ssv.map(|v| v.sum() as u32);
+        off += line(n, s, ss);
+        rn -= n;
+        for c in 0..3 {
+            rs[c] -= s[c];
+        }
+        for j in 0..6 {
+            rss[j] -= ss[j];
+        }
+    }
+    off + line(rn, rs, rss)
+}
+
+/// The block mode and endpoint range of mode `mi` of `grid` for layout `lay`, with RGB endpoints
+/// if `ce` is 0, RGBA if 1, RGB base+scale if 2, and RGB with one or two partitions base+scale if
+/// 3 or 4.
 fn mode_of(lay: &Layout, grid: &Grid, mi: usize, ce: usize) -> (BlockMode, u8) {
     if lay.ccs < NO_CCS {
         let (bm, c) = grid.dual[mi];
@@ -1246,7 +1560,8 @@ fn mode_of(lay: &Layout, grid: &Grid, mi: usize, ce: usize) -> (BlockMode, u8) {
 /// Encodes one candidate exactly: quantized grid weights `codes` (planes interleaved) on `grid`
 /// with mode `bm`, CEM `cem` in every partition of `lay` at endpoint range `cq`; refits endpoints,
 /// quantizes them, and keeps it if it beats `best`. Returns each partition's endpoints
-/// (unquantized values).
+/// (unquantized values). With partitions in `scale` (a mask), `cq` is the range for those
+/// base+scale and the rest direct, and only that is tried.
 #[expect(clippy::too_many_arguments, reason = "one candidate's fields")]
 fn try_candidate(
     t: &Texels,
@@ -1254,6 +1569,7 @@ fn try_candidate(
     grid: &Grid,
     bm: BlockMode,
     cem: u8,
+    scale: u8,
     cq: u8,
     codes: &mut [u8],
     best: &mut Best,
@@ -1276,8 +1592,8 @@ fn try_candidate(
     let cu = &COLOR_UNQUANT[cq as usize];
     let mut cc = [([0u8; 4], [0u8; 4]); 3];
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    let fits = refit(t, &w[0], &w[1], ccs, &lay.lab16, lay.count);
-    for (p, &(f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
+    let mut fits = refit(t, &w[0], &w[1], ccs, &lay.lab16, lay.count);
+    for (p, &(f0, f1)) in fits.clone().iter().enumerate().take(lay.count as usize) {
         let mut c0: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f0[ch])]);
         let mut c1: [u8; 4] = std::array::from_fn(|ch| cqt[round_pos(f1[ch])]);
         let un = |c: [u8; 4]| -> [i32; 4] {
@@ -1295,6 +1611,7 @@ fn try_candidate(
             if lay.count == 1 {
                 std::mem::swap(&mut c0, &mut c1);
                 std::mem::swap(&mut e0, &mut e1);
+                fits[p] = (f1, f0);
                 for c in &mut codes[..kk] {
                     *c = tb.winv[q][*c as usize];
                 }
@@ -1313,31 +1630,94 @@ fn try_candidate(
         cc[p] = (c0, c1);
         eps[p] = (e0, e1);
     }
-    let err = t.error(&eps, &lay.lab16, lay.count as usize, &w[0], &w[1], ccs, best.err);
-    if err < best.err {
-        let mut colors = [0u8; 18];
-        let nv = if cem == 12 { 4 } else { 3 };
-        for p in 0..lay.count as usize {
-            for ch in 0..nv {
-                colors[2 * nv * p + 2 * ch] = cc[p].0[ch];
-                colors[2 * nv * p + 2 * ch + 1] = cc[p].1[ch];
+    let parts = lay.count as usize;
+    let mut colors = [0u8; 18];
+    let nv = if cem == 12 { 4 } else { 3 };
+    for p in 0..parts {
+        for ch in 0..nv {
+            colors[2 * nv * p + 2 * ch] = cc[p].0[ch];
+            colors[2 * nv * p + 2 * ch + 1] = cc[p].1[ch];
+        }
+    }
+    let keep = |eps: &[([i32; 4], [i32; 4]); 3], cems: [u8; 4], cq: u8, colors: &[u8; 18], best: &mut Best| -> u32 {
+        let err = t.error(eps, &lay.lab16, parts, &w[0], &w[1], ccs, best.err);
+        if err < best.err {
+            let mut weights = [0u8; 64];
+            weights[..kk].copy_from_slice(&codes[..kk]);
+            best.err = err;
+            best.sym = Some(Symbolic {
+                mode: bm,
+                partitions: lay.count,
+                seed: lay.seed,
+                cems,
+                ccs: if bm.dual { lay.ccs as u8 } else { 0 },
+                colors: *colors,
+                color_quant: cq,
+                weights,
+            });
+        }
+        err
+    };
+    let all = (1u8 << parts) - 1;
+    if scale != 0 && scale != all {
+        // Mixed: the direct partitions as above (at this range), the rest base+scale.
+        let mut ac = [0u8; 18];
+        let mut aeps = eps;
+        let mut cems = [8u8; 4];
+        let mut at = 0;
+        for p in 0..parts {
+            if scale >> p & 1 != 0 {
+                cems[p] = 6;
+                let (f0, f1) = &fits[p];
+                quant_scale(f0, f1, false, cq as usize, &mut ac[at..at + 4]);
+                let v: [i32; 4] = std::array::from_fn(|i| cu[ac[at + i] as usize] as i32);
+                aeps[p] = super::decode::endpoints(6, &v).expect("LDR mode");
+                at += 4;
+            } else {
+                for ch in 0..3 {
+                    ac[at + 2 * ch] = cc[p].0[ch];
+                    ac[at + 2 * ch + 1] = cc[p].1[ch];
+                }
+                at += 6;
             }
         }
-        let mut weights = [0u8; 64];
-        weights[..kk].copy_from_slice(&codes[..kk]);
-        best.err = err;
-        best.sym = Some(Symbolic {
-            mode: bm,
-            partitions: lay.count,
-            seed: lay.seed,
-            cems: [cem; 4],
-            ccs: if bm.dual { lay.ccs as u8 } else { 0 },
-            colors,
-            color_quant: cq,
-            weights,
-        });
+        keep(&aeps, cems, cq, &ac, best);
+        return aeps;
     }
-    eps
+    let mut out = if scale != 0 {
+        (u32::MAX, eps)
+    } else {
+        (keep(&eps, [cem; 4], cq, &colors, best), eps)
+    };
+    // The same weights with base+offset endpoints (same range: as many values) and base+scale
+    // endpoints (a finer range: fewer values).
+    let scale_cem = if cem == 12 { 10 } else { 6 };
+    let alts = [cem + 1, scale_cem];
+    for &alt in &alts[(scale != 0) as usize..] {
+        let Some(acq) = color_range(bm, lay.count, &[alt; 4]) else {
+            continue;
+        };
+        let k = cem_values(alt);
+        let mut ac = [0u8; 18];
+        let mut aeps = [([0i32; 4], [0i32; 4]); 3];
+        for p in 0..parts {
+            let (f0, f1) = &fits[p];
+            let codes = &mut ac[k * p..k * p + k];
+            if alt == scale_cem {
+                quant_scale(f0, f1, alt == 10, acq as usize, codes);
+            } else {
+                quant_offset(f0, f1, nv, acq as usize, codes);
+            }
+            let cu = &COLOR_UNQUANT[acq as usize];
+            let v: [i32; 8] = std::array::from_fn(|i| if i < k { cu[codes[i] as usize] as i32 } else { 0 });
+            aeps[p] = super::decode::endpoints(alt, &v[..k]).expect("LDR mode");
+        }
+        let err = keep(&aeps, [alt; 4], acq, &ac, best);
+        if err < out.0 {
+            out = (err, aeps);
+        }
+    }
+    out.1
 }
 
 /// A void-extent block of one color.
@@ -1467,25 +1847,22 @@ fn rank_patterns_generic(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, w
 
 #[inline(always)]
 fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, want: usize) -> Vec<usize> {
-    // Sorted (misses, index), at most `want` long.
-    let mut top: Vec<(u32, usize)> = Vec::with_capacity(want + 1);
-    let mut offer = |miss: u32, i: usize| {
-        if top.len() == want && miss >= top[want - 1].0 {
-            return;
-        }
-        let at = top.partition_point(|e| e.0 <= miss);
-        top.insert(at, (miss, i));
-        top.truncate(want);
-    };
+    // Each pattern's misses (at most `n`, so under 256), then a counting sort by (misses, index).
+    let mut miss = [0u8; 1024];
+    let mut hist = [0u16; 256];
     let pop = |a: &[u64], b: &[u64; 3]| -> u32 { (0..NW).map(|w| (a[w] & b[w]).count_ones()).sum() };
-    if k == 2 {
-        for (i, p) in pm.as_chunks::<NW>().0.iter().enumerate() {
+    let count = if k == 2 {
+        let pats = pm.as_chunks::<NW>().0;
+        for (o, p) in miss.iter_mut().zip(pats) {
             let x: u32 = (0..NW).map(|w| (p[w] ^ km[0][w]).count_ones()).sum();
-            offer(n - x.max(n - x), i);
+            *o = (n - x.max(n - x)) as u8;
         }
+        pats.len()
     } else {
         let size: [u32; 3] = std::array::from_fn(|b| km[b][..NW].iter().map(|w| w.count_ones()).sum());
-        for (i, p) in pm.chunks_exact(2 * NW).enumerate() {
+        let pats = pm.chunks_exact(2 * NW);
+        let count = pats.len();
+        for (o, p) in miss.iter_mut().zip(pats) {
             let (p0, p1) = p.split_at(NW);
             let a = [pop(p0, &km[0]), pop(p0, &km[1]), pop(p0, &km[2])];
             let b = [pop(p1, &km[0]), pop(p1, &km[1]), pop(p1, &km[2])];
@@ -1496,10 +1873,33 @@ fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, 
                 .max(a[1] + b[2] + c[0])
                 .max(a[2] + b[0] + c[1])
                 .max(a[2] + b[1] + c[0]);
-            offer(n - best, i);
+            *o = (n - best) as u8;
+        }
+        count
+    };
+    for &m in &miss[..count] {
+        hist[m as usize] += 1;
+    }
+    // The fewest misses that take in `want` patterns, and where each count's patterns start.
+    let mut at = [0u16; 256];
+    let (mut total, mut thr) = (0usize, 255);
+    for m in 0..256 {
+        at[m] = total as u16;
+        total += hist[m] as usize;
+        if total >= want {
+            thr = m;
+            break;
         }
     }
-    top.into_iter().map(|e| e.1).collect()
+    let mut out = vec![0usize; total];
+    for (i, &m) in miss[..count].iter().enumerate() {
+        if m as usize <= thr {
+            out[at[m as usize] as usize] = i;
+            at[m as usize] += 1;
+        }
+    }
+    out.truncate(want);
+    out
 }
 
 /// Candidates whose decimation error is measured, per candidate encoded, unless an effort level
@@ -1511,6 +1911,23 @@ const SHORTLIST: usize = 4;
 /// gains 0.03-0.08 dB and 0.0005-0.0015 SSIM at 6x6 and 8x8 (at 4x4, SSIM up and PSNR within
 /// 0.03 dB). The pick among the candidates encoded is still by their exact error.
 const DECIMATION_BIAS: f32 = 1.5;
+
+/// How much a candidate's exact error exceeds its estimate for direct endpoints, relative to one
+/// plane and partition, in blocks of up to 16 texels: two and three partitions and a second
+/// plane come out better than estimated. Measured as mean log(exact / estimate) over the
+/// candidates tried on 8 Kodak images at 4x4 (e^-0.20, e^-0.24, e^-0.18); scaling scores by them
+/// gains 0.07 dB there for about 3% more time. Base+scale estimates run the other way, but
+/// scaling those up loses (base+scale suits flat, dark texels SSIM weighs), and at 6x6 and 8x8
+/// the factors trade SSIM for PSNR.
+fn calibration(n: usize, count: u8, v: usize, dual: bool) -> f32 {
+    match (n <= 16, dual, v, count) {
+        (false, ..) => 1.0,
+        (_, true, ..) => 0.84,
+        (_, _, 0, 2) => 0.82,
+        (_, _, 0, 3) => 0.79,
+        _ => 1.0,
+    }
+}
 
 /// Settings for one effort level.
 #[derive(Clone, Copy)]
@@ -1533,11 +1950,19 @@ struct Effort {
     /// (`line[2]`) are tried only when the texels' mean squared distance from one line, per
     /// channel, is at least this.
     line: [f32; 3],
+    /// The patterns ranked best by agreement with k-means, if more than are tried, re-ranked by how
+    /// far their texels lie from their partitions' lines before the best are tried.
+    rerank: usize,
 }
 
 /// The settings for `effort` on a footprint of `texels` texels.
 fn effort_settings(effort: u8, texels: usize) -> Effort {
     let mut e = effort_table(effort, texels);
+    // Larger footprints gain less from line-fit re-ranking: on 8 Kodak images at effort 2, 32
+    // patterns score as 64 at 8x8 (at 4x4, 64 gains 0.05 dB over 32).
+    if texels > 16 && effort != u8::MAX {
+        e.rerank /= 2;
+    }
     if e.shortlist == 0 {
         e.shortlist = e.candidates * SHORTLIST;
     }
@@ -1556,7 +1981,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
                 .split(',')
                 .map(|x| x.parse().unwrap())
                 .collect();
-            v.resize(10, 0.0);
+            v.resize(11, 0.0);
             let u = |i: usize| v[i] as usize;
             Effort {
                 patterns: [u(0), u(1)],
@@ -1566,6 +1991,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
                 polish: u(4),
                 dual: u(5),
                 line: [v[6] as f32, v[7] as f32, v[8] as f32],
+                rerank: u(10),
             }
         });
     }
@@ -1580,6 +2006,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 2,
             dual: 1,
             line: [8.0, 16.0, 2.0],
+            rerank: 0,
         },
         0 => Effort {
             patterns: [1, 0],
@@ -1589,6 +2016,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 3,
             dual: 1,
             line: [8.0, 16.0, 2.0],
+            rerank: 0,
         },
         1 => Effort {
             patterns: [2, 0],
@@ -1598,6 +2026,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 1,
             dual: 1,
             line: [2.0, 16.0, 0.0],
+            rerank: 64,
         },
         2 => Effort {
             patterns: [2, 1],
@@ -1607,6 +2036,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 2,
             dual: 2,
             line: [2.0, 16.0, 0.0],
+            rerank: 64,
         },
         3 => Effort {
             patterns: [3, 1],
@@ -1616,6 +2046,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 2,
             dual: 2,
             line: [1.0, 8.0, 0.0],
+            rerank: 64,
         },
         4 => Effort {
             patterns: [4, 2],
@@ -1625,6 +2056,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 3,
             dual: 4,
             line: [1.0, 8.0, 0.0],
+            rerank: 64,
         },
         5 => Effort {
             patterns: [6, 3],
@@ -1634,6 +2066,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 4,
             dual: 4,
             line: [0.5, 4.0, 0.0],
+            rerank: 64,
         },
         6 => Effort {
             patterns: [8, 4],
@@ -1643,6 +2076,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 4,
             dual: 4,
             line: [0.5, 4.0, 0.0],
+            rerank: 64,
         },
         7 => Effort {
             patterns: [12, 6],
@@ -1652,6 +2086,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 6,
             dual: 4,
             line: [0.25, 2.0, 0.0],
+            rerank: 128,
         },
         8 => Effort {
             patterns: [16, 8],
@@ -1661,6 +2096,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 6,
             dual: 4,
             line: [0.25, 2.0, 0.0],
+            rerank: 128,
         },
         _ => Effort {
             patterns: [32, 16],
@@ -1670,6 +2106,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 8,
             dual: 4,
             line: [0.0, 0.0, 0.0],
+            rerank: 256,
         },
     }
 }
@@ -1738,7 +2175,17 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             continue;
         }
         let km = kmeans(&t, k, &axis1, &mean1);
-        for i in rank_patterns(fp, k, &km, n as u32, want) {
+        let mut ranked = rank_patterns(fp, k, &km, n as u32, want.max(es.rerank));
+        if es.rerank > want {
+            let off = |i: usize| match t.ch {
+                3 => off_lines_rgb(&t, &pats[i].lab, k, &ms1[0], &axis1),
+                _ => off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch),
+            };
+            let mut by: Vec<(f32, usize)> = ranked.iter().map(|&i| (off(i), i)).collect();
+            by.sort_by(|a, b| a.0.total_cmp(&b.0));
+            ranked = by.into_iter().map(|e| e.1).collect();
+        }
+        for &i in ranked.iter().take(want) {
             let ms = Moments::of(&t, &pats[i].lab, k as u8);
             layouts.push(Layout::new(&t, k as u8, pats[i].seed, &pats[i].lab, NO_CCS, &ms, None));
         }
@@ -1782,6 +2229,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let span = lay.scale[..n].iter().sum::<f32>() + if dual { n as f32 * lay.scale2 } else { 0.0 };
         let kind = est_kind(lay.count, dual, ce);
         spans.push((span, kind));
+        let calib: [f32; 4] = std::array::from_fn(|v| calibration(n, lay.count, v, dual));
         // The last score's bits: no estimate above it goes in.
         let mut thr = (top[short - 1] >> 32) as u32;
         // The finest grids first: they usually score best, so the bound tightens soonest.
@@ -1792,39 +2240,56 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 derr += sp2[bh][bw] - sp2[gy][gx];
             }
             derr *= DECIMATION_BIAS;
-            for (ei, e) in grid.est[kind].iter().enumerate() {
-                // No later mode has less weight noise or less endpoint noise than this bound.
-                if ord(derr + (span * e.wnoise + per_texel * e.cnoise_after + lay.orth)) > thr {
-                    break;
+            // Direct endpoints, then the base+scale variants (numbered in the estimate index's top
+            // two bits).
+            for v in 0..4 {
+                let (kind, orth) = match v {
+                    0 => (kind, lay.orth),
+                    _ if lay.scaled[v - 1].0 == f32::MAX => continue,
+                    _ => (variant_kind(lay.count, v).0, lay.scaled[v - 1].0),
+                };
+                let flag = (v as u64) << 14;
+                for (ei, e) in grid.est[kind].iter().enumerate() {
+                    // No later mode has less weight noise or less endpoint noise than this bound.
+                    if ord(calib[v] * (derr + (span * e.wnoise + per_texel * e.cnoise_after + orth))) > thr {
+                        break;
+                    }
+                    let rest = span * e.wnoise + per_texel * e.cnoise + orth;
+                    let score = calib[v] * (derr + rest);
+                    let mut x = (ord(score) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64 | flag;
+                    if x >= top[short - 1] {
+                        continue;
+                    }
+                    // The last drops out.
+                    for k in &mut top {
+                        let lo = x.min(*k);
+                        x = x.max(*k);
+                        *k = lo;
+                    }
+                    thr = (top[short - 1] >> 32) as u32;
                 }
-                let rest = span * e.wnoise + per_texel * e.cnoise + lay.orth;
-                let score = derr + rest;
-                let mut x = (ord(score) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64;
-                if x >= top[short - 1] {
-                    continue;
-                }
-                // The last drops out.
-                for k in &mut top {
-                    let lo = x.min(*k);
-                    x = x.max(*k);
-                    *k = lo;
-                }
-                thr = (top[short - 1] >> 32) as u32;
             }
         }
     }
-    let mut cands: Vec<(f32, f32, u16, u16, u16)> = top
+    let mut cands: Vec<(f32, f32, u16, u16, u16, u8)> = top
         .iter()
         .take_while(|&&k| k != empty)
         .map(|&k| {
             let (li, gi, ei) = ((k >> 24) as u8 as usize, (k >> 16) as u8 as usize, k as u16 as usize);
+            let v = ei >> 14;
             let ((span, kind), lay) = (spans[li], &layouts[li]);
-            let e = &fp.grids[gi].est[kind][ei];
-            let rest = span * e.wnoise + per_texel * e.cnoise + lay.orth;
-            (unord((k >> 32) as u32), rest, li as u16, gi as u16, e.mi)
+            let (kind, orth) = if v > 0 {
+                (variant_kind(lay.count, v).0, lay.scaled[v - 1].0)
+            } else {
+                (kind, lay.orth)
+            };
+            let e = &fp.grids[gi].est[kind][ei & 0x3fff];
+            let rest = span * e.wnoise + per_texel * e.cnoise + orth;
+            (unord((k >> 32) as u32), rest, li as u16, gi as u16, e.mi, v as u8)
         })
         .collect();
-    let by_score = |a: &(f32, f32, u16, u16, u16), b: &(f32, f32, u16, u16, u16)| a.0.total_cmp(&b.0);
+    type Cand = (f32, f32, u16, u16, u16, u8);
+    let by_score = |a: &Cand, b: &Cand| a.0.total_cmp(&b.0);
     // Measured decimation errors by (layout, grid), and the decimated weights per plane.
     let mut measured: Vec<(u16, u16, f32)> = Vec::with_capacity(short);
     let mut decimated: Vec<[[f32; 64]; 2]> = Vec::with_capacity(short);
@@ -1844,7 +2309,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 derr
             }
         };
-        c.0 = c.1 + DECIMATION_BIAS * derr;
+        let lay = &layouts[li as usize];
+        c.0 = calibration(n, lay.count, c.5 as usize, lay.ccs < NO_CCS) * (c.1 + DECIMATION_BIAS * derr);
     }
     let keep = es.candidates.min(cands.len());
     if keep < cands.len() {
@@ -1858,16 +2324,20 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         at: (0, 0),
     };
     let mut codes = [0u8; 64];
-    for &(_, _, li, gi, mi) in &cands {
+    for &(_, _, li, gi, mi, v) in &cands {
         let lay = &layouts[li as usize];
         let grid = &fp.grids[gi as usize];
+        let (ce, scale) = match v {
+            0 => (ce, 0),
+            _ => (variant_kind(lay.count, v as usize).1, lay.scaled[v as usize - 1].1),
+        };
         let (bm, cq) = mode_of(lay, grid, mi as usize, ce);
         let q = bm.quant as usize;
         let planes = 1 + bm.dual as usize;
         let at = measured.iter().position(|m| m.0 == li && m.1 == gi).expect("measured");
         quantize_decimated(grid, q, planes, &decimated[at], &mut codes);
         let before = best.err;
-        let mut eps = try_candidate(&t, lay, grid, bm, cem, cq, &mut codes, &mut best);
+        let mut eps = try_candidate(&t, lay, grid, bm, cem, scale, cq, &mut codes, &mut best);
         for _ in 0..es.refine {
             // Re-derive ideal weights from the quantized endpoints, then decimate and re-encode.
             let mut uu = [0f32; MAX_TEXELS];
@@ -1893,7 +2363,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 }
             }
             quantize(grid, q, planes, &uu[..n], &uu2[..n], &mut codes);
-            eps = try_candidate(&t, lay, grid, bm, cem, cq, &mut codes, &mut best);
+            eps = try_candidate(&t, lay, grid, bm, cem, scale, cq, &mut codes, &mut best);
         }
         if best.err < before {
             best.at = (li as usize, gi as usize);
