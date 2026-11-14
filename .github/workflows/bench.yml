@@ -1,5 +1,6 @@
 # ASTC benchmark on a fresh GitHub-hosted VM: mipple (and optionally a base build) against Arm's
-# astcenc on the Kodak images, one pinned core, the encoders taking turns per image.
+# astcenc and Intel's ISPC Texture Compressor on the Kodak images, one pinned core, the encoders
+# taking turns per image.
 #
 # Absolute times depend on whatever CPU the runner lands on (the summary names it); compare rows
 # within one run. Running with base = head measures the run's own noise.
@@ -22,6 +23,10 @@ on:
       astcenc:
         description: astcenc presets (blank to skip astcenc)
         default: fast,medium,thorough
+      ispc:
+        description: Build tools/competitors bcn_harness with ISPC and run its ASTC fast profile
+        type: boolean
+        default: true
       images:
         description: Kodak images (first N of 24)
         default: "24"
@@ -44,6 +49,7 @@ jobs:
       PRESETS: ${{ inputs.astcenc }}
       IMAGES: ${{ inputs.images }}
       RUNS: ${{ inputs.runs }}
+      ISPC: ${{ inputs.ispc }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -78,10 +84,27 @@ jobs:
             echo "f1d576f0801e7701548da78d782f4bf70dfde3673a238d1a2ac0ebd3511b2f37  $zip" | sha256sum -c
             unzip -j $zip bin/astcenc-avx2 -d bin
           fi
+      - name: Build bcn_harness with ISPC 1.32.0
+        if: inputs.ispc
+        run: |
+          # The encoder sources at the commits the local harness was measured with.
+          fetch() { mkdir -p tp/$1 && git -C tp/$1 init -q && git -C tp/$1 fetch -q --depth 1 https://github.com/$2 $3 && git -C tp/$1 checkout -q FETCH_HEAD; }
+          fetch ISPCTextureCompressor GameTechDev/ISPCTextureCompressor 79ddbc90334fc31edd438e68ccb0fe99b4e15aab
+          fetch basis_universal BinomialLLC/basis_universal 073eb6a0a34a23d77e75e54f41dcd9653a52da83
+          fetch bc7enc_rdo richgel999/bc7enc_rdo b9438627eef73a1157e84201b6fa6eb2ffd6d9f0
+          fetch icbc castano/icbc f06e053377feaaa1fe6d433459f625622f8081d9
+          fetch stb nothings/stb d14d46f6b44456eb88beac58cba833a4135d4c89
+          tgz=ispc-v1.32.0-linux.tar.gz
+          curl -fsSL -o $tgz https://github.com/ispc/ispc/releases/download/v1.32.0/$tgz
+          echo "faf266bda2b702d68976ffd26bbd36c1ddba43424cc3c44f25b092cd1aa1f64a  $tgz" | sha256sum -c
+          mkdir ispc && tar -xzf $tgz -C ispc --strip-components=1
+          cmake -S head/tools/competitors -B build-harness -DTP="$PWD/tp" -DISPC="$PWD/ispc/bin/ispc" -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-harness -j "$(nproc)"
+          cp build-harness/bcn_harness bin/
       - name: Run
         run: |
           args=(--limit "$IMAGES" --runs "$RUNS" --efforts "$EFFORTS" --footprints "$FOOTPRINTS"
-                --mipple bin/mipple-head --harness none --out out --cpu 1)
+                --mipple bin/mipple-head --harness "$( [ "$ISPC" = true ] && echo bin/bcn_harness || echo none )" --out out --cpu 1)
           [ -n "$BASE" ] && args+=(--mipple-base bin/mipple-base)
           if [ -n "$PRESETS" ]; then args+=(--astcenc bin/astcenc-avx2 --astcenc-presets "$PRESETS")
           else args+=(--astcenc none); fi
@@ -91,6 +114,7 @@ jobs:
             echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) logical CPUs"
             echo "- mipple: \`$HEAD\` ($(git -C head rev-parse --short HEAD))"
             [ -n "$BASE" ] && echo "- base mipple: \`$BASE\` ($(git -C base rev-parse --short HEAD))"
+            [ "$ISPC" = true ] && echo "- ISPC Texture Compressor 79ddbc9 (ISPC 1.32.0), fast profile"
             echo
           } > summary.md
           python3 head/scripts/compete_astc.py head/test-images/kodak "${args[@]}" | tee -a summary.md
